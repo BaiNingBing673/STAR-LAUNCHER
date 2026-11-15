@@ -36,9 +36,6 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Set up Android SDK build-tools
-        uses: android-actions/setup-android@v3
-
       - name: Download JRE 8 component
         uses: dawidd6/action-download-artifact@v9
         with:
@@ -83,7 +80,12 @@ jobs:
         run: |
           set -euo pipefail
           APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk"
-          BUILD_TOOLS_DIR=$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          BUILD_TOOLS_DIR=$(find "$SDK_DIR/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$BUILD_TOOLS_DIR" ]; then
+            yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0" >/dev/null
+            BUILD_TOOLS_DIR="$SDK_DIR/build-tools/34.0.0"
+          fi
           "$BUILD_TOOLS_DIR/aapt2" dump badging "$APK_OUT" | tee logs/debug-badging.txt
           grep -q "package: name='com.star.launcher.debug'" logs/debug-badging.txt
           grep -q "versionCode='${{ steps.meta.outputs.version_code }}'" logs/debug-badging.txt
@@ -135,9 +137,6 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-
-      - name: Set up Android SDK build-tools
-        uses: android-actions/setup-android@v3
 
       - name: Download JRE 8 component
         uses: dawidd6/action-download-artifact@v9
@@ -209,7 +208,12 @@ jobs:
         run: |
           set -euo pipefail
           APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
-          BUILD_TOOLS_DIR=$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          BUILD_TOOLS_DIR=$(find "$SDK_DIR/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$BUILD_TOOLS_DIR" ]; then
+            yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0" >/dev/null
+            BUILD_TOOLS_DIR="$SDK_DIR/build-tools/34.0.0"
+          fi
           "$BUILD_TOOLS_DIR/aapt2" dump badging "$APK_OUT" | tee logs/release-badging.txt
           grep -q "package: name='com.star.launcher'" logs/release-badging.txt
           grep -q "versionCode='${{ steps.meta.outputs.version_code }}'" logs/release-badging.txt
