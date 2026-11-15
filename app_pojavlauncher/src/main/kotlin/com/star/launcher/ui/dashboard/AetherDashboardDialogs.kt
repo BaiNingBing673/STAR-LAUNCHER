@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +30,7 @@ import com.star.launcher.instance.InstanceContentSummary
 import com.star.launcher.instance.InstanceManager
 import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.liquid.StarGlassDialog
 import kotlin.math.roundToInt
 
 @Composable
@@ -56,7 +56,7 @@ fun CreateInstanceDialog(
     var customJvmArgs by remember { mutableStateOf("") }
     val hasValidVersion = InstanceManager.isValidVersionId(selectedVersion)
 
-    AlertDialog(
+    StarGlassDialog(
         onDismissRequest = onDismiss,
         title = { Text("Create Isolated Instance") },
         text = {
@@ -180,7 +180,7 @@ fun InstanceSettingsDialog(
     var controlMapPath by remember(instance.instanceId) { mutableStateOf(instance.controlMapPath.orEmpty()) }
     val hasValidVersion = InstanceManager.isValidVersionId(versionId)
 
-    AlertDialog(
+    StarGlassDialog(
         onDismissRequest = onDismiss,
         title = { Text("Instance Settings") },
         text = {

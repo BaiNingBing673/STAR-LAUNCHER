@@ -14,6 +14,7 @@ import org.lwjgl.glfw.CallbackBridge;
 public class LeftClickGesture extends ValidatorGesture {
     public static final int FINGER_STILL_THRESHOLD = (int) Tools.dpToPx(9);
     private float mGestureStartX, mGestureStartY, mGestureEndX, mGestureEndY;
+    private float mCumulativeDistance;
     private boolean mMouseActivated;
 
     public LeftClickGesture(Handler handler) {
@@ -21,9 +22,14 @@ public class LeftClickGesture extends ValidatorGesture {
     }
 
     public final void inputEvent() {
+        inputEventAt(CallbackBridge.mouseX, CallbackBridge.mouseY);
+    }
+
+    public final void inputEventAt(float startX, float startY) {
         if(submit()) {
-            mGestureStartX = mGestureEndX = CallbackBridge.mouseX;
-            mGestureStartY = mGestureEndY = CallbackBridge.mouseY;
+            mGestureStartX = mGestureEndX = startX;
+            mGestureStartY = mGestureEndY = startY;
+            mCumulativeDistance = 0f;
         }
     }
 
@@ -37,7 +43,8 @@ public class LeftClickGesture extends ValidatorGesture {
         if (!StarHudInputManager.getInstance().getInputBridge().isGrabbing()) {
             return true;
         }
-        boolean fingerStill = LeftClickGesture.isFingerStill(mGestureStartX, mGestureStartY, mGestureEndX, mGestureEndY, FINGER_STILL_THRESHOLD);
+        boolean fingerStill = mCumulativeDistance <= FINGER_STILL_THRESHOLD
+                && LeftClickGesture.isFingerStill(mGestureStartX, mGestureStartY, mGestureEndX, mGestureEndY, FINGER_STILL_THRESHOLD);
         // If the finger is still, fire the gesture using reference-counted lease.
         if(fingerStill) {
             mMouseActivated = StarHudInputManager.getInstance().acquireMouseLease(
@@ -54,6 +61,7 @@ public class LeftClickGesture extends ValidatorGesture {
 
     @Override
     public void onGestureCancelled(boolean isSwitching) {
+        mCumulativeDistance = 0f;
         if(mMouseActivated) {
             mMouseActivated = false;
             StarHudInputManager.getInstance().releaseLeaseIfPresent("gesture:left_click", isSwitching ? "gesture_switch" : "gesture_cancel");
@@ -63,6 +71,12 @@ public class LeftClickGesture extends ValidatorGesture {
     public void setMotion(float deltaX, float deltaY) {
         mGestureEndX += deltaX;
         mGestureEndY += deltaY;
+        mCumulativeDistance += (float) Math.hypot(deltaX, deltaY);
+        if (mCumulativeDistance > FINGER_STILL_THRESHOLD) {
+            // Once total drag distance exceeds the stillness threshold, cancel immediately so
+            // slow or oscillating drags cannot become a left-click long press later.
+            cancel(false);
+        }
     }
 
     /**

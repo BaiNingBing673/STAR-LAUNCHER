@@ -16,6 +16,10 @@ import android.view.View;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.annotation.NonNull;
+
+import com.star.launcher.hud.StarHudInputManager;
+
 import net.kdt.pojavlaunch.EfficientAndroidLWJGLKeycode;
 import net.kdt.pojavlaunch.LwjglGlfwKeycode;
 import net.kdt.pojavlaunch.MainActivity;
@@ -29,7 +33,7 @@ import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 import org.lwjgl.glfw.CallbackBridge;
 
 @SuppressLint({"ViewConstructor", "AppCompatCustomView"})
-public class ControlButton extends TextView implements ControlInterface {
+public class ControlButton extends TextView implements ControlInterface, StarHudInputManager.ResetParticipant {
     private final Paint mRectPaint = new Paint();
     protected ControlData mProperties;
     private final ControlLayout mControlLayout;
@@ -39,6 +43,9 @@ public class ControlButton extends TextView implements ControlInterface {
 
     protected boolean mIsToggled = false;
     protected boolean mIsPointerOutOfBounds = false;
+    private int mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+    private boolean mPointerHeld = false;
+    private final String mMouseLeasePrefix = "ctrl_btn:" + System.identityHashCode(this) + ":";
 
     public ControlButton(ControlLayout layout, ControlData properties) {
         super(layout.getContext());
@@ -111,23 +118,96 @@ public class ControlButton extends TextView implements ControlInterface {
     }
 
 
+    private void forceReleaseHeldControl(String reason) {
+        mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+        mIsPointerOutOfBounds = false;
+        if (mPointerHeld) {
+            mPointerHeld = false;
+            sendKeyPresses(false);
+        }
+        if (mIsToggled) {
+            mIsToggled = false;
+            sendKeyPresses(false);
+            invalidate();
+        }
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility != VISIBLE) {
+            forceReleaseHeldControl("visibility_hidden");
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (!hasWindowFocus) {
+            forceReleaseHeldControl("window_focus_lost");
+        }
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        StarHudInputManager.getInstance().registerResetParticipant(this);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        forceReleaseHeldControl("detached");
+        StarHudInputManager.getInstance().unregisterResetParticipant(this);
+        super.onDetachedFromWindow();
+    }
+
+    @Override
+    public void onGlobalInputReset(@NonNull String reason) {
+        mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+        mIsPointerOutOfBounds = false;
+        mPointerHeld = false;
+        if (mIsToggled) {
+            mIsToggled = false;
+        }
+        setActivated(false);
+        invalidate();
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         switch (event.getActionMasked()){
-            case MotionEvent.ACTION_MOVE:
+            case MotionEvent.ACTION_MOVE: {
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) {
+                    return false;
+                }
+                int idx = event.findPointerIndex(mActivePointerId);
+                if (idx < 0) {
+                    if (!mProperties.isToggle && mPointerHeld) {
+                        mPointerHeld = false;
+                        sendKeyPresses(false);
+                    }
+                    mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+                    mIsPointerOutOfBounds = false;
+                    return true;
+                }
+
                 //Send the event to be taken as a mouse action
                 if(getProperties().passThruEnabled && CallbackBridge.isGrabbing()){
                     View gameSurface = getControlLayoutParent().getGameSurface();
                     if(gameSurface != null) gameSurface.dispatchTouchEvent(event);
                 }
 
+                float pointerX = event.getX(idx);
+                float pointerY = event.getY(idx);
+
                 //If out of bounds
-                if(event.getX() < getControlView().getLeft() || event.getX() > getControlView().getRight() ||
-                        event.getY() < getControlView().getTop()  || event.getY() > getControlView().getBottom()){
+                if(pointerX < 0 || pointerX > getWidth() ||
+                        pointerY < 0 || pointerY > getHeight()){
                     if(getProperties().isSwipeable && !mIsPointerOutOfBounds){
                         //Remove keys
-                        if(!triggerToggle()) {
+                        if(!triggerToggle() && mPointerHeld) {
+                            mPointerHeld = false;
                             sendKeyPresses(false);
                         }
                     }
@@ -140,34 +220,71 @@ public class ControlButton extends TextView implements ControlInterface {
                 if(mIsPointerOutOfBounds) {
                     getControlLayoutParent().onTouch(this, event);
                     //RE-press the button
-                    if(getProperties().isSwipeable && !getProperties().isToggle){
+                    if(getProperties().isSwipeable && !getProperties().isToggle && !mPointerHeld){
+                        mPointerHeld = true;
                         sendKeyPresses(true);
                     }
                 }
                 mIsPointerOutOfBounds = false;
                 break;
+            }
 
             case MotionEvent.ACTION_DOWN: // 0
-            case MotionEvent.ACTION_POINTER_DOWN: // 5
-                if(!getProperties().isToggle){
+            case MotionEvent.ACTION_POINTER_DOWN: { // 5
+                if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
+                    return true;
+                }
+                int idx = event.getActionIndex();
+                if (idx < 0 || idx >= event.getPointerCount()) {
+                    return false;
+                }
+                mActivePointerId = event.getPointerId(idx);
+                if(!getProperties().isToggle && !mPointerHeld){
+                    mPointerHeld = true;
                     sendKeyPresses(true);
                 }
                 break;
+            }
 
-            case MotionEvent.ACTION_UP: // 1
-            case MotionEvent.ACTION_CANCEL: // 3
-            case MotionEvent.ACTION_POINTER_UP: // 6
+            case MotionEvent.ACTION_POINTER_UP: { // 6
+                int idx = event.getActionIndex();
+                int pointerId = (idx >= 0 && idx < event.getPointerCount())
+                        ? event.getPointerId(idx)
+                        : MotionEvent.INVALID_POINTER_ID;
+                if (pointerId != mActivePointerId) {
+                    return false;
+                }
                 if(getProperties().passThruEnabled){
                     View gameSurface = getControlLayoutParent().getGameSurface();
                     if(gameSurface != null) gameSurface.dispatchTouchEvent(event);
                 }
                 if(mIsPointerOutOfBounds) getControlLayoutParent().onTouch(this, event);
                 mIsPointerOutOfBounds = false;
+                mActivePointerId = MotionEvent.INVALID_POINTER_ID;
 
-                if(!triggerToggle()) {
+                if(!triggerToggle() && mPointerHeld) {
+                    mPointerHeld = false;
                     sendKeyPresses(false);
                 }
                 break;
+            }
+
+            case MotionEvent.ACTION_UP: // 1
+            case MotionEvent.ACTION_CANCEL: { // 3
+                if(getProperties().passThruEnabled){
+                    View gameSurface = getControlLayoutParent().getGameSurface();
+                    if(gameSurface != null) gameSurface.dispatchTouchEvent(event);
+                }
+                if(mIsPointerOutOfBounds) getControlLayoutParent().onTouch(this, event);
+                mIsPointerOutOfBounds = false;
+                mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+
+                if(!triggerToggle() && mPointerHeld) {
+                    mPointerHeld = false;
+                    sendKeyPresses(false);
+                }
+                break;
+            }
 
             default:
                 return false;
@@ -218,15 +335,15 @@ public class ControlButton extends TextView implements ControlInterface {
                 break;
 
             case ControlData.SPECIALBTN_MOUSEPRI:
-                sendMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_LEFT, isDown);
+                dispatchManagedMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_LEFT, isDown);
                 break;
 
             case ControlData.SPECIALBTN_MOUSEMID:
-                sendMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_MIDDLE, isDown);
+                dispatchManagedMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_MIDDLE, isDown);
                 break;
 
             case ControlData.SPECIALBTN_MOUSESEC:
-                sendMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT, isDown);
+                dispatchManagedMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT, isDown);
                 break;
 
             case ControlData.SPECIALBTN_SCROLLDOWN:
@@ -252,6 +369,20 @@ public class ControlButton extends TextView implements ControlInterface {
             default:
                 Toast.makeText(getContext(), R.string.error_key_unsupported, Toast.LENGTH_LONG).show();
                 break;
+        }
+    }
+
+    private void dispatchManagedMouseButton(int mouseButton, boolean isDown) {
+        String leaseId = mMouseLeasePrefix + mouseButton;
+        String buttonId = "ctrl:" + System.identityHashCode(this);
+        String label = (mProperties != null && mProperties.name != null && !mProperties.name.isEmpty())
+                ? mProperties.name
+                : ("CTRL_MB_" + mouseButton);
+        StarHudInputManager manager = StarHudInputManager.getInstance();
+        if (isDown) {
+            manager.acquireMouseLease(leaseId, buttonId, mActivePointerId, label, mouseButton);
+        } else {
+            manager.releaseLeaseIfPresent(leaseId, "ctrl_release");
         }
     }
 

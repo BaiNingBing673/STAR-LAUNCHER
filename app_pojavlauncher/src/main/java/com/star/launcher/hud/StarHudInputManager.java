@@ -141,11 +141,14 @@ public final class StarHudInputManager {
     }
 
     private final Object mLock = new Object();
+    private final Object mDispatchLock = new Object();
     private final Map<String, LeaseInfo> mLeasesById = new LinkedHashMap<>();
     private final Map<String, Set<String>> mButtonLeases = new LinkedHashMap<>();
     private final Map<Integer, Set<String>> mKeyOwners = new HashMap<>();
     private final Map<Integer, Boolean> mKeyApplyMods = new HashMap<>();
     private final Map<Integer, Set<String>> mMouseOwners = new HashMap<>();
+    // Authoritative dispatched native state per GLFW mouse button (true = DOWN sent without matching UP yet).
+    private final Map<Integer, Boolean> mDispatchedMouseStates = new HashMap<>();
     private final Deque<String> mRecentEvents = new ArrayDeque<>(MAX_RECENT_EVENTS);
     private final CopyOnWriteArrayList<ResetParticipant> mResetParticipants = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<TelemetryListener> mTelemetryListeners = new CopyOnWriteArrayList<>();
@@ -229,67 +232,71 @@ public final class StarHudInputManager {
             int code,
             boolean applyModifiers
     ) {
-        boolean shouldSendDown = false;
+        boolean shouldSendDown;
         boolean hasOldRelease = false;
         boolean oldIsMouse = false;
         int oldCode = 0;
         boolean oldApplyMods = false;
-
-        synchronized (mLock) {
-            LeaseInfo existing = mLeasesById.get(leaseId);
-            if (existing != null) {
-                if (existing.isMouse == isMouse && existing.code == code) {
-                    // Reject hijacking by a different active pointer; ignore duplicate DOWN from same pointer.
-                    if (pointerId >= 0 && existing.pointerId >= 0 && existing.pointerId != pointerId) {
-                        recordMismatch("Conflicting pointer DOWN on " + leaseId
-                                + " (active=" + existing.pointerId + ", incoming=" + pointerId + ")");
-                        return false;
-                    }
-                    return true;
-                }
-                hasOldRelease = removeLeaseLocked(leaseId, "reacquire");
-                if (hasOldRelease) {
-                    oldIsMouse = existing.isMouse;
-                    oldCode = existing.code;
-                    oldApplyMods = existing.applyModifiers || Boolean.TRUE.equals(mKeyApplyMods.get(oldCode));
-                }
-            }
-
-            Map<Integer, Set<String>> ownerMap = isMouse ? mMouseOwners : mKeyOwners;
-            Set<String> owners = ownerMap.get(code);
-            if (owners == null) {
-                owners = new LinkedHashSet<>();
-                ownerMap.put(code, owners);
-            }
-            shouldSendDown = owners.isEmpty();
-            LeaseInfo info = new LeaseInfo(
-                    leaseId, buttonId, pointerId, actionLabel, isMouse, code, applyModifiers, System.currentTimeMillis()
-            );
-            mLeasesById.put(leaseId, info);
-            owners.add(leaseId);
-            addButtonLeaseLocked(buttonId, leaseId);
-            if (!isMouse && applyModifiers) {
-                mKeyApplyMods.put(code, Boolean.TRUE);
-            }
-            String formatted = isMouse ? ("MOUSE " + formatMouseButton(code)) : ("KEY " + formatKeycode(code));
-            recordEventLocked("DOWN " + formatted + " [" + buttonId + " p=" + pointerId + "]");
-        }
-
-        if (hasOldRelease) {
-            if (oldIsMouse) {
-                dispatchMouseSafe(oldCode, false, leaseId + ":reacquire_old");
-            } else {
-                dispatchKeySafe(oldCode, false, oldApplyMods, leaseId + ":reacquire_old");
-            }
-        }
-
         boolean bridgeSuccess = true;
-        if (shouldSendDown) {
-            bridgeSuccess = isMouse
-                    ? dispatchMouseSafe(code, true, leaseId)
-                    : dispatchKeySafe(code, true, applyModifiers, leaseId);
-            if (!bridgeSuccess) {
-                releaseLease(leaseId, "bridge_failure_rollback");
+
+        synchronized (mDispatchLock) {
+            synchronized (mLock) {
+                LeaseInfo existing = mLeasesById.get(leaseId);
+                if (existing != null) {
+                    if (existing.isMouse == isMouse && existing.code == code) {
+                        // Reject hijacking by a different active pointer; ignore duplicate DOWN from same pointer.
+                        if (pointerId >= 0 && existing.pointerId >= 0 && existing.pointerId != pointerId) {
+                            recordMismatch("Conflicting pointer DOWN on " + leaseId
+                                    + " (active=" + existing.pointerId + ", incoming=" + pointerId + ")");
+                            return false;
+                        }
+                        return true;
+                    }
+                    hasOldRelease = removeLeaseLocked(leaseId, "reacquire");
+                    if (hasOldRelease) {
+                        oldIsMouse = existing.isMouse;
+                        oldCode = existing.code;
+                        oldApplyMods = existing.applyModifiers || Boolean.TRUE.equals(mKeyApplyMods.get(oldCode));
+                    }
+                }
+
+                Map<Integer, Set<String>> ownerMap = isMouse ? mMouseOwners : mKeyOwners;
+                Set<String> owners = ownerMap.get(code);
+                if (owners == null) {
+                    owners = new LinkedHashSet<>();
+                    ownerMap.put(code, owners);
+                }
+                shouldSendDown = isMouse ? !isMousePressedLocked(code) : owners.isEmpty();
+                LeaseInfo info = new LeaseInfo(
+                        leaseId, buttonId, pointerId, actionLabel, isMouse, code, applyModifiers, System.currentTimeMillis()
+                );
+                mLeasesById.put(leaseId, info);
+                owners.add(leaseId);
+                addButtonLeaseLocked(buttonId, leaseId);
+                if (!isMouse && applyModifiers) {
+                    mKeyApplyMods.put(code, Boolean.TRUE);
+                }
+                String formatted = isMouse ? ("MOUSE " + formatMouseButton(code)) : ("KEY " + formatKeycode(code));
+                recordEventLocked("DOWN " + formatted + " [" + buttonId + " p=" + pointerId + "]");
+            }
+
+            if (hasOldRelease) {
+                if (oldIsMouse) {
+                    transitionMouseLocked(oldCode, false, leaseId + ":reacquire_old");
+                } else {
+                    dispatchKeySafe(oldCode, false, oldApplyMods, leaseId + ":reacquire_old");
+                }
+            }
+
+            if (shouldSendDown) {
+                bridgeSuccess = isMouse
+                        ? transitionMouseLocked(code, true, leaseId)
+                        : dispatchKeySafe(code, true, applyModifiers, leaseId);
+                if (!bridgeSuccess) {
+                    synchronized (mLock) {
+                        removeLeaseLocked(leaseId, "bridge_failure_rollback");
+                    }
+                }
             }
         }
         notifyTelemetry();
@@ -298,31 +305,33 @@ public final class StarHudInputManager {
 
     public void releaseLease(@NonNull String leaseId, @NonNull String reason) {
         LeaseInfo removed;
-        boolean shouldSendUp = false;
-        boolean applyMods = false;
+        boolean shouldSendUp;
+        boolean applyMods;
 
-        synchronized (mLock) {
-            removed = mLeasesById.get(leaseId);
-            if (removed == null) {
-                if (!"idle_release".equals(reason) && !"up_no_lease".equals(reason)) {
-                    recordMismatch("Release without active lease: " + leaseId + " (" + reason + ")");
+        synchronized (mDispatchLock) {
+            synchronized (mLock) {
+                removed = mLeasesById.get(leaseId);
+                if (removed == null) {
+                    if (!"idle_release".equals(reason) && !"up_no_lease".equals(reason)) {
+                        recordMismatch("Release without active lease: " + leaseId + " (" + reason + ")");
+                    }
+                    return;
                 }
-                return;
+                applyMods = removed.applyModifiers || Boolean.TRUE.equals(mKeyApplyMods.get(removed.code));
+                shouldSendUp = removeLeaseLocked(leaseId, reason);
+                if (removed.isMouse) {
+                    recordEventLocked("UP MOUSE " + formatMouseButton(removed.code) + " [" + removed.buttonId + " " + reason + "]");
+                } else {
+                    recordEventLocked("UP KEY " + formatKeycode(removed.code) + " [" + removed.buttonId + " " + reason + "]");
+                }
             }
-            applyMods = removed.applyModifiers || Boolean.TRUE.equals(mKeyApplyMods.get(removed.code));
-            shouldSendUp = removeLeaseLocked(leaseId, reason);
-            if (removed.isMouse) {
-                recordEventLocked("UP MOUSE " + formatMouseButton(removed.code) + " [" + removed.buttonId + " " + reason + "]");
-            } else {
-                recordEventLocked("UP KEY " + formatKeycode(removed.code) + " [" + removed.buttonId + " " + reason + "]");
-            }
-        }
 
-        if (shouldSendUp) {
-            if (removed.isMouse) {
-                dispatchMouseSafe(removed.code, false, leaseId);
-            } else {
-                dispatchKeySafe(removed.code, false, applyMods, leaseId);
+            if (shouldSendUp) {
+                if (removed.isMouse) {
+                    transitionMouseLocked(removed.code, false, leaseId);
+                } else {
+                    dispatchKeySafe(removed.code, false, applyMods, leaseId);
+                }
             }
         }
         notifyTelemetry();
@@ -427,25 +436,16 @@ public final class StarHudInputManager {
             recordMismatch("Tap with invalid mouseButton " + mouseButton + " from " + buttonId);
             return;
         }
-        boolean alreadyHeld;
-        synchronized (mLock) {
-            Set<String> owners = mMouseOwners.get(mouseButton);
-            alreadyHeld = owners != null && !owners.isEmpty();
-            recordEventLocked("TAP MOUSE " + formatMouseButton(mouseButton) + " [" + buttonId + " p=" + pointerId + "]");
-        }
-        if (alreadyHeld) {
-            notifyTelemetry();
-            return;
-        }
-        try {
-            mBridge.sendMouseButton(mouseButton, true);
-        } catch (Throwable t) {
-            handleBridgeException("tapMouse DOWN " + mouseButton, t);
-        } finally {
-            try {
-                mBridge.sendMouseButton(mouseButton, false);
-            } catch (Throwable t) {
-                handleBridgeException("tapMouse UP " + mouseButton, t);
+        synchronized (mDispatchLock) {
+            boolean alreadyHeld;
+            synchronized (mLock) {
+                alreadyHeld = isMousePressedLocked(mouseButton) || isDispatchedMousePressedLocked(mouseButton);
+                recordEventLocked("TAP MOUSE " + formatMouseButton(mouseButton) + " [" + buttonId + " p=" + pointerId + "]");
+            }
+            if (!alreadyHeld) {
+                if (transitionMouseLocked(mouseButton, true, "tapDown:" + buttonId)) {
+                    transitionMouseLocked(mouseButton, false, "tapUp:" + buttonId);
+                }
             }
         }
         notifyTelemetry();
@@ -484,40 +484,33 @@ public final class StarHudInputManager {
     private void releaseAllInputsInternal(@NonNull String reason, boolean forceCommonMouseUp) {
         List<Integer> keysToRelease = new ArrayList<>();
         List<Boolean> keyMods = new ArrayList<>();
-        List<Integer> mouseToRelease = new ArrayList<>();
+        Set<Integer> mouseToRelease = new LinkedHashSet<>();
 
-        synchronized (mLock) {
-            for (Integer keycode : mKeyOwners.keySet()) {
-                keysToRelease.add(keycode);
-                keyMods.add(Boolean.TRUE.equals(mKeyApplyMods.get(keycode)));
-            }
-            for (Integer btn : mMouseOwners.keySet()) {
-                mouseToRelease.add(btn);
-            }
-            mLeasesById.clear();
-            mButtonLeases.clear();
-            mKeyOwners.clear();
-            mKeyApplyMods.clear();
-            mMouseOwners.clear();
-            recordEventLocked("RESET ALL (" + reason + ")");
-        }
-
-        for (int i = 0; i < keysToRelease.size(); i++) {
-            dispatchKeySafe(keysToRelease.get(i), false, keyMods.get(i), "resetAll:" + reason);
-        }
-        for (int i = 0; i < mouseToRelease.size(); i++) {
-            dispatchMouseSafe(mouseToRelease.get(i), false, "resetAll:" + reason);
-        }
-        if (forceCommonMouseUp) {
-            int[] commonMouseButtons = new int[] {
-                    LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_LEFT,
-                    LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT,
-                    LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_MIDDLE
-            };
-            for (int btn : commonMouseButtons) {
-                if (!mouseToRelease.contains(btn)) {
-                    dispatchMouseSafe(btn, false, "emergency:" + reason);
+        synchronized (mDispatchLock) {
+            synchronized (mLock) {
+                for (Integer keycode : mKeyOwners.keySet()) {
+                    keysToRelease.add(keycode);
+                    keyMods.add(Boolean.TRUE.equals(mKeyApplyMods.get(keycode)));
                 }
+                mouseToRelease.addAll(mMouseOwners.keySet());
+                for (Map.Entry<Integer, Boolean> e : mDispatchedMouseStates.entrySet()) {
+                    if (Boolean.TRUE.equals(e.getValue())) {
+                        mouseToRelease.add(e.getKey());
+                    }
+                }
+                mLeasesById.clear();
+                mButtonLeases.clear();
+                mKeyOwners.clear();
+                mKeyApplyMods.clear();
+                mMouseOwners.clear();
+                recordEventLocked("RESET ALL (" + reason + ")");
+            }
+
+            for (int i = 0; i < keysToRelease.size(); i++) {
+                dispatchKeySafe(keysToRelease.get(i), false, keyMods.get(i), "resetAll:" + reason);
+            }
+            for (Integer btn : mouseToRelease) {
+                transitionMouseLocked(btn, false, "resetAll:" + reason);
             }
         }
         // Clear any stray modifier latches safely
@@ -599,6 +592,22 @@ public final class StarHudInputManager {
                     if (inconsistency != null) break;
                 }
             }
+            if (inconsistency == null) {
+                for (Integer mouseBtn : mMouseOwners.keySet()) {
+                    if (!isDispatchedMousePressedLocked(mouseBtn)) {
+                        inconsistency = "mouse owners active without dispatched DOWN for " + formatMouseButton(mouseBtn);
+                        break;
+                    }
+                }
+            }
+            if (inconsistency == null) {
+                for (Map.Entry<Integer, Boolean> e : mDispatchedMouseStates.entrySet()) {
+                    if (Boolean.TRUE.equals(e.getValue()) && !isMousePressedLocked(e.getKey())) {
+                        inconsistency = "mouse button dispatched DOWN without active owner for " + formatMouseButton(e.getKey());
+                        break;
+                    }
+                }
+            }
             if (inconsistency == null && !mLeasesById.isEmpty() && !isBridgeGrabbingSafe()) {
                 inconsistency = "active leases held while not grabbing (" + mLeasesById.size() + ")";
             }
@@ -675,9 +684,46 @@ public final class StarHudInputManager {
 
     public boolean isMouseButtonHeld(int mouseButton) {
         synchronized (mLock) {
-            Set<String> owners = mMouseOwners.get(mouseButton);
-            return owners != null && !owners.isEmpty();
+            return isMousePressedLocked(mouseButton) || isDispatchedMousePressedLocked(mouseButton);
         }
+    }
+
+    /**
+     * Returns whether the given GLFW mouse button is currently in the authoritative pressed state.
+     */
+    public boolean isMouseButtonPressed(int mouseButton) {
+        synchronized (mLock) {
+            return isDispatchedMousePressedLocked(mouseButton);
+        }
+    }
+
+    /**
+     * Returns independent pointer IDs currently owning the specified GLFW mouse button.
+     */
+    @NonNull
+    public Set<Integer> getMouseButtonOwnerPointers(int mouseButton) {
+        synchronized (mLock) {
+            Set<Integer> pointerIds = new LinkedHashSet<>();
+            Set<String> owners = mMouseOwners.get(mouseButton);
+            if (owners != null) {
+                for (String leaseId : owners) {
+                    LeaseInfo info = mLeasesById.get(leaseId);
+                    if (info != null) {
+                        pointerIds.add(info.pointerId);
+                    }
+                }
+            }
+            return pointerIds;
+        }
+    }
+
+    private boolean isMousePressedLocked(int mouseButton) {
+        Set<String> owners = mMouseOwners.get(mouseButton);
+        return owners != null && !owners.isEmpty();
+    }
+
+    private boolean isDispatchedMousePressedLocked(int mouseButton) {
+        return Boolean.TRUE.equals(mDispatchedMouseStates.get(mouseButton));
     }
 
     public int getActiveLeaseCount() {
@@ -716,20 +762,23 @@ public final class StarHudInputManager {
     }
 
     public void resetForTesting() {
-        synchronized (mLock) {
-            mLeasesById.clear();
-            mButtonLeases.clear();
-            mKeyOwners.clear();
-            mKeyApplyMods.clear();
-            mMouseOwners.clear();
-            mRecentEvents.clear();
-            mLastEvent = "idle";
-            mMismatchCount = 0;
-            mBridgeErrorCount = 0;
+        synchronized (mDispatchLock) {
+            synchronized (mLock) {
+                mLeasesById.clear();
+                mButtonLeases.clear();
+                mKeyOwners.clear();
+                mKeyApplyMods.clear();
+                mMouseOwners.clear();
+                mDispatchedMouseStates.clear();
+                mRecentEvents.clear();
+                mLastEvent = "idle";
+                mMismatchCount = 0;
+                mBridgeErrorCount = 0;
+            }
+            mResetParticipants.clear();
+            mTelemetryListeners.clear();
+            mBridge = StarHudInputBridge.DEFAULT;
         }
-        mResetParticipants.clear();
-        mTelemetryListeners.clear();
-        mBridge = StarHudInputBridge.DEFAULT;
     }
 
     private void addButtonLeaseLocked(@NonNull String buttonId, @NonNull String leaseId) {
@@ -790,6 +839,27 @@ public final class StarHudInputManager {
             handleBridgeException("sendKey(" + keycode + ", " + down + ") " + contextId, t);
             return false;
         }
+    }
+
+    /**
+     * Transitions a GLFW mouse button state strictly on released <-> pressed edges under
+     * {@link #mDispatchLock}, preventing duplicate DOWNs or spurious UPs across threads and callers.
+     */
+    private boolean transitionMouseLocked(int mouseButton, boolean wantPressed, String contextId) {
+        synchronized (mLock) {
+            boolean currentlyPressed = isDispatchedMousePressedLocked(mouseButton);
+            if (currentlyPressed == wantPressed) {
+                return true;
+            }
+            mDispatchedMouseStates.put(mouseButton, wantPressed);
+        }
+        boolean ok = dispatchMouseSafe(mouseButton, wantPressed, contextId);
+        if (!ok) {
+            synchronized (mLock) {
+                mDispatchedMouseStates.put(mouseButton, !wantPressed);
+            }
+        }
+        return ok;
     }
 
     private boolean dispatchMouseSafe(int mouseButton, boolean down, String contextId) {

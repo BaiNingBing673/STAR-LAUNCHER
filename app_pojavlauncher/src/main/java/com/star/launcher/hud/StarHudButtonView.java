@@ -536,7 +536,9 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
                     onPointerReleased(false, "action_up");
                     return true;
                 }
-                return false;
+                // ACTION_UP signals all pointers in this view's stream have lifted; ensure cleanup even on ID mismatch.
+                onPointerReleased(true, "action_up_mismatch");
+                return true;
             }
             case MotionEvent.ACTION_CANCEL:
                 if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) {

@@ -90,6 +90,7 @@ import com.star.launcher.ui.components.AetherTonalButton
 import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.studio.StarComponentTarget
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -375,7 +376,9 @@ fun ModsScreen(
 
                 if (state.pagination?.hasMore == true) {
                     item {
-                        AetherSurfaceCard {
+                        AetherSurfaceCard(
+        componentTarget = StarComponentTarget.MOD_MANAGER_PANELS
+    ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.Center,
@@ -797,7 +800,9 @@ private fun DiscoverSearchAndFiltersCard(
 ) {
     var showVersionMenu by remember { mutableStateOf(false) }
 
-    AetherSurfaceCard {
+    AetherSurfaceCard(
+        componentTarget = StarComponentTarget.MOD_MANAGER_PANELS
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
@@ -1020,9 +1025,9 @@ private fun FeaturedModCard(
     onClick: () -> Unit
 ) {
     AetherSurfaceCard(
+        componentTarget = StarComponentTarget.MOD_MANAGER_PANELS,
         onClick = onClick,
-        modifier = Modifier.width(240.dp),
-        containerColor = AetherColors.SurfaceElevatedDark
+        modifier = Modifier.width(240.dp)
     ) {
         Row(
             horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
@@ -1083,7 +1088,10 @@ private fun DiscoverModCard(
     assessment: ModCompatibilityAssessment?,
     onClick: () -> Unit
 ) {
-    AetherSurfaceCard(onClick = onClick) {
+    AetherSurfaceCard(
+        componentTarget = StarComponentTarget.MOD_MANAGER_PANELS,
+        onClick = onClick
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Md),
@@ -1177,7 +1185,9 @@ private fun MyModsToolbarCard(
     onCheckUpdates: () -> Unit
 ) {
     val report = state.inventoryReport
-    AetherSurfaceCard {
+    AetherSurfaceCard(
+        componentTarget = StarComponentTarget.MOD_MANAGER_PANELS
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1235,12 +1245,13 @@ private fun InstalledModInventoryCard(
     onRequestUpdate: () -> Unit
 ) {
     AetherSurfaceCard(
+        componentTarget = StarComponentTarget.MOD_MANAGER_PANELS,
         borderColor = when {
             item.compatibilityLevel == ModCompatibilityLevel.INCOMPATIBLE ->
                 AetherColors.TierBlockedFg.copy(alpha = 0.55f)
             item.isDuplicateOrSuspicious ->
                 AetherColors.TierTestedFg.copy(alpha = 0.55f)
-            else -> AetherColors.OutlineVariantDark
+            else -> null
         }
     ) {
         Row(
@@ -1371,7 +1382,7 @@ fun ModDownloadProgressCard(
     onDismiss: () -> Unit
 ) {
     AetherSurfaceCard(
-        containerColor = AetherColors.SurfaceElevatedDark,
+        componentTarget = StarComponentTarget.DOWNLOAD_PROGRESS_PANELS,
         borderColor = when (progress.phase) {
             ModDownloadPhase.FAILED, ModDownloadPhase.RESTRICTED -> AetherColors.TierBlockedFg.copy(alpha = 0.5f)
             ModDownloadPhase.COMPLETED -> AetherColors.TierVerifiedFg.copy(alpha = 0.5f)

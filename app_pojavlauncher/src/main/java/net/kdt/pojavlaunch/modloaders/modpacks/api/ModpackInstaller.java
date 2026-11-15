@@ -22,13 +22,30 @@ import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.zip.ZipFile;
 
 public class ModpackInstaller {
 
     public static ModLoader installModpack(ModDetail modDetail, int selectedVersion, InstallFunction installFunction) throws IOException {
+        return installModpack(modDetail, selectedVersion, null, installFunction);
+    }
+
+    public static ModLoader installModpack(
+            ModDetail modDetail,
+            int selectedVersion,
+            Map<String, String> downloadHeaders,
+            InstallFunction installFunction
+    ) throws IOException {
         String versionUrl = modDetail.versionUrls[selectedVersion];
+        if (versionUrl == null || versionUrl.trim().isEmpty()) {
+            throw new CurseForgeException(
+                    CurseForgeException.ErrorCode.DOWNLOAD_URL_MISSING,
+                    "[" + CurseForgeException.ErrorCode.DOWNLOAD_URL_MISSING.name() + "] No official download URL is available for '"
+                            + modDetail.title + "'."
+            );
+        }
         String versionHash = modDetail.versionHashes[selectedVersion];
         String modpackName = (modDetail.title.toLowerCase(Locale.ROOT) + " " + modDetail.versionNames[selectedVersion])
                 .trim().replaceAll("[\\\\/:*?\"<>| \\t\\n]", "_" );
@@ -49,7 +66,9 @@ public class ModpackInstaller {
             DownloadUtils.ensureSha1(modpackFile, versionHash, (Callable<Void>) () -> {
                 DownloadUtils.downloadFileMonitored(versionUrl, modpackFile, downloadBuffer,
                         new DownloaderProgressWrapper(R.string.modpack_download_downloading_metadata,
-                                ProgressLayout.INSTALL_MODPACK));
+                                ProgressLayout.INSTALL_MODPACK),
+                        downloadHeaders,
+                        -1L);
                 return null;
             });
 

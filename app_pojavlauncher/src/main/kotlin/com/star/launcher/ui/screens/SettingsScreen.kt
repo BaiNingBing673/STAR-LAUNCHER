@@ -1,7 +1,9 @@
 package com.star.launcher.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -23,10 +26,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.star.launcher.lyrics.config.LiveLyricsConfigStore
 import com.star.launcher.data.db.model.CompatibilityTier
@@ -44,10 +50,18 @@ import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
 import com.star.launcher.ui.theme.CompatibilityBadgeTier
 import com.star.launcher.ui.theme.CompatibilityTierBadge
+import com.star.launcher.ui.theme.liquid.LocalStarTheme
+import com.star.launcher.ui.theme.liquid.StarLiquidGlassSurface
+import com.star.launcher.ui.theme.studio.StarComponentTarget
 import net.kdt.pojavlaunch.BuildConfig
 import net.kdt.pojavlaunch.Tools
 import net.kdt.pojavlaunch.multirt.MultiRTUtils
 import kotlin.math.roundToInt
+
+enum class SettingsSubTab(val title: String) {
+    GENERAL("Launcher Settings"),
+    STAR_UI_STUDIO("STAR UI Studio")
+}
 
 @Composable
 fun SettingsScreen(
@@ -71,20 +85,97 @@ fun SettingsScreen(
     onOpenEnginePreferences: () -> Unit,
     onOpenHudCustomization: () -> Unit = {},
     onOpenLiveLyrics: () -> Unit = {},
+    isExpandedWidth: Boolean = false,
+    reducedMotion: Boolean = false,
+    onStatusMessage: (String) -> Unit = {},
+    initialTab: SettingsSubTab = SettingsSubTab.GENERAL,
     modifier: Modifier = Modifier
 ) {
+    var activeSettingsTab by rememberSaveable { mutableStateOf(initialTab) }
     var offlineUsername by remember { mutableStateOf("") }
     val totalRamMb = (state.deviceCapabilities?.totalRamMb?.toInt() ?: 4096).coerceAtLeast(1024)
     val maxSliderRam = (totalRamMb - 512).coerceIn(512, 12288)
     var sliderRam by remember(state.ramAllocationMb, maxSliderRam) {
         mutableFloatStateOf(state.ramAllocationMb.coerceIn(256, maxSliderRam).toFloat())
     }
+    val starTheme = LocalStarTheme.current
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(AetherSpacing.Md),
-        verticalArrangement = Arrangement.spacedBy(AetherSpacing.Md)
-    ) {
+    Column(modifier = modifier.fillMaxSize()) {
+        // Dedicated Segmented Settings Tab Switcher: Launcher Settings | STAR UI Studio
+        StarLiquidGlassSurface(
+            componentTarget = StarComponentTarget.SETTINGS_PANELS,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = AetherSpacing.Md, vertical = AetherSpacing.Xs),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                SettingsSubTab.values().forEach { tab ->
+                    val isSelected = activeSettingsTab == tab
+                    if (isSelected) {
+                        StarLiquidGlassSurface(
+                            componentTarget = StarComponentTarget.BUTTONS,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            containerColorOverride = starTheme.primaryAccent.copy(alpha = 0.28f),
+                            borderColorOverride = starTheme.secondaryAccent.copy(alpha = 0.85f),
+                            onClick = { activeSettingsTab = tab }
+                        ) {
+                            Text(
+                                text = tab.title,
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = starTheme.textPrimary,
+                                maxLines = 1,
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .padding(horizontal = 8.dp, vertical = 7.dp)
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { activeSettingsTab = tab }
+                                .padding(horizontal = 8.dp, vertical = 7.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = tab.title,
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                                color = starTheme.textSecondary,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (activeSettingsTab == SettingsSubTab.STAR_UI_STUDIO) {
+            StarUiStudioWorkspace(
+                isExpandedWidth = isExpandedWidth,
+                reducedMotion = reducedMotion,
+                onStatusMessage = onStatusMessage,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+            return@Column
+        }
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentPadding = PaddingValues(AetherSpacing.Md),
+            verticalArrangement = Arrangement.spacedBy(AetherSpacing.Md)
+        ) {
         item {
             AetherSectionHeader(
                 title = "Settings & Engine",
@@ -100,7 +191,10 @@ fun SettingsScreen(
 
         // 1. Java Runtimes Section
         item {
-            AetherAccentCard(accentColor = AetherColors.AccentCyan) {
+            AetherAccentCard(
+                accentColor = AetherColors.AccentCyan,
+                componentTarget = StarComponentTarget.SETTINGS_PANELS
+            ) {
                 Text(
                     text = "Java Runtimes (${state.deviceCapabilities?.cpuAbiPrimary ?: "Device ABI"})",
                     style = MaterialTheme.typography.titleLarge,
@@ -224,7 +318,7 @@ fun SettingsScreen(
 
         // 2. Accounts & Vault Section
         item {
-            AetherSurfaceCard {
+            AetherSurfaceCard(componentTarget = StarComponentTarget.SETTINGS_PANELS) {
                 Text(
                     text = "Accounts & Authentication",
                     style = MaterialTheme.typography.titleLarge,
@@ -316,7 +410,7 @@ fun SettingsScreen(
 
         // 3. Memory, Renderers & Controls
         item {
-            AetherSurfaceCard {
+            AetherSurfaceCard(componentTarget = StarComponentTarget.SETTINGS_PANELS) {
                 Text(
                     text = "Memory, Renderers & Controls",
                     style = MaterialTheme.typography.titleLarge,
@@ -411,7 +505,7 @@ fun SettingsScreen(
 
         // 4. Compatibility & Hardware Matrix
         item {
-            AetherSurfaceCard {
+            AetherSurfaceCard(componentTarget = StarComponentTarget.SETTINGS_PANELS) {
                 Text(
                     text = "Hardware & Compatibility",
                     style = MaterialTheme.typography.titleLarge,
@@ -478,11 +572,16 @@ fun SettingsScreen(
             var devOverlayEnabled by remember {
                 mutableStateOf(com.star.launcher.diagnostics.PerformanceTelemetryTracker.enabledFlow.value)
             }
-            AetherSurfaceCard {
+            AetherSurfaceCard(componentTarget = StarComponentTarget.SETTINGS_PANELS) {
                 Text(
                     text = "Appearance, Storage & Engine Preferences",
                     style = MaterialTheme.typography.titleLarge,
                     color = AetherColors.OnSurfaceDark
+                )
+                AetherPrimaryButton(
+                    text = "Open STAR UI Studio (Liquid Glass & Themes)",
+                    onClick = { activeSettingsTab = SettingsSubTab.STAR_UI_STUDIO },
+                    modifier = Modifier.fillMaxWidth()
                 )
                 Text(
                     text = "Adaptive UI Performance Mode: ${perfSpec.mode.displayName} (Resolved: ${perfSpec.profile.label})",
@@ -569,7 +668,7 @@ fun SettingsScreen(
 
         // 6. Application & Build Info
         item {
-            AetherSurfaceCard {
+            AetherSurfaceCard(componentTarget = StarComponentTarget.SETTINGS_PANELS) {
                 Text(
                     text = "About STAR Launcher",
                     style = MaterialTheme.typography.titleLarge,
@@ -587,5 +686,6 @@ fun SettingsScreen(
         }
 
         item { Spacer(modifier = Modifier.height(AetherSpacing.Md)) }
+        }
     }
 }

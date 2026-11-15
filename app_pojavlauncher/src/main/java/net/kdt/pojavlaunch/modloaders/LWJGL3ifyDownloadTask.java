@@ -68,7 +68,7 @@ public class LWJGL3ifyDownloadTask implements Runnable, Tools.DownloaderFeedback
     }
 
     private void tryDownloadDeps(File modsDir) throws IOException {
-        List<LWJGL3ifyUtils.LWJGL3ifyMod> deps = LWJGL3ifyUtils.collectDependencies(mLWJGL3ifyMod, new CommonApi(mActivity.getString(R.string.curseforge_api_key)));
+        List<LWJGL3ifyUtils.LWJGL3ifyMod> deps = LWJGL3ifyUtils.collectDependencies(mLWJGL3ifyMod, new CommonApi(mActivity));
         for (int i=0; i < deps.size(); ++i) {
             URI uri = null;
             try {

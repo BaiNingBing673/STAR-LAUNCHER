@@ -29,7 +29,6 @@ object ModImportAdapter {
         onError: (Throwable) -> Unit
     ) {
         val appContext = activity.applicationContext
-        val curseforgeKey = appContext.getString(R.string.curseforge_api_key)
         onStatus("Importing modpack archive...")
         PojavApplication.sExecutorService.execute {
             try {
@@ -41,7 +40,7 @@ object ModImportAdapter {
                         IOUtils.copy(input, output)
                     }
                 }
-                val loaderInfo = CommonApi(curseforgeKey).importModpack(modpackFile)
+                val loaderInfo = CommonApi(appContext).importModpack(modpackFile)
                 modpackFile.delete()
                 Tools.runOnUiThread {
                     if (loaderInfo == null) {

@@ -286,6 +286,15 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
         if (!enabled) {
             releaseAllInputsWithReason("overlay_disabled");
         }
+        if (mJoystickView != null) {
+            mJoystickView.setEnabled(enabled);
+        }
+        if (mDynamicZoneView != null) {
+            mDynamicZoneView.setEnabled(enabled);
+        }
+        for (StarHudButtonView btn : mDynamicButtons.values()) {
+            btn.setEnabled(enabled);
+        }
     }
 
     @Override

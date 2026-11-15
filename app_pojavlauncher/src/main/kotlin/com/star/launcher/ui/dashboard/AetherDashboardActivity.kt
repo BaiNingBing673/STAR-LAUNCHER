@@ -13,6 +13,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -34,6 +35,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -69,12 +72,20 @@ import com.star.launcher.ui.screens.ModDetailScreen
 import com.star.launcher.ui.screens.ModsScreen
 import com.star.launcher.ui.screens.RuntimeDetailScreen
 import com.star.launcher.ui.screens.RuntimeManagementScreen
+import com.star.launcher.ui.screens.AetherSubscreenHeader
 import com.star.launcher.ui.screens.SettingsScreen
+import com.star.launcher.ui.screens.StarUiStudioWorkspace
 import com.star.launcher.ui.screens.VersionInstallScreen
 import com.star.launcher.ui.screens.VersionsScreen
 import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherSpacing
 import com.star.launcher.ui.theme.AetherTheme
+import com.star.launcher.ui.theme.liquid.LocalStarTheme
+import com.star.launcher.ui.theme.liquid.StarLiquidGlassSurface
+import com.star.launcher.ui.theme.liquid.StarWallpaperBackdrop
+import com.star.launcher.ui.theme.studio.StarBackgroundEngine
+import com.star.launcher.ui.theme.studio.StarComponentTarget
+import com.star.launcher.ui.theme.studio.StarThemeManager
 import com.star.launcher.version.VersionFilter
 import com.star.launcher.version.VersionSort
 import kotlinx.coroutines.CoroutineScope
@@ -137,6 +148,7 @@ class AetherDashboardActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         com.star.launcher.compat.UiPerformanceProfileManager.ensureInitialized(this)
         com.star.launcher.diagnostics.PerformanceTelemetryTracker.ensureInitialized(this)
+        StarThemeManager.ensureInitialized(this)
         Tools.initStorageConstants(this)
         ContextExecutor.setActivity(this)
         if (ExtraCore.getValue(ExtraConstants.RELEASE_TABLE) == null) {
@@ -402,10 +414,10 @@ class AetherDashboardActivity : ComponentActivity() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        com.star.launcher.ui.components.AetherImageCache.trimMemory(
-            aggressive = level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
-                level >= android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN
-        )
+        val aggressive = level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN
+        com.star.launcher.ui.components.AetherImageCache.trimMemory(aggressive = aggressive)
+        StarBackgroundEngine.trimMemory(aggressive = aggressive)
     }
 
     override fun onPause() {
@@ -683,6 +695,7 @@ fun AetherDashboardScreen(
         )
     }
     val reducedMotion = rememberReducedMotionEnabled(state.reducedMotionEnabled)
+    val starTheme = LocalStarTheme.current
     val activeAccount = state.accounts.firstOrNull { it.isSelected }?.username
     val runtimeHealthy = state.runtimes.any { it.isVerified }
     val highlightedTab = currentRoute.ownerTab
@@ -690,12 +703,17 @@ fun AetherDashboardScreen(
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(AetherColors.BackgroundDark)
+            .background(starTheme.backgroundBase)
     ) {
         val useRail = maxWidth >= 720.dp
 
-        Scaffold(
-            containerColor = AetherColors.BackgroundDark,
+        StarWallpaperBackdrop(
+            theme = starTheme,
+            reducedMotion = reducedMotion,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Scaffold(
+                containerColor = androidx.compose.ui.graphics.Color.Transparent,
             topBar = {
                 AetherTopAppBar(
                     activeAccountLabel = activeAccount,
@@ -740,28 +758,35 @@ fun AetherDashboardScreen(
                         )
                     }
                     state.statusBanner?.let { banner ->
-                        Surface(
+                        StarLiquidGlassSurface(
+                            componentTarget = StarComponentTarget.PANELS,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = AetherSpacing.Md, vertical = AetherSpacing.Xs),
                             shape = MaterialTheme.shapes.medium,
-                            color = AetherColors.SurfaceElevatedDark,
-                            border = BorderStroke(1.dp, AetherColors.AccentBlue.copy(alpha = 0.35f))
+                            borderColorOverride = starTheme.primaryAccent.copy(alpha = 0.35f)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
                                     text = banner,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = AetherColors.OnSurfaceDark,
+                                    color = starTheme.textPrimary,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
                                 )
-                                TextButton(onClick = onDismissBanner) {
-                                    Text("Hide", color = AetherColors.AccentCyan)
-                                }
+                                Text(
+                                    text = "Hide",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = starTheme.secondaryAccent,
+                                    modifier = Modifier
+                                        .clickable(onClick = onDismissBanner)
+                                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                                )
                             }
                         }
                     }
@@ -909,7 +934,10 @@ fun AetherDashboardScreen(
                                     onRefreshEnvironment = onRefresh,
                                     onOpenEnginePreferences = onOpenEnginePreferences,
                                     onOpenHudCustomization = onOpenHudCustomization,
-                                    onOpenLiveLyrics = onOpenLiveLyrics
+                                    onOpenLiveLyrics = onOpenLiveLyrics,
+                                    isExpandedWidth = useRail,
+                                    reducedMotion = reducedMotion,
+                                    onStatusMessage = onStatusMessage
                                 )
                             }
 
@@ -994,6 +1022,20 @@ fun AetherDashboardScreen(
                                 onStatusMessage = onStatusMessage
                             )
 
+                            AetherRoute.StarUiStudio -> Column(modifier = Modifier.fillMaxSize()) {
+                                AetherSubscreenHeader(
+                                    title = "STAR UI Studio",
+                                    subtitle = "Liquid Glass, Custom Wallpaper & Theme Engine",
+                                    onBack = onNavigateBack
+                                )
+                                StarUiStudioWorkspace(
+                                    isExpandedWidth = useRail,
+                                    reducedMotion = reducedMotion,
+                                    onStatusMessage = onStatusMessage,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+
                             is AetherRoute.ModDetail -> {
                                 LaunchedEffect(currentRoute.modId) {
                                     if (modsState.detailState?.modId != currentRoute.modId) {
@@ -1035,6 +1077,7 @@ fun AetherDashboardScreen(
                     }
                 }
             }
+        }
         }
     }
 }

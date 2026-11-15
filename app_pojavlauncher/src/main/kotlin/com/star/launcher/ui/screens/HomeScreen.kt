@@ -53,6 +53,7 @@ import com.star.launcher.ui.dashboard.DashboardTab
 import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.studio.StarComponentTarget
 import com.star.launcher.version.VersionCatalogItem
 import com.star.launcher.version.VersionState
 import java.text.DateFormat
@@ -233,9 +234,8 @@ private fun HomeHeroColumn(
 
         // Selected Version & Version Selector card (Section 5 integration)
         AetherSurfaceCard(
-            modifier = Modifier.fillMaxWidth(),
-            containerColor = AetherColors.SurfaceElevatedDark,
-            borderColor = AetherColors.OutlineVariantDark
+            componentTarget = StarComponentTarget.VERSION_PANELS,
+            modifier = Modifier.fillMaxWidth()
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),

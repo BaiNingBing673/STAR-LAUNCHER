@@ -172,10 +172,27 @@ class AetherContainer(context: Context) {
         @Volatile
         private var instance: AetherContainer? = null
 
-        fun get(context: Context): AetherContainer =
-            instance ?: synchronized(this) {
-                instance ?: AetherContainer(context).also { instance = it }
+        @Volatile
+        private var instanceContext: Context? = null
+
+        fun get(context: Context): AetherContainer {
+            val appContext = context.applicationContext ?: context
+            val existing = instance
+            if (existing != null && instanceContext === appContext) {
+                return existing
             }
+            return synchronized(this) {
+                val synced = instance
+                if (synced != null && instanceContext === appContext) {
+                    synced
+                } else {
+                    AetherContainer(appContext).also {
+                        instance = it
+                        instanceContext = appContext
+                    }
+                }
+            }
+        }
 
         @JvmStatic
         fun flushWalIfInitialized() {

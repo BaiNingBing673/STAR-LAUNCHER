@@ -433,7 +433,8 @@ class ModDownloadInstaller(
 
         return try {
             var lastPersistMs = 0L
-            httpTransport.downloadToFile(resolvedUrl, partFile) { downloaded, reportedTotal ->
+            val downloadHeaders = repository.getDownloadHeaders(resolvedUrl)
+            httpTransport.downloadToFile(resolvedUrl, partFile, downloadHeaders) { downloaded, reportedTotal ->
                 if (isFileCancelled(file.id)) {
                     throw CancellationException("Download cancelled by user")
                 }

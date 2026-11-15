@@ -38,6 +38,8 @@ public class ZipUtils {
      */
     public static void zipExtract(ZipFile zipFile, String dirName, File destination) throws IOException {
         Enumeration<? extends ZipEntry> zipEntries = zipFile.entries();
+        String canonicalDest = destination.getCanonicalPath();
+        String prefix = canonicalDest.endsWith(File.separator) ? canonicalDest : canonicalDest + File.separator;
 
         int dirNameLen = dirName.length();
         while(zipEntries.hasMoreElements()) {
@@ -45,6 +47,10 @@ public class ZipUtils {
             String entryName = zipEntry.getName();
             if(!entryName.startsWith(dirName) || zipEntry.isDirectory()) continue;
             File zipDestination = new File(destination, entryName.substring(dirNameLen));
+            String canonicalEntry = zipDestination.getCanonicalPath();
+            if (!canonicalEntry.startsWith(prefix)) {
+                throw new IOException("Blocked unsafe ZIP entry path: " + entryName);
+            }
             FileUtils.ensureParentDirectory(zipDestination);
             try (InputStream inputStream = zipFile.getInputStream(zipEntry);
                  OutputStream outputStream = new FileOutputStream(zipDestination)) {

@@ -90,6 +90,7 @@ public class ControlLayout extends FrameLayout {
 		}
 
 		removeAllButtons();
+		com.star.launcher.hud.StarHudInputManager.getInstance().releaseAllInputs("control_layout_switched");
 		if(mLayout != null) {
 			mLayout.mControlDataList = null;
 			mLayout = null;
@@ -251,6 +252,9 @@ public class ControlLayout extends FrameLayout {
 		if (mModifiable) return; // Not using on custom controls activity
 
 		mControlVisible = isVisible;
+		if (!isVisible) {
+			com.star.launcher.hud.StarHudInputManager.getInstance().releaseAllInputs("controls_hidden");
+		}
 		for(ControlInterface button : getButtonChildren()){
 			button.setVisible(((button.getProperties().displayInGame && isGrabbing()) || (button.getProperties().displayInMenu && !isGrabbing())) && isVisible);
 		}

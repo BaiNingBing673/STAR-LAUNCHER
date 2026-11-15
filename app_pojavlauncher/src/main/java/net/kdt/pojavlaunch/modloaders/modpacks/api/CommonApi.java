@@ -1,6 +1,7 @@
 package net.kdt.pojavlaunch.modloaders.modpacks.api;
 
 import android.app.Activity;
+import android.content.Context;
 import android.net.Uri;
 import android.util.Log;
 
@@ -38,6 +39,12 @@ public class CommonApi implements ModpackApi {
     private final ModpackApi mCurseforgeApi;
     private final ModpackApi mModrinthApi;
     private final ModpackApi[] mModpackApis;
+
+    public CommonApi(Context context) {
+        mCurseforgeApi = new CurseforgeApi(context);
+        mModrinthApi = new ModrinthApi();
+        mModpackApis = new ModpackApi[]{mModrinthApi, mCurseforgeApi};
+    }
 
     public CommonApi(String curseforgeApiKey) {
         mCurseforgeApi = new CurseforgeApi(curseforgeApiKey);

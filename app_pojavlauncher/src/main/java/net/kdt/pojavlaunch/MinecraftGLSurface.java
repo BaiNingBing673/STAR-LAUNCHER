@@ -116,9 +116,34 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
 
     @Override
     protected void onDetachedFromWindow() {
+        if (mCurrentTouchProcessor != null) {
+            mCurrentTouchProcessor.cancelPendingActions();
+        }
         StarHudInputManager.getInstance().unregisterResetParticipant(mIngameProcessor);
         StarHudInputManager.getInstance().releaseAllInputs("gl_surface_detached");
         super.onDetachedFromWindow();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (!hasWindowFocus) {
+            if (mCurrentTouchProcessor != null) {
+                mCurrentTouchProcessor.cancelPendingActions();
+            }
+            StarHudInputManager.getInstance().releaseAllInputs("gl_surface_focus_lost");
+        }
+    }
+
+    @Override
+    protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (visibility != VISIBLE) {
+            if (mCurrentTouchProcessor != null) {
+                mCurrentTouchProcessor.cancelPendingActions();
+            }
+            StarHudInputManager.getInstance().releaseAllInputs("gl_surface_visibility_lost");
+        }
     }
 
     @RequiresApi(api = Build.VERSION_CODES.O)

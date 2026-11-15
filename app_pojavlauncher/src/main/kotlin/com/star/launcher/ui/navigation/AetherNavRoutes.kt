@@ -41,6 +41,7 @@ sealed interface AetherRoute {
     data object GamepadMapper : AetherRoute
     data object HudCustomization : AetherRoute
     data object LiveLyricsSettings : AetherRoute
+    data object StarUiStudio : AetherRoute
     data class ModDetail(val modId: Long) : AetherRoute
 
     fun encode(): String = when (this) {
@@ -54,6 +55,7 @@ sealed interface AetherRoute {
         GamepadMapper -> "gamepad_mapper"
         HudCustomization -> "hud_customization"
         LiveLyricsSettings -> "live_lyrics_settings"
+        StarUiStudio -> "star_ui_studio"
         is ModDetail -> "mod_detail:$modId"
     }
 
@@ -63,7 +65,7 @@ sealed interface AetherRoute {
             is InstanceDetail -> DashboardTab.LIBRARY
             is VersionInstallProgress -> DashboardTab.VERSIONS
             is ModDetail -> DashboardTab.MODS
-            RuntimeManagement, is RuntimeDetail, MicrosoftAuth, is EnginePreferences, GamepadMapper, HudCustomization, LiveLyricsSettings ->
+            RuntimeManagement, is RuntimeDetail, MicrosoftAuth, is EnginePreferences, GamepadMapper, HudCustomization, LiveLyricsSettings, StarUiStudio ->
                 DashboardTab.SETTINGS
         }
 
@@ -102,6 +104,7 @@ sealed interface AetherRoute {
                 encoded == "gamepad_mapper" -> GamepadMapper
                 encoded == "hud_customization" -> HudCustomization
                 encoded == "live_lyrics_settings" -> LiveLyricsSettings
+                encoded == "star_ui_studio" -> StarUiStudio
                 encoded.startsWith("mod_detail:") -> {
                     val modId = encoded.removePrefix("mod_detail:").toLongOrNull()
                     if (modId != null && modId > 0L) ModDetail(modId) else null
@@ -117,6 +120,7 @@ sealed interface AetherRoute {
                 encoded.equals("GAMEPAD", ignoreCase = true) -> GamepadMapper
                 encoded.equals("HUD", ignoreCase = true) || encoded.equals("HUD_CUSTOMIZE", ignoreCase = true) -> HudCustomization
                 encoded.equals("LIVE_LYRICS", ignoreCase = true) -> LiveLyricsSettings
+                encoded.equals("STAR_UI_STUDIO", ignoreCase = true) -> StarUiStudio
                 encoded.equals("RUNTIME_MANAGEMENT", ignoreCase = true) -> RuntimeManagement
                 encoded.equals("ENGINE_PREFS", ignoreCase = true) -> EnginePreferences(PreferenceCategory.ALL)
                 else -> null

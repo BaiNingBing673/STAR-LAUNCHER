@@ -3,7 +3,6 @@ package com.star.launcher.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
@@ -40,7 +38,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,6 +45,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.liquid.LocalStarTheme
+import com.star.launcher.ui.theme.liquid.StarLiquidGlassSurface
+import com.star.launcher.ui.theme.studio.StarComponentTarget
 
 data class AetherNavDestination<T>(
     val id: T,
@@ -57,10 +57,10 @@ data class AetherNavDestination<T>(
 
 @Composable
 fun AetherBrandMark(modifier: Modifier = Modifier) {
+    val theme = LocalStarTheme.current
     Canvas(modifier = modifier.size(30.dp)) {
         val w = size.width
         val h = size.height
-        // Geometric shooting-star comet matching the STAR emblem
         val coreComet = Path().apply {
             moveTo(w * 0.14f, h * 0.86f)
             lineTo(w * 0.88f, h * 0.12f)
@@ -71,27 +71,25 @@ fun AetherBrandMark(modifier: Modifier = Modifier) {
         drawPath(
             path = coreComet,
             brush = Brush.linearGradient(
-                listOf(AetherColors.OnBackgroundDark, AetherColors.AccentCyan, AetherColors.AccentBlue)
+                listOf(theme.textPrimary, theme.secondaryAccent, theme.primaryAccent)
             )
         )
-        // Upper and lower comet speed streaks
         drawLine(
-            color = AetherColors.AccentCyan.copy(alpha = 0.9f),
+            color = theme.secondaryAccent.copy(alpha = 0.9f),
             start = Offset(w * 0.22f, h * 0.56f),
             end = Offset(w * 0.68f, h * 0.18f),
             strokeWidth = w * 0.065f,
             cap = StrokeCap.Round
         )
         drawLine(
-            color = AetherColors.AccentBlue.copy(alpha = 0.85f),
+            color = theme.primaryAccent.copy(alpha = 0.85f),
             start = Offset(w * 0.44f, h * 0.78f),
             end = Offset(w * 0.84f, h * 0.36f),
             strokeWidth = w * 0.06f,
             cap = StrokeCap.Round
         )
-        // Accent star glint
         drawCircle(
-            color = AetherColors.AccentCyan,
+            color = theme.secondaryAccent,
             radius = w * 0.045f,
             center = Offset(w * 0.74f, h * 0.58f)
         )
@@ -106,9 +104,13 @@ fun AetherTopAppBar(
     onRuntimeClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
+    val theme = LocalStarTheme.current
+    val navStyle = theme.styleFor(StarComponentTarget.MAIN_NAVIGATION)
+    StarLiquidGlassSurface(
+        componentTarget = StarComponentTarget.MAIN_NAVIGATION,
         modifier = modifier.fillMaxWidth(),
-        color = AetherColors.BackgroundDark.copy(alpha = 0.94f)
+        shape = RoundedCornerShape(0.dp),
+        borderWidthDp = 0f
     ) {
         Column {
             Row(
@@ -120,23 +122,30 @@ fun AetherTopAppBar(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(
+                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     AetherBrandMark()
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "STAR",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 fontWeight = FontWeight.Bold,
                                 letterSpacing = 1.6.sp
                             ),
-                            color = AetherColors.OnBackgroundDark
+                            color = theme.textPrimary,
+                            maxLines = 1
                         )
                         Text(
                             text = "YOUR MINECRAFT. YOUR UNIVERSE.",
-                            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.0.sp),
-                            color = AetherColors.OnSurfaceVariantDark
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontSize = 7.5.sp,
+                                letterSpacing = 0.05.sp
+                            ),
+                            color = theme.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -145,7 +154,6 @@ fun AetherTopAppBar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)
                 ) {
-                    // Runtime health pill
                     Surface(
                         onClick = onRuntimeClick,
                         shape = RoundedCornerShape(999.dp),
@@ -175,17 +183,18 @@ fun AetherTopAppBar(
                             Text(
                                 text = if (runtimeHealthy) "JRE Ready" else "JRE Missing",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (runtimeHealthy) AetherColors.TierVerifiedFg else AetherColors.TierBlockedFg
+                                color = if (runtimeHealthy) AetherColors.TierVerifiedFg else AetherColors.TierBlockedFg,
+                                softWrap = false,
+                                maxLines = 1
                             )
                         }
                     }
 
-                    // Active account selector pill
-                    Surface(
-                        onClick = onAccountClick,
+                    // Active account selector pill styled via PROFILE_COMPONENTS
+                    StarLiquidGlassSurface(
+                        componentTarget = StarComponentTarget.PROFILE_COMPONENTS,
                         shape = RoundedCornerShape(999.dp),
-                        color = AetherColors.SurfaceElevatedDark,
-                        border = BorderStroke(1.dp, AetherColors.OutlineDark)
+                        onClick = onAccountClick
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -195,13 +204,13 @@ fun AetherTopAppBar(
                             Icon(
                                 imageVector = AetherIcons.Account,
                                 contentDescription = "Account",
-                                tint = AetherColors.AccentCyan,
+                                tint = theme.secondaryAccent,
                                 modifier = Modifier.size(15.dp)
                             )
                             Text(
                                 text = activeAccountLabel ?: "Sign in",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = AetherColors.OnSurfaceDark,
+                                color = theme.textPrimary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -209,7 +218,10 @@ fun AetherTopAppBar(
                     }
                 }
             }
-            HorizontalDivider(color = AetherColors.OutlineVariantDark, thickness = 1.dp)
+            HorizontalDivider(
+                color = theme.borderColor.copy(alpha = (navStyle.borderOpacity * 0.7f).coerceIn(0.08f, 0.75f)),
+                thickness = 1.dp
+            )
         }
     }
 }
@@ -221,45 +233,54 @@ fun <T> AetherNavigationBar(
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Column(modifier = modifier.fillMaxWidth()) {
-        HorizontalDivider(color = AetherColors.OutlineVariantDark, thickness = 1.dp)
-        NavigationBar(
-            modifier = Modifier.navigationBarsPadding(),
-            containerColor = AetherColors.SurfaceDark,
-            tonalElevation = 0.dp
-        ) {
-            destinations.forEach { dest ->
-                val isSelected = dest.id == selected
-                NavigationBarItem(
-                    selected = isSelected,
-                    onClick = { onSelect(dest.id) },
-                    icon = {
-                        Icon(
-                            imageVector = dest.icon,
-                            contentDescription = dest.label,
-                            modifier = Modifier.size(20.dp)
+    val theme = LocalStarTheme.current
+    val navStyle = theme.styleFor(StarComponentTarget.MAIN_NAVIGATION)
+    val topRadius = navStyle.cornerRadiusDp.coerceIn(0f, 24f).dp
+    StarLiquidGlassSurface(
+        componentTarget = StarComponentTarget.MAIN_NAVIGATION,
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(topStart = topRadius, topEnd = topRadius, bottomStart = 0.dp, bottomEnd = 0.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            NavigationBar(
+                modifier = Modifier.navigationBarsPadding(),
+                containerColor = Color.Transparent,
+                tonalElevation = 0.dp
+            ) {
+                destinations.forEach { dest ->
+                    val isSelected = dest.id == selected
+                    NavigationBarItem(
+                        selected = isSelected,
+                        onClick = { onSelect(dest.id) },
+                        icon = {
+                            Icon(
+                                imageVector = dest.icon,
+                                contentDescription = dest.label,
+                                modifier = Modifier.size(if (destinations.size >= 6) 19.dp else 20.dp)
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = dest.label,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = if (destinations.size >= 6) 9.sp else 11.sp,
+                                    letterSpacing = if (destinations.size >= 6) (-0.25).sp else 0.sp
+                                ),
+                                softWrap = false,
+                                maxLines = 1,
+                                overflow = TextOverflow.Clip
+                            )
+                        },
+                        alwaysShowLabel = true,
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = theme.secondaryAccent,
+                            selectedTextColor = theme.secondaryAccent,
+                            indicatorColor = navStyle.accentColor.copy(alpha = 0.20f),
+                            unselectedIconColor = theme.textSecondary,
+                            unselectedTextColor = theme.textSecondary
                         )
-                    },
-                    label = {
-                        Text(
-                            text = dest.label,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = if (destinations.size >= 6) 10.sp else 11.sp
-                            ),
-                            softWrap = false,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    alwaysShowLabel = true,
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = AetherColors.AccentCyan,
-                        selectedTextColor = AetherColors.AccentCyan,
-                        indicatorColor = AetherColors.AccentBlue.copy(alpha = 0.16f),
-                        unselectedIconColor = AetherColors.OnSurfaceVariantDark,
-                        unselectedTextColor = AetherColors.OnSurfaceVariantDark
                     )
-                )
+                }
             }
         }
     }
@@ -272,45 +293,56 @@ fun <T> AetherNavigationRail(
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val theme = LocalStarTheme.current
+    val navStyle = theme.styleFor(StarComponentTarget.MAIN_NAVIGATION)
+    val sideRadius = navStyle.cornerRadiusDp.coerceIn(0f, 24f).dp
     Row(modifier = modifier.fillMaxHeight()) {
-        NavigationRail(
-            containerColor = AetherColors.SurfaceDark,
-            contentColor = AetherColors.OnSurfaceDark,
-            header = {
-                Spacer(modifier = Modifier.height(AetherSpacing.Sm))
-                AetherBrandMark()
-                Spacer(modifier = Modifier.height(AetherSpacing.Sm))
-            }
+        StarLiquidGlassSurface(
+            componentTarget = StarComponentTarget.MAIN_NAVIGATION,
+            shape = RoundedCornerShape(topStart = 0.dp, bottomStart = 0.dp, topEnd = sideRadius, bottomEnd = sideRadius)
         ) {
-            destinations.forEach { dest ->
-                val isSelected = dest.id == selected
-                NavigationRailItem(
-                    selected = isSelected,
-                    onClick = { onSelect(dest.id) },
-                    icon = {
-                        Icon(
-                            imageVector = dest.icon,
-                            contentDescription = dest.label,
-                            modifier = Modifier.size(21.dp)
+            NavigationRail(
+                containerColor = Color.Transparent,
+                contentColor = theme.textPrimary,
+                header = {
+                    Spacer(modifier = Modifier.height(AetherSpacing.Sm))
+                    AetherBrandMark()
+                    Spacer(modifier = Modifier.height(AetherSpacing.Sm))
+                }
+            ) {
+                destinations.forEach { dest ->
+                    val isSelected = dest.id == selected
+                    NavigationRailItem(
+                        selected = isSelected,
+                        onClick = { onSelect(dest.id) },
+                        icon = {
+                            Icon(
+                                imageVector = dest.icon,
+                                contentDescription = dest.label,
+                                modifier = Modifier.size(21.dp)
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = dest.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1
+                            )
+                        },
+                        colors = NavigationRailItemDefaults.colors(
+                            selectedIconColor = theme.secondaryAccent,
+                            selectedTextColor = theme.secondaryAccent,
+                            indicatorColor = navStyle.accentColor.copy(alpha = 0.20f),
+                            unselectedIconColor = theme.textSecondary,
+                            unselectedTextColor = theme.textSecondary
                         )
-                    },
-                    label = {
-                        Text(
-                            text = dest.label,
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1
-                        )
-                    },
-                    colors = NavigationRailItemDefaults.colors(
-                        selectedIconColor = AetherColors.AccentCyan,
-                        selectedTextColor = AetherColors.AccentCyan,
-                        indicatorColor = AetherColors.AccentBlue.copy(alpha = 0.16f),
-                        unselectedIconColor = AetherColors.OnSurfaceVariantDark,
-                        unselectedTextColor = AetherColors.OnSurfaceVariantDark
                     )
-                )
+                }
             }
         }
-        VerticalDivider(color = AetherColors.OutlineVariantDark, thickness = 1.dp)
+        VerticalDivider(
+            color = theme.borderColor.copy(alpha = (navStyle.borderOpacity * 0.5f).coerceIn(0.08f, 0.5f)),
+            thickness = 1.dp
+        )
     }
 }

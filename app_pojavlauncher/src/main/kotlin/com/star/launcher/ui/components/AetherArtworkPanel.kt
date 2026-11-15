@@ -49,6 +49,10 @@ import com.star.launcher.compat.UiPerformanceProfileManager
 import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.liquid.LocalStarTheme
+import com.star.launcher.ui.theme.liquid.StarLiquidGlassSurface
+import com.star.launcher.ui.theme.studio.StarComponentTarget
+import com.star.launcher.ui.theme.studio.blendColors
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.sin
@@ -187,21 +191,33 @@ fun AetherArtworkPanel(
     reducedMotion: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val theme = LocalStarTheme.current
+    val panelStyle = theme.styleFor(StarComponentTarget.PANELS)
     val paletteKey = "$versionLabel|$loaderLabel"
-    val (skyTop, horizonGlow, accentWave) = remember(paletteKey) {
+    val (skyTop, horizonGlow, accentWave) = remember(paletteKey, theme) {
         val hash = abs(paletteKey.hashCode()) % 3
         when (hash) {
-            0 -> Triple(Color(0xFF0D1529), Color(0xFF1E3A6E), AetherColors.AccentCyan)
-            1 -> Triple(Color(0xFF0F1B33), Color(0xFF1D4ED8), AetherColors.AccentBlue)
-            else -> Triple(Color(0xFF0B1926), Color(0xFF154E68), AetherColors.TertiaryDark)
+            0 -> Triple(
+                blendColors(theme.gradientStart, theme.backgroundBase, 0.35f),
+                panelStyle.accentColor,
+                theme.secondaryAccent
+            )
+            1 -> Triple(
+                blendColors(theme.gradientEnd, theme.backgroundBase, 0.3f),
+                theme.secondaryAccent,
+                panelStyle.accentColor
+            )
+            else -> Triple(
+                blendColors(theme.gradientStart, theme.gradientEnd, 0.5f),
+                theme.primaryAccent,
+                theme.secondaryAccent
+            )
         }
     }
 
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = AetherColors.SurfaceElevatedDark,
-        border = BorderStroke(1.dp, AetherColors.OutlineDark.copy(alpha = 0.7f))
+    StarLiquidGlassSurface(
+        componentTarget = StarComponentTarget.PANELS,
+        modifier = modifier.fillMaxWidth()
     ) {
         AnimatedContent(
             targetState = "$instanceTitle|$versionLabel|$loaderLabel|$runtimeSummary",
@@ -225,8 +241,13 @@ fun AetherArtworkPanel(
                         .drawWithCache {
                             val w = size.width
                             val h = size.height
+                            val skyAlpha = (panelStyle.backgroundOpacity * 0.72f).coerceIn(0.18f, 0.75f)
                             val skyBrush = Brush.verticalGradient(
-                                colors = listOf(skyTop, horizonGlow.copy(alpha = 0.65f), AetherColors.SurfaceDark)
+                                colors = listOf(
+                                    skyTop.copy(alpha = skyAlpha),
+                                    horizonGlow.copy(alpha = skyAlpha * 0.55f),
+                                    theme.surfaceBase.copy(alpha = skyAlpha * 0.65f)
+                                )
                             )
                             val haloCenter = Offset(w * 0.76f, h * 0.34f)
                             val haloRadius = (w * 0.34f).coerceAtLeast(1f)
@@ -239,7 +260,7 @@ fun AetherArtworkPanel(
                                 radius = haloRadius
                             )
                             val scrimBrush = Brush.verticalGradient(
-                                colors = listOf(Color.Transparent, Color(0xCC090B11)),
+                                colors = listOf(Color.Transparent, theme.backgroundBase.copy(alpha = 0.72f)),
                                 startY = h * 0.45f,
                                 endY = h
                             )
@@ -247,12 +268,12 @@ fun AetherArtworkPanel(
                             val r = h * 0.11f
                             val moonTopLeft = Offset(moonCenter.x - r, moonCenter.y - r)
                             val moonSize = Size(r * 2f, r * 2f)
-                            val moonColor = Color(0xFFEAF4FF).copy(alpha = 0.85f)
+                            val moonColor = theme.highlightColor.copy(alpha = 0.85f)
                             val starEvenColor = Color.White.copy(alpha = 0.45f)
                             val starOddColor = Color.White.copy(alpha = 0.25f)
                             val starSize = Size(3f, 3f)
-                            val farRidgeColor = Color(0xFF0E1320).copy(alpha = 0.72f)
-                            val nearRidgeColor = Color(0xFF0A0D15)
+                            val farRidgeColor = theme.surfaceBase.copy(alpha = 0.55f)
+                            val nearRidgeColor = theme.backgroundBase.copy(alpha = 0.72f)
 
                             onDrawBehind {
                                 drawRect(brush = skyBrush)
@@ -321,44 +342,44 @@ fun AetherArtworkPanel(
                                 color = accentWave
                             )
                         }
-                        Text(
-                            text = versionLabel,
-                            style = AetherMonoStyle.copy(
-                                color = AetherColors.OnBackgroundDark,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        )
-                    }
-
-                    Column(verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)) {
-                        Text(
-                            text = instanceTitle,
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = AetherColors.OnBackgroundDark,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
                             Text(
-                                text = runtimeSummary,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = AetherColors.OnSurfaceVariantDark,
-                                modifier = Modifier.weight(1f),
+                                text = versionLabel,
+                                style = AetherMonoStyle.copy(
+                                    color = theme.textPrimary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            )
+                        }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)) {
+                            Text(
+                                text = instanceTitle,
+                                style = MaterialTheme.typography.headlineMedium,
+                                color = theme.textPrimary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            Spacer(modifier = Modifier.height(1.dp))
-                            AetherSoundwaveStrip(
-                                modifier = Modifier.fillMaxWidth(0.32f),
-                                reducedMotion = reducedMotion,
-                                accentStart = AetherColors.AccentBlue,
-                                accentEnd = accentWave,
-                                barCount = 14
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = runtimeSummary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = theme.textSecondary,
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(1.dp))
+                                AetherSoundwaveStrip(
+                                    modifier = Modifier.fillMaxWidth(0.32f),
+                                    reducedMotion = reducedMotion,
+                                    accentStart = theme.primaryAccent,
+                                    accentEnd = accentWave,
+                                    barCount = 14
+                                )
                         }
                     }
                 }

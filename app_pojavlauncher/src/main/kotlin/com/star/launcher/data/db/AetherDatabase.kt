@@ -112,10 +112,27 @@ abstract class AetherDatabase : RoomDatabase() {
         @Volatile
         private var instance: AetherDatabase? = null
 
-        fun getInstance(context: Context): AetherDatabase =
-            instance ?: synchronized(this) {
-                instance ?: buildDatabase(context.applicationContext).also { instance = it }
+        @Volatile
+        private var instanceContext: Context? = null
+
+        fun getInstance(context: Context): AetherDatabase {
+            val appContext = context.applicationContext ?: context
+            val existing = instance
+            if (existing != null && instanceContext === appContext && existing.isOpen) {
+                return existing
             }
+            return synchronized(this) {
+                val synced = instance
+                if (synced != null && instanceContext === appContext && synced.isOpen) {
+                    synced
+                } else {
+                    buildDatabase(appContext).also {
+                        instance = it
+                        instanceContext = appContext
+                    }
+                }
+            }
+        }
 
         private fun buildDatabase(appContext: Context): AetherDatabase =
             Room.databaseBuilder(

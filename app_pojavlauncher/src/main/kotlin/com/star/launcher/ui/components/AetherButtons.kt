@@ -1,12 +1,9 @@
 package com.star.launcher.ui.components
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,12 +13,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -29,13 +22,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.liquid.LocalStarTheme
+import com.star.launcher.ui.theme.liquid.StarLiquidGlassSurface
+import com.star.launcher.ui.theme.studio.StarComponentTarget
+import com.star.launcher.ui.theme.studio.blendColors
 
 @Composable
 fun AetherPrimaryPlayButton(
@@ -45,43 +41,49 @@ fun AetherPrimaryPlayButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val shape = RoundedCornerShape(16.dp)
+    val theme = LocalStarTheme.current
+    val btnStyle = theme.styleFor(StarComponentTarget.BUTTONS)
+    val shape = RoundedCornerShape(btnStyle.cornerRadiusDp.dp)
+    val accent = btnStyle.accentColor
+    val secondary = theme.secondaryAccent
+
     val gradient = if (enabled) {
-        Brush.horizontalGradient(
-            listOf(
-                Color(0xFF1D4ED8),
-                AetherColors.AccentBlue,
-                AetherColors.AccentCyan
+        if (btnStyle.gradientEnabled) {
+            Brush.horizontalGradient(
+                listOf(
+                    blendColors(btnStyle.gradientStart, accent, 0.55f),
+                    accent,
+                    secondary
+                )
             )
-        )
+        } else {
+            Brush.horizontalGradient(listOf(accent, accent))
+        }
     } else {
-        Brush.horizontalGradient(
-            listOf(
-                AetherColors.SurfaceVariantDark,
-                AetherColors.SurfaceVariantDark
-            )
-        )
+        Brush.horizontalGradient(listOf(theme.surfaceVariant, theme.surfaceVariant))
     }
 
-    Surface(
+    val fgColor = if (enabled) {
+        if (accent.luminance() > 0.42f) Color(0xFF06101B) else Color(0xFFF6FAFF)
+    } else {
+        theme.textSecondary
+    }
+
+    StarLiquidGlassSurface(
+        componentTarget = StarComponentTarget.BUTTONS,
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 60.dp)
-            .clip(shape)
-            .clickable(
-                enabled = enabled,
-                role = Role.Button,
-                onClick = onClick
-            ),
+            .heightIn(min = 60.dp),
         shape = shape,
-        color = Color.Transparent,
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (enabled) AetherColors.AccentCyan.copy(alpha = 0.45f) else AetherColors.OutlineDark
-        )
+        containerColorOverride = if (enabled) accent else theme.surfaceVariant,
+        borderColorOverride = if (enabled) secondary else theme.borderColor,
+        onClick = onClick,
+        enabled = enabled,
+        contentColor = fgColor
     ) {
         Row(
             modifier = Modifier
+                .fillMaxWidth()
                 .background(gradient)
                 .padding(horizontal = 20.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -92,14 +94,14 @@ fun AetherPrimaryPlayButton(
                     .size(36.dp)
                     .clip(CircleShape)
                     .background(
-                        if (enabled) Color(0x3307090F) else AetherColors.SurfaceDark.copy(alpha = 0.7f)
+                        if (enabled) fgColor.copy(alpha = 0.18f) else theme.surfaceBase.copy(alpha = 0.7f)
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = AetherIcons.Play,
                     contentDescription = label,
-                    tint = if (enabled) Color(0xFF06101B) else AetherColors.OnSurfaceVariantDark,
+                    tint = fgColor,
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -111,7 +113,7 @@ fun AetherPrimaryPlayButton(
                 Text(
                     text = label,
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = if (enabled) Color(0xFF06101B) else AetherColors.OnSurfaceVariantDark,
+                    color = fgColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -119,7 +121,7 @@ fun AetherPrimaryPlayButton(
                     Text(
                         text = subtitle,
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (enabled) Color(0xCC06101B) else AetherColors.OnSurfaceVariantDark.copy(alpha = 0.75f),
+                        color = fgColor.copy(alpha = 0.80f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -137,33 +139,51 @@ fun AetherPrimaryButton(
     enabled: Boolean = true,
     icon: ImageVector? = null
 ) {
-    Button(
+    val theme = LocalStarTheme.current
+    val btnStyle = theme.styleFor(StarComponentTarget.BUTTONS)
+    val accent = btnStyle.accentColor
+    val container = if (enabled) accent else theme.surfaceVariant
+    val fg = if (enabled) {
+        if (accent.luminance() > 0.42f) Color(0xFF051320) else Color(0xFFF6FAFF)
+    } else {
+        theme.textSecondary
+    }
+    val shape = RoundedCornerShape(btnStyle.cornerRadiusDp.dp)
+
+    StarLiquidGlassSurface(
+        componentTarget = StarComponentTarget.BUTTONS,
+        modifier = modifier.heightIn(min = 44.dp),
+        shape = shape,
+        containerColorOverride = container,
+        borderColorOverride = if (enabled) theme.highlightColor.copy(alpha = 0.45f) else theme.borderColor,
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.heightIn(min = 44.dp),
-        shape = RoundedCornerShape(12.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = AetherColors.PrimaryDark,
-            contentColor = AetherColors.OnPrimaryDark,
-            disabledContainerColor = AetherColors.SurfaceVariantDark,
-            disabledContentColor = AetherColors.OnSurfaceVariantDark
-        ),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+        contentColor = fg
     ) {
-        if (icon != null) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp)
+        Row(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = fg,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(AetherSpacing.Sm))
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = fg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.width(AetherSpacing.Sm))
         }
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
@@ -174,36 +194,57 @@ fun AetherTonalButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     icon: ImageVector? = null,
-    containerColor: Color = AetherColors.SurfaceVariantDark,
-    contentColor: Color = AetherColors.OnSurfaceDark
+    containerColor: Color? = null,
+    contentColor: Color? = null
 ) {
-    Button(
+    val theme = LocalStarTheme.current
+    val btnStyle = theme.styleFor(StarComponentTarget.BUTTONS)
+    val resolvedBg = if (enabled) {
+        containerColor ?: theme.surfaceVariant
+    } else {
+        theme.surfaceVariant.copy(alpha = 0.45f)
+    }
+    val resolvedFg = if (enabled) {
+        contentColor ?: theme.textPrimary
+    } else {
+        theme.textSecondary
+    }
+    val shape = RoundedCornerShape(btnStyle.cornerRadiusDp.dp)
+
+    StarLiquidGlassSurface(
+        componentTarget = StarComponentTarget.BUTTONS,
+        modifier = modifier.heightIn(min = 42.dp),
+        shape = shape,
+        containerColorOverride = resolvedBg,
+        borderColorOverride = if (enabled) btnStyle.accentColor.copy(alpha = 0.35f) else theme.borderColor.copy(alpha = 0.3f),
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.heightIn(min = 42.dp),
-        shape = RoundedCornerShape(12.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = containerColor,
-            contentColor = contentColor,
-            disabledContainerColor = AetherColors.SurfaceVariantDark.copy(alpha = 0.5f),
-            disabledContentColor = AetherColors.OnSurfaceVariantDark
-        ),
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp)
+        contentColor = resolvedFg
     ) {
-        if (icon != null) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(17.dp)
+        Row(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = resolvedFg,
+                    modifier = Modifier.size(17.dp)
+                )
+                Spacer(modifier = Modifier.width(AetherSpacing.Sm))
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelMedium,
+                color = resolvedFg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.width(AetherSpacing.Sm))
         }
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
@@ -215,30 +256,44 @@ fun AetherOutlinedButton(
     enabled: Boolean = true,
     icon: ImageVector? = null
 ) {
-    OutlinedButton(
+    val theme = LocalStarTheme.current
+    val btnStyle = theme.styleFor(StarComponentTarget.BUTTONS)
+    val resolvedFg = if (enabled) theme.textPrimary else theme.textSecondary.copy(alpha = 0.6f)
+    val shape = RoundedCornerShape(btnStyle.cornerRadiusDp.dp)
+
+    StarLiquidGlassSurface(
+        componentTarget = StarComponentTarget.BUTTONS,
+        modifier = modifier.heightIn(min = 42.dp),
+        shape = shape,
+        containerColorOverride = theme.surfaceBase.copy(alpha = 0.38f),
+        borderColorOverride = if (enabled) theme.borderColor else theme.borderColor.copy(alpha = 0.4f),
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.heightIn(min = 42.dp),
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(1.dp, AetherColors.OutlineDark),
-        colors = ButtonDefaults.outlinedButtonColors(
-            contentColor = AetherColors.OnSurfaceDark
-        ),
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp)
+        contentColor = resolvedFg
     ) {
-        if (icon != null) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(17.dp)
+        Row(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 14.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = resolvedFg,
+                    modifier = Modifier.size(17.dp)
+                )
+                Spacer(modifier = Modifier.width(AetherSpacing.Sm))
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelMedium,
+                color = resolvedFg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.width(AetherSpacing.Sm))
         }
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }

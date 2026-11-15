@@ -60,6 +60,8 @@ public class CallbackBridge {
     public static boolean sGamepadDirectInput = false;
     public static boolean sdlControllerActive = false;
     private static int sMouseButtonState = 0;
+    private static final Object sMouseStateLock = new Object();
+    private static final boolean[] sDispatchedMouseButtons = new boolean[LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_LAST + 1];
     private static final Object sPendingTapLock = new Object();
     @Nullable private static Choreographer.FrameCallback sPendingTapReleaseCallback;
     private static int sPendingTapReleaseButton = -1;
@@ -78,8 +80,10 @@ public class CallbackBridge {
                 sPendingTapReleaseCallback = null;
                 sPendingTapReleaseButton = -1;
             }
-            // Never fire a stale GUI delayed release after gameplay grab has already started.
-            if (!scheduledWhileGrabbing && isGrabbing) {
+            // Never fire a stale GUI delayed release after gameplay grab has already started
+            // or while an active STAR HUD lease owns the same mouse button.
+            if ((!scheduledWhileGrabbing && isGrabbing)
+                    || (button >= 0 && StarHudInputManager.getInstance().isMouseButtonHeld(button))) {
                 return;
             }
             putMouseEventWithCoords(button, false, x, y);
@@ -203,6 +207,15 @@ public class CallbackBridge {
     }
 
     public static void sendMouseKeycode(int button, int modifiers, boolean isDown) {
+        synchronized (sMouseStateLock) {
+            if (button >= 0 && button < sDispatchedMouseButtons.length) {
+                if (sDispatchedMouseButtons[button] == isDown) {
+                    // Enforce strict state transition: never emit duplicate DOWN or UP.
+                    return;
+                }
+                sDispatchedMouseButtons[button] = isDown;
+            }
+        }
         // if (isGrabbing()) DEBUG_STRING.append("MouseGrabStrace: " + android.util.Log.getStackTraceString(new Throwable()) + "\n");
         nativeSendMouseButton(button, isDown ? 1 : 0, modifiers);
         if (!MinecraftGLSurface.sdlEnabled) return;
@@ -397,6 +410,7 @@ public class CallbackBridge {
         if (!grabbing) {
             sSawGrabLossSinceNotify = true;
             StarHudInputManager.getInstance().releaseAllInputs("grab_state_lost");
+            releaseStrayDispatchedMouseButtons();
         } else {
             sGrabHandler.post(CallbackBridge::flushPendingTapRelease);
         }
@@ -423,6 +437,18 @@ public class CallbackBridge {
             notifyGrabListeners(grabbing);
         }, 16);
 
+    }
+
+    private static void releaseStrayDispatchedMouseButtons() {
+        for (int btn = 0; btn < sDispatchedMouseButtons.length; btn++) {
+            boolean pressed;
+            synchronized (sMouseStateLock) {
+                pressed = sDispatchedMouseButtons[btn];
+            }
+            if (pressed) {
+                sendMouseKeycode(btn, 0, false);
+            }
+        }
     }
 
     private static void notifyGrabListeners(boolean grabbing) {

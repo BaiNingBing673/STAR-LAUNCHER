@@ -2,6 +2,7 @@ package com.star.launcher.mods.api
 
 import com.star.launcher.core.AetherSettingsRepository
 import com.star.launcher.data.security.TokenVault
+import kotlinx.coroutines.runBlocking
 import java.net.URI
 
 sealed interface CurseForgeAuthConfig {
@@ -107,6 +108,8 @@ class CurseForgeCredentialProvider(
         is CurseForgeAuthConfig.DirectVaultKey -> CurseForgeCredentialStatus.DEVELOPER_VAULT_KEY_CONFIGURED
         CurseForgeAuthConfig.Unconfigured -> CurseForgeCredentialStatus.UNCONFIGURED
     }
+
+    fun getAuthConfigBlocking(): CurseForgeAuthConfig = runBlocking { getAuthConfig() }
 
     suspend fun saveDeveloperApiKey(rawKey: String) {
         val rawHasNewline = rawKey.trim().any { it == '\n' || it == '\r' }

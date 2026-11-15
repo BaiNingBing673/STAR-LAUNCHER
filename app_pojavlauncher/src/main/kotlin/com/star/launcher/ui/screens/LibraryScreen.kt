@@ -44,6 +44,7 @@ import com.star.launcher.ui.dashboard.AetherDashboardUiState
 import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.studio.StarComponentTarget
 
 @Composable
 fun LibraryScreen(
@@ -176,7 +177,8 @@ private fun LibraryInstanceCard(
     onEvaluateCompat: () -> Unit
 ) {
     AetherSurfaceCard(
-        borderColor = if (isFeatured) AetherColors.AccentCyan.copy(alpha = 0.5f) else AetherColors.OutlineVariantDark,
+        borderColor = if (isFeatured) AetherColors.AccentCyan.copy(alpha = 0.5f) else null,
+        componentTarget = StarComponentTarget.PROFILE_COMPONENTS,
         onClick = onOpenDetail
     ) {
         Row(

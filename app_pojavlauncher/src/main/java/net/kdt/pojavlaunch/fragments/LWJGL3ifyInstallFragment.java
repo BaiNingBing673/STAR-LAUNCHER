@@ -24,7 +24,7 @@ public class LWJGL3ifyInstallFragment extends ModVersionListFragment<LWJGL3ifyUt
     @Override
     public void onAttach(@NonNull Context context) {
         super.onAttach(context);
-        modpackApi = new CommonApi(context.getString(R.string.curseforge_api_key));
+        modpackApi = new CommonApi(context);
     }
     public LWJGL3ifyInstallFragment() {
         super(TAG);

@@ -1,6 +1,5 @@
 package com.star.launcher.ui.components
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -22,64 +20,50 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.star.launcher.ui.theme.AetherColors
-import com.star.launcher.ui.theme.AetherElevation
 import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.liquid.LocalStarTheme
+import com.star.launcher.ui.theme.liquid.StarLiquidGlassSurface
+import com.star.launcher.ui.theme.studio.StarComponentTarget
 
 @Composable
 fun AetherSurfaceCard(
     modifier: Modifier = Modifier,
-    containerColor: Color = AetherColors.SurfaceDark,
-    borderColor: Color = AetherColors.OutlineVariantDark,
+    containerColor: Color? = null,
+    borderColor: Color? = null,
+    componentTarget: StarComponentTarget = StarComponentTarget.CARDS,
     onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val shape = MaterialTheme.shapes.large
-    if (onClick != null) {
-        Surface(
-            onClick = onClick,
-            modifier = modifier,
-            shape = shape,
-            color = containerColor,
-            tonalElevation = AetherElevation.Level1,
-            border = BorderStroke(1.dp, borderColor)
-        ) {
-            Column(
-                modifier = Modifier.padding(AetherSpacing.Md),
-                verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
-                content = content
-            )
-        }
-    } else {
-        Surface(
-            modifier = modifier,
-            shape = shape,
-            color = containerColor,
-            tonalElevation = AetherElevation.Level1,
-            border = BorderStroke(1.dp, borderColor)
-        ) {
-            Column(
-                modifier = Modifier.padding(AetherSpacing.Md),
-                verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
-                content = content
-            )
-        }
+    StarLiquidGlassSurface(
+        componentTarget = componentTarget,
+        modifier = modifier,
+        containerColorOverride = containerColor,
+        borderColorOverride = borderColor,
+        onClick = onClick
+    ) {
+        Column(
+            modifier = Modifier.padding(AetherSpacing.Md),
+            verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
+            content = content
+        )
     }
 }
 
 @Composable
 fun AetherAccentCard(
     modifier: Modifier = Modifier,
-    accentColor: Color = AetherColors.AccentViolet,
+    accentColor: Color? = null,
+    componentTarget: StarComponentTarget = StarComponentTarget.CARDS,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val shape = MaterialTheme.shapes.large
-    Surface(
+    val theme = LocalStarTheme.current
+    val resolvedAccent = accentColor ?: theme.styleFor(componentTarget).accentColor
+    StarLiquidGlassSurface(
+        componentTarget = componentTarget,
         modifier = modifier,
-        shape = shape,
-        color = AetherColors.SurfaceElevatedDark,
-        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.28f))
+        containerColorOverride = theme.surfaceElevated,
+        borderColorOverride = resolvedAccent.copy(alpha = 0.55f)
     ) {
         Box(
             modifier = Modifier
@@ -87,7 +71,7 @@ fun AetherAccentCard(
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            accentColor.copy(alpha = 0.11f),
+                            resolvedAccent.copy(alpha = 0.13f),
                             Color.Transparent
                         )
                     )
@@ -109,6 +93,7 @@ fun AetherSectionHeader(
     modifier: Modifier = Modifier,
     action: @Composable (RowScope.() -> Unit)? = null
 ) {
+    val theme = LocalStarTheme.current
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -121,7 +106,7 @@ fun AetherSectionHeader(
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onBackground,
+                color = theme.textPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -129,7 +114,7 @@ fun AetherSectionHeader(
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = theme.textSecondary,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -149,25 +134,28 @@ fun AetherSectionHeader(
 fun AetherMetricChip(
     label: String,
     value: String,
-    accentColor: Color = AetherColors.AccentCyan,
+    accentColor: Color? = null,
     modifier: Modifier = Modifier
 ) {
+    val theme = LocalStarTheme.current
+    val resolvedAccent = accentColor ?: theme.secondaryAccent
+    val chipRadius = (theme.styleFor(StarComponentTarget.CARDS).cornerRadiusDp * 0.65f).coerceIn(6f, 18f)
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(AetherColors.SurfaceVariantDark.copy(alpha = 0.65f))
+            .clip(RoundedCornerShape(chipRadius.dp))
+            .background(theme.surfaceVariant.copy(alpha = 0.62f))
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         Text(
             text = label.uppercase(),
             style = MaterialTheme.typography.labelSmall,
-            color = AetherColors.OnSurfaceVariantDark,
+            color = theme.textSecondary,
             maxLines = 1
         )
         Text(
             text = value,
-            style = AetherMonoStyle.copy(color = accentColor),
+            style = AetherMonoStyle.copy(color = resolvedAccent),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )

@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
+import com.star.launcher.ui.theme.studio.StarComponentTarget
 import com.star.launcher.version.InstallErrorCategory
 import com.star.launcher.version.InstallationProgress
 import com.star.launcher.version.VersionCatalogItem
@@ -144,7 +145,8 @@ fun VersionInstallProgressCard(
     AetherSurfaceCard(
         modifier = modifier.fillMaxWidth(),
         containerColor = AetherColors.SurfaceElevatedDark,
-        borderColor = AetherColors.AccentViolet.copy(alpha = 0.45f)
+        borderColor = AetherColors.AccentViolet.copy(alpha = 0.45f),
+        componentTarget = StarComponentTarget.DOWNLOAD_PROGRESS_PANELS
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -358,18 +360,19 @@ fun VersionListRow(
         isSelected -> AetherColors.AccentCyan.copy(alpha = 0.85f)
         item.isInstalling -> AetherColors.AccentViolet.copy(alpha = 0.55f)
         item.isFailed -> AetherColors.ErrorDark.copy(alpha = 0.45f)
-        else -> AetherColors.OutlineVariantDark
+        else -> null
     }
     val containerColor = if (isSelected) {
         AetherColors.SurfaceElevatedDark
     } else {
-        AetherColors.SurfaceDark
+        null
     }
 
     AetherSurfaceCard(
         modifier = modifier.fillMaxWidth(),
         containerColor = containerColor,
         borderColor = borderColor,
+        componentTarget = StarComponentTarget.VERSION_PANELS,
         onClick = onSelect
     ) {
         Row(
@@ -524,6 +527,7 @@ fun VersionDetailPanel(
 ) {
     AetherAccentCard(
         modifier = modifier.fillMaxWidth(),
+        componentTarget = StarComponentTarget.VERSION_PANELS,
         accentColor = when (item.state) {
             VersionState.INSTALLED -> AetherColors.TierVerifiedFg
             VersionState.INSTALLING -> AetherColors.AccentViolet

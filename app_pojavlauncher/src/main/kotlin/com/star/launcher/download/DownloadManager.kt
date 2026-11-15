@@ -25,6 +25,13 @@ interface HttpTransport {
         destinationFile: File,
         onProgress: suspend (downloadedBytes: Long, totalBytes: Long) -> Unit
     )
+
+    suspend fun downloadToFile(
+        url: String,
+        destinationFile: File,
+        headers: Map<String, String>,
+        onProgress: suspend (downloadedBytes: Long, totalBytes: Long) -> Unit
+    ) = downloadToFile(url, destinationFile, onProgress)
 }
 
 class UrlConnectionHttpTransport(
@@ -36,13 +43,20 @@ class UrlConnectionHttpTransport(
         url: String,
         destinationFile: File,
         onProgress: suspend (downloadedBytes: Long, totalBytes: Long) -> Unit
+    ) = downloadToFile(url, destinationFile, emptyMap(), onProgress)
+
+    override suspend fun downloadToFile(
+        url: String,
+        destinationFile: File,
+        headers: Map<String, String>,
+        onProgress: suspend (downloadedBytes: Long, totalBytes: Long) -> Unit
     ) = withContext(Dispatchers.IO) {
         destinationFile.parentFile?.mkdirs()
         var attempt = 0
         var backoffMs = 400L
         while (true) {
             try {
-                downloadWithResume(url, destinationFile, onProgress)
+                downloadWithResume(url, destinationFile, headers, onProgress)
                 return@withContext
             } catch (ce: CancellationException) {
                 throw ce
@@ -60,18 +74,35 @@ class UrlConnectionHttpTransport(
     private suspend fun downloadWithResume(
         initialUrl: String,
         destinationFile: File,
+        headers: Map<String, String>,
         onProgress: suspend (downloadedBytes: Long, totalBytes: Long) -> Unit
     ) {
         var existingBytes = if (destinationFile.isFile) destinationFile.length().coerceAtLeast(0L) else 0L
         var currentUrl = initialUrl
+        val originHost = runCatching { URL(initialUrl).host }.getOrNull()
         var redirects = 0
         while (true) {
-            val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+            val targetUrl = URL(currentUrl)
+            val targetHost = targetUrl.host
+            val sameHost = originHost != null && targetHost != null && targetHost.equals(originHost, ignoreCase = true)
+            val trustedCurseForgeHost = targetHost != null && (
+                targetHost.equals("api.curseforge.com", ignoreCase = true) ||
+                    targetHost.equals("forgecdn.net", ignoreCase = true) ||
+                    targetHost.endsWith(".forgecdn.net", ignoreCase = true)
+                )
+            val conn = (targetUrl.openConnection() as HttpURLConnection).apply {
                 connectTimeout = connectTimeoutMs
                 readTimeout = readTimeoutMs
                 requestMethod = "GET"
                 instanceFollowRedirects = false
                 setRequestProperty("User-Agent", "STARLauncher/1.0")
+                for ((k, v) in headers) {
+                    val isSensitive = k.equals("x-api-key", ignoreCase = true) ||
+                        k.equals("Authorization", ignoreCase = true)
+                    if (!isSensitive || sameHost || (trustedCurseForgeHost && k.equals("x-api-key", ignoreCase = true))) {
+                        setRequestProperty(k, v)
+                    }
+                }
                 if (existingBytes > 0L) {
                     setRequestProperty("Range", "bytes=$existingBytes-")
                 }
@@ -124,6 +155,9 @@ class UrlConnectionHttpTransport(
                         }
                         output.flush()
                     }
+                }
+                if (total > 0L && downloaded != total) {
+                    throw IOException("Incomplete download from $currentUrl: expected $total bytes, got $downloaded bytes")
                 }
                 onProgress(downloaded, if (total > 0L) total else downloaded)
                 return

@@ -440,6 +440,29 @@ class CurseForgeRepository(
         return primary
     }
 
+    suspend fun getDownloadHeaders(downloadUrl: String): Map<String, String> {
+        val parsed = runCatching { java.net.URI(downloadUrl) }.getOrNull() ?: return emptyMap()
+        val host = parsed.host?.lowercase() ?: return emptyMap()
+        return when (val auth = credentialProvider.getAuthConfig()) {
+            is CurseForgeAuthConfig.DirectVaultKey -> {
+                if (host == "api.curseforge.com" || host == "forgecdn.net" || host.endsWith(".forgecdn.net")) {
+                    mapOf("x-api-key" to auth.apiKey)
+                } else {
+                    emptyMap()
+                }
+            }
+            is CurseForgeAuthConfig.BackendProxy -> {
+                val proxyHost = runCatching { java.net.URI(auth.proxyBaseUrl).host?.lowercase() }.getOrNull()
+                if (!auth.clientToken.isNullOrBlank() && proxyHost != null && host == proxyHost) {
+                    mapOf("Authorization" to "Bearer ${auth.clientToken}")
+                } else {
+                    emptyMap()
+                }
+            }
+            CurseForgeAuthConfig.Unconfigured -> emptyMap()
+        }
+    }
+
     suspend fun getCategories(forceRefresh: Boolean = false): Result<List<CurseForgeCategory>> {
         val primary = runApiCall {
             if (!forceRefresh && cachedCategories.isNotEmpty()) {
