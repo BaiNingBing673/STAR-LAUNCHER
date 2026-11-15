@@ -283,3 +283,70 @@ jobs:
         with:
           name: ci-release-logs
           path: logs/
+
+  publish-draft-release:
+    needs: [verify-and-debug, release]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read tag version
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          test -n "$TAG_VER"
+          echo "version_name=$TAG_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Download signed release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: STAR-Launcher-v${{ steps.meta.outputs.version_name }}
+          path: out
+
+      - name: Verify checksum and prepare release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          APK_FILE="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          SHA_FILE="${APK_FILE}.sha256"
+          (cd out && sha256sum -c "$SHA_FILE")
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          TRACKED_NOTES="docs/RELEASE_NOTES_v${{ steps.meta.outputs.version_name }}.md"
+          if [ -f "$TRACKED_NOTES" ]; then
+            cp "$TRACKED_NOTES" "$NOTES_FILE"
+          else
+            printf '# STAR Launcher %s\n' "$GITHUB_REF_NAME" > "$NOTES_FILE"
+          fi
+          {
+            echo ""
+            echo "### Release Asset Checksum (\`SHA-256\`)"
+            echo '```text'
+            cat "out/$SHA_FILE"
+            echo '```'
+          } >> "$NOTES_FILE"
+          echo "file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+          echo "apk=out/$APK_FILE" >> "$GITHUB_OUTPUT"
+          echo "sha=out/$SHA_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update Draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${{ steps.notes.outputs.apk }}" "${{ steps.notes.outputs.sha }}" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "STAR Launcher $GITHUB_REF_NAME" --notes-file "${{ steps.notes.outputs.file }}" --draft
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "${{ steps.notes.outputs.apk }}" \
+              "${{ steps.notes.outputs.sha }}" \
+              --draft \
+              --verify-tag \
+              --title "STAR Launcher $GITHUB_REF_NAME" \
+              --notes-file "${{ steps.notes.outputs.file }}"
+          fi
