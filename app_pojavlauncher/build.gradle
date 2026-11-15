@@ -273,6 +273,11 @@ android {
         unitTests {
             includeAndroidResources = true
             all {
+                maxHeapSize = "1024m"
+                testLogging {
+                    events "failed"
+                    exceptionFormat = "full"
+                }
                 def toolchainService = project.extensions.getByType(org.gradle.jvm.toolchain.JavaToolchainService)
                 javaLauncher = toolchainService.launcherFor {
                     languageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion.of(21)

@@ -66,6 +66,34 @@ jobs:
           set -o pipefail
           ./gradlew :MioLibPatcher:test :app_pojavlauncher:testDebugUnitTest --no-daemon --console=plain 2>&1 | tee logs/unit-tests.log
 
+      - name: Report failed test details
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          found = False
+          for path in sorted(glob.glob('**/build/test-results/**/*.xml', recursive=True)):
+              try:
+                  root = ET.parse(path).getroot()
+                  for tc in root.findall('.//testcase'):
+                      err = tc.find('failure')
+                      if err is None:
+                          err = tc.find('error')
+                      if err is not None:
+                          found = True
+                          msg = (err.attrib.get('message') or '').replace('\n', ' ')[:500]
+                          print(f"::error file={path}::{tc.attrib.get('classname')}.{tc.attrib.get('name')}: {msg}")
+                          if err.text:
+                              print(err.text[:1500])
+              except Exception as exc:
+                  print(f"::warning file={path}::Failed to parse XML: {exc}")
+          if not found and glob.glob('logs/unit-tests.log'):
+              with open('logs/unit-tests.log', 'r', errors='replace') as fh:
+                  tail = fh.readlines()[-40:]
+              print("::error file=logs/unit-tests.log::" + " | ".join(line.strip() for line in tail[-15:] if line.strip()))
+          PY
+          tail -n 120 logs/unit-tests.log || true
+
       - name: Build Debug APK
         env:
           CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
