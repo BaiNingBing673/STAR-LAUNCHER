@@ -23,6 +23,7 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.oracle.dalvik.*;
+import com.star.launcher.diagnostics.StartupProfiler;
 import java.io.*;
 import java.util.*;
 import net.kdt.pojavlaunch.*;
@@ -196,8 +197,7 @@ public class JREUtils {
 
         if(PREF_DUMP_SHADERS)
             envMap.put("LIBGL_VGPU_DUMP", "1");
-        if(PREF_VSYNC_IN_ZINK)
-            envMap.put("POJAV_VSYNC_IN_ZINK", "1");
+        envMap.put("POJAV_VSYNC_IN_ZINK", PREF_VSYNC_IN_ZINK ? "1" : "0");
         if(Tools.deviceHasHangingLinker())
             envMap.put("POJAV_EMUI_ITERATOR_MITIGATE", "1");
 
@@ -219,6 +219,18 @@ public class JREUtils {
             envMap.put("POJAV_FFMPEG_PATH", FFmpegPlugin.executablePath);
         }
 
+        if (LOCAL_RENDERER != null && (LOCAL_RENDERER.contains("vulkan") || LOCAL_RENDERER.contains("zink"))) {
+            boolean vulkanSupported = activity != null && Tools.checkVulkanSupport(activity.getPackageManager());
+            if (!vulkanSupported) {
+                boolean hasMg = new File(NATIVE_LIB_DIR, "libmobileglues.so").exists();
+                String fallbackRenderer = (GLInfoUtils.getGlInfo().glesMajorVersion >= 3 && hasMg)
+                        ? "opengles_mobileglues"
+                        : "opengles2";
+                Log.w("JREUtils", "Vulkan is not supported on this device; falling back from " + LOCAL_RENDERER + " to " + fallbackRenderer);
+                Logger.appendToLog("Vulkan fallback triggered: " + LOCAL_RENDERER + " -> " + fallbackRenderer);
+                LOCAL_RENDERER = fallbackRenderer;
+            }
+        }
         if(LOCAL_RENDERER != null) {
             envMap.put("AMETHYST_RENDERER", LOCAL_RENDERER);
             if(LOCAL_RENDERER.equals("opengles3_ltw")) {
@@ -321,17 +333,21 @@ public class JREUtils {
     private static void readCustomEnv(Map<String, String> envMap) throws IOException {
         File customEnvFile = new File(Tools.DIR_GAME_HOME, "custom_env.txt");
         if (customEnvFile.exists() && customEnvFile.isFile()) {
-            BufferedReader reader = new BufferedReader(new FileReader(customEnvFile));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                // Not use split() as only split first one
-                int index = line.indexOf("=");
-                envMap.put(line.substring(0, index), line.substring(index + 1));
+            try (BufferedReader reader = new BufferedReader(new FileReader(customEnvFile))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String trimmed = line.trim();
+                    if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+                    // Split on first '=' only
+                    int index = line.indexOf('=');
+                    if (index <= 0) continue;
+                    envMap.put(line.substring(0, index).trim(), line.substring(index + 1));
+                }
             }
-            reader.close();
         }
     }
     public static void launchJavaVM(final AppCompatActivity activity, final Runtime runtime, File gameDirectory, final List<String> JVMArgs, final String userArgsString) throws Throwable {
+        final long jvmSetupStart = StartupProfiler.beginStage();
         String runtimeHome = MultiRTUtils.getRuntimeHome(runtime.name).getAbsolutePath();
 
         JREUtils.relocateLibPath(runtime, runtimeHome);
@@ -414,6 +430,7 @@ public class JREUtils {
         JREUtils.initializeHooks();
         chdir(gameDirectory == null ? Tools.DIR_GAME_NEW : gameDirectory.getAbsolutePath());
         userArgs.add(0,"java"); //argv[0] is the program name according to C standard.
+        StartupProfiler.endStage("jvm_env_and_gl_setup", jvmSetupStart, LOCAL_RENDERER);
 
         final int exitCode = VMLauncher.launchJVM(userArgs.toArray(new String[0]));
         Logger.appendToLog("Java Exit code: " + exitCode);
@@ -628,6 +645,7 @@ public class JREUtils {
     public static native void setLdLibraryPath(String ldLibraryPath);
     public static native void setupBridgeWindow(Object surface);
     public static native void releaseBridgeWindow();
+    public static native void setAndroidSurfaceReady(boolean ready);
     public static native void initializeHooks();
     public static native void setupExitMethod(Context context);
     // Obtain AWT screen pixels to render on Android SurfaceView

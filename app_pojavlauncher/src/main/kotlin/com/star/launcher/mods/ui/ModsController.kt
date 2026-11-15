@@ -139,17 +139,20 @@ data class ModsUiState(
     val showCredentialConfigDialog: Boolean = false,
     val credentialConfigError: String? = null
 ) {
-    val filteredInventoryMods: List<InstalledModInventoryItem>
-        get() {
-            val all = inventoryReport?.mods.orEmpty()
-            val query = inventorySearchQuery.trim()
-            if (query.isEmpty()) return all
-            return all.filter {
+    @delegate:Transient
+    val filteredInventoryMods: List<InstalledModInventoryItem> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        val all = inventoryReport?.mods.orEmpty()
+        val query = inventorySearchQuery.trim()
+        if (query.isEmpty()) {
+            all
+        } else {
+            all.filter {
                 it.displayName.contains(query, ignoreCase = true) ||
                     it.fileName.contains(query, ignoreCase = true) ||
                     (it.modIdInJar?.contains(query, ignoreCase = true) == true)
             }
         }
+    }
 }
 
 class ModsController(
@@ -168,10 +171,13 @@ class ModsController(
 
     private var observingStarted = false
     private var searchJob: Job? = null
+    private var searchDebounceJob: Job? = null
     private var detailJob: Job? = null
     private var planJob: Job? = null
     private var installJob: Job? = null
     private var lastSyncedInstanceId: String? = null
+    private var lastSyncedInstanceVersionId: String? = null
+    private var lastSyncedInstanceGameDir: String? = null
     private var lastSubmittedPlan: Triple<ModInstallPlan, Boolean, String?>? = null
     private var filtersMatchedToInstance = true
 
@@ -198,7 +204,20 @@ class ModsController(
         allInstances: List<GameInstanceEntity>
     ) {
         val instanceChanged = selectedInstance?.instanceId != lastSyncedInstanceId
+        val envInputsChanged = instanceChanged ||
+            selectedInstance?.versionId != lastSyncedInstanceVersionId ||
+            selectedInstance?.gameDirPath != lastSyncedInstanceGameDir ||
+            _uiState.value.instanceEnvironment == null
+        if (!envInputsChanged && _uiState.value.availableInstances === allInstances) {
+            return
+        }
         lastSyncedInstanceId = selectedInstance?.instanceId
+        lastSyncedInstanceVersionId = selectedInstance?.versionId
+        lastSyncedInstanceGameDir = selectedInstance?.gameDirPath
+        if (!envInputsChanged) {
+            _uiState.update { it.copy(selectedInstance = selectedInstance, availableInstances = allInstances) }
+            return
+        }
         scope.launch {
             val env = runCatching {
                 withContext(ioDispatcher) {
@@ -223,7 +242,7 @@ class ModsController(
             if (instanceChanged) {
                 reEvaluateLoadedCompatibility()
                 refreshInstalledInventory()
-                if (_uiState.value.credentialStatus != CurseForgeCredentialStatus.UNCONFIGURED) {
+                if (_uiState.value.credentialStatus != CurseForgeCredentialStatus.UNCONFIGURED || repository.enablePublicFallback) {
                     loadSearchAndFeatured(resetPage = true)
                 }
             }
@@ -236,7 +255,7 @@ class ModsController(
                 withContext(ioDispatcher) { credentialProvider.getCredentialStatus() }
             }.getOrDefault(CurseForgeCredentialStatus.UNCONFIGURED)
             _uiState.update { it.copy(credentialStatus = status) }
-            if (status == CurseForgeCredentialStatus.UNCONFIGURED) {
+            if (status == CurseForgeCredentialStatus.UNCONFIGURED && !repository.enablePublicFallback) {
                 _uiState.update {
                     it.copy(
                         isLoadingSearch = false,
@@ -250,9 +269,11 @@ class ModsController(
                 }
                 return@launch
             }
-            runCatching { loadMetadataCatalogs() }
             if (initialLoad || _uiState.value.searchResults.isEmpty()) {
                 loadSearchAndFeatured(resetPage = true)
+            }
+            launch {
+                runCatching { loadMetadataCatalogs() }
             }
         }
     }
@@ -277,10 +298,18 @@ class ModsController(
     }
 
     fun updateSearchQuery(query: String) {
+        val prev = _uiState.value.searchQuery
         _uiState.update { it.copy(searchQuery = query) }
+        if (query.trim() == prev.trim()) return
+        searchDebounceJob?.cancel()
+        searchDebounceJob = scope.launch {
+            kotlinx.coroutines.delay(300L)
+            loadSearchAndFeatured(resetPage = true)
+        }
     }
 
     fun submitSearch() {
+        searchDebounceJob?.cancel()
         loadSearchAndFeatured(resetPage = true)
     }
 
@@ -339,7 +368,7 @@ class ModsController(
             val snapshot = _uiState.value
             val status = credentialProvider.getCredentialStatus()
             _uiState.update { it.copy(credentialStatus = status) }
-            if (status == CurseForgeCredentialStatus.UNCONFIGURED) {
+            if (status == CurseForgeCredentialStatus.UNCONFIGURED && !repository.enablePublicFallback) {
                 _uiState.update {
                     it.copy(
                         isLoadingSearch = false,
@@ -748,7 +777,7 @@ class ModsController(
         }
         scope.launch {
             _uiState.update { it.copy(isLoadingInventory = true) }
-            val report = installedModManager.inspectInventory(env)
+            val report = withContext(ioDispatcher) { installedModManager.inspectInventory(env) }
             _uiState.update {
                 it.copy(
                     inventoryReport = report,
@@ -765,7 +794,7 @@ class ModsController(
     fun toggleModEnabled(item: InstalledModInventoryItem) {
         val env = _uiState.value.instanceEnvironment ?: return
         scope.launch {
-            installedModManager.toggleModEnabled(env, item.fileName)
+            withContext(ioDispatcher) { installedModManager.toggleModEnabled(env, item.fileName) }
                 .onSuccess { refreshInstalledInventory() }
                 .onFailure { err ->
                     _uiState.update {
@@ -788,7 +817,7 @@ class ModsController(
         val env = _uiState.value.instanceEnvironment ?: return
         _uiState.update { it.copy(pendingDeleteMod = null) }
         scope.launch {
-            installedModManager.removeMod(env, item.fileName)
+            withContext(ioDispatcher) { installedModManager.removeMod(env, item.fileName) }
                 .onSuccess {
                     _uiState.update { it.copy(installStatusBanner = "Removed ${item.fileName}.") }
                     refreshInstalledInventory()
@@ -808,7 +837,7 @@ class ModsController(
         if (report.mods.isEmpty()) return
         scope.launch {
             _uiState.update { it.copy(isCheckingUpdates = true) }
-            val updatedItems = installedModManager.checkUpdates(env, report.mods)
+            val updatedItems = withContext(ioDispatcher) { installedModManager.checkUpdates(env, report.mods) }
             _uiState.update { state ->
                 state.copy(
                     isCheckingUpdates = false,
@@ -920,7 +949,8 @@ class ModsController(
             .orEmpty()
 
         _uiState.update { state ->
-            val updatedAssessments = state.searchResults.associate { mod ->
+            val allLoadedMods = (state.featuredMods + state.searchResults).distinctBy { it.id }
+            val updatedAssessments = allLoadedMods.associate { mod ->
                 mod.id to compatibilityEngine.evaluateModOverview(env, mod, installedIds)
             }
             val detail = state.detailState?.let { d ->
@@ -983,6 +1013,19 @@ class ModsController(
             title = "Authentication Failed",
             message = err.message
         )
+        is CurseForgeApiException.Forbidden -> if (!err.isDistributionRestriction) {
+            ModsUiError(
+                kind = ModsErrorKind.UNAUTHORIZED,
+                title = "CurseForge Access Denied (HTTP 403)",
+                message = err.message
+            )
+        } else {
+            ModsUiError(
+                kind = ModsErrorKind.HTTP_ERROR,
+                title = "Download Restricted",
+                message = err.message
+            )
+        }
         else -> ModsUiError(
             kind = ModsErrorKind.HTTP_ERROR,
             title = "CurseForge Request Failed",

@@ -79,8 +79,17 @@
 				android:id="@+id/hotbar_view"
 				android:layout_width="0px"
 				android:layout_height="0px"/>
+			<com.star.launcher.hud.StarTouchHudOverlay
+				android:id="@+id/star_touch_hud_overlay"
+				android:layout_width="match_parent"
+				android:layout_height="match_parent"/>
 
 		</net.kdt.pojavlaunch.customcontrols.ControlLayout>
+
+		<com.star.launcher.lyrics.overlay.StarLiveLyricsOverlay
+			android:id="@+id/star_live_lyrics_overlay"
+			android:layout_width="match_parent"
+			android:layout_height="match_parent" />
 
 		<com.kdt.LoggerView
 			android:id="@+id/mainLoggerView"

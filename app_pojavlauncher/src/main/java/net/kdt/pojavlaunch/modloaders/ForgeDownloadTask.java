@@ -45,14 +45,27 @@ public class ForgeDownloadTask implements Runnable, Tools.DownloaderFeedback {
 
     private void downloadForge() {
         ProgressKeeper.submitProgress(ProgressLayout.INSTALL_MODPACK, 0, R.string.forge_dl_progress, mFullVersion);
+        File destinationFile = new File(Tools.DIR_CACHE, "forge-installer.jar");
+        File stagingFile = new File(Tools.DIR_CACHE, "forge-installer.jar.part");
         try {
-            File destinationFile = new File(Tools.DIR_CACHE, "forge-installer.jar");
-            byte[] buffer = new byte[8192];
-            DownloadUtils.downloadFileMonitored(mDownloadUrl, destinationFile, buffer, this);
+            byte[] buffer = new byte[16384];
+            DownloadUtils.downloadFileMonitored(mDownloadUrl, stagingFile, buffer, this);
+            try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(stagingFile)) {
+                if (zip.getEntry("install_profile.json") == null && zip.getEntry("META-INF/MANIFEST.MF") == null) {
+                    throw new IOException("Downloaded Forge installer is missing expected metadata entries.");
+                }
+            }
+            if (destinationFile.exists()) destinationFile.delete();
+            if (!stagingFile.renameTo(destinationFile)) {
+                org.apache.commons.io.FileUtils.copyFile(stagingFile, destinationFile);
+                stagingFile.delete();
+            }
             mListener.onDownloadFinished(destinationFile);
         }catch (FileNotFoundException e) {
+            stagingFile.delete();
             mListener.onDataNotAvailable();
         } catch (IOException e) {
+            stagingFile.delete();
             mListener.onDownloadError(e);
         }
     }

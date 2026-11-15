@@ -30,6 +30,16 @@ public class CallbackBridge {
     private static final ArrayList<GrabListener> grabListeners = new ArrayList<>();
     // Use a weak reference here to avoid possibly statically referencing a Context.
     private static @Nullable WeakReference<DirectGamepadEnableHandler> sDirectGamepadEnableHandler;
+    private static @Nullable WeakReference<HotbarSyncListener> sHotbarSyncListener;
+
+    public interface HotbarSyncListener {
+        void onHotbarSlotSelected(int slotIndex);
+        void onHotbarScroll(float yOffset);
+    }
+
+    public static void setHotbarSyncListener(@Nullable HotbarSyncListener listener) {
+        sHotbarSyncListener = listener == null ? null : new WeakReference<>(listener);
+    }
     
     public static final int CLIPBOARD_COPY = 2000;
     public static final int CLIPBOARD_PASTE = 2001;
@@ -91,17 +101,20 @@ public class CallbackBridge {
             nativeSendCharMods(keychar,modifiers);
             nativeSendChar(keychar);
         }
+        // If not in GUI and pressed a hotbar key, synchronize HotbarView selection index
+        if (isGrabbing() && isDown && keycode >= LwjglGlfwKeycode.GLFW_KEY_1 && keycode <= LwjglGlfwKeycode.GLFW_KEY_9) {
+            int slotIndex = keycode - LwjglGlfwKeycode.GLFW_KEY_1;
+            HotbarSyncListener syncListener = sHotbarSyncListener != null ? sHotbarSyncListener.get() : null;
+            if (syncListener != null) {
+                syncListener.onHotbarSlotSelected(slotIndex);
+            } else if (SDLActivity.getContext() instanceof MainActivity) {
+                ((MainActivity) SDLActivity.getContext()).setmLastIndex(slotIndex);
+            }
+        }
         if (!MinecraftGLSurface.sdlEnabled) return;
         if(isDown){
             SDLActivity.onNativeKeyDown(EfficientAndroidLWJGLKeycode.getAndroidKeycode(keycode));
         } else SDLActivity.onNativeKeyUp(EfficientAndroidLWJGLKeycode.getAndroidKeycode(keycode));
-        // If not in GUI and pressed a hotbar key, update HotbarView's last index for gesture
-        // detection. This is still faulty but should be less so.
-        if (isGrabbing()){
-            if (keycode >= LwjglGlfwKeycode.GLFW_KEY_0 && keycode <= LwjglGlfwKeycode.GLFW_KEY_9){
-                ((MainActivity) SDLActivity.getContext()).setmLastIndex(keycode - LwjglGlfwKeycode.GLFW_KEY_0);
-            }
-        }
     }
 
     public static void sendChar(char keychar, int modifiers){
@@ -184,6 +197,12 @@ public class CallbackBridge {
     
     public static void sendScroll(float xoffset, float yoffset) {
         nativeSendScroll(xoffset, yoffset);
+        if (isGrabbing() && yoffset != 0f) {
+            HotbarSyncListener syncListener = sHotbarSyncListener != null ? sHotbarSyncListener.get() : null;
+            if (syncListener != null) {
+                syncListener.onHotbarScroll(yoffset);
+            }
+        }
         if (!MinecraftGLSurface.sdlEnabled) return;
         SDLActivity.onNativeMouse(0, MotionEvent.ACTION_SCROLL, xoffset, yoffset, false);
     }

@@ -111,11 +111,13 @@ public class MainMenuFragment extends Fragment {
     }
 
     private File getCurrentProfileDirectory() {
-        String currentProfile = LauncherPreferences.DEFAULT_PREF.getString(LauncherPreferences.PREF_KEY_CURRENT_PROFILE, null);
-        if(!Tools.isValidString(currentProfile)) return new File(Tools.DIR_GAME_NEW);
         LauncherProfiles.load();
+        String currentProfile = LauncherProfiles.getCurrentProfileKey();
+        if (!Tools.isValidString(currentProfile) || LauncherProfiles.mainProfileJson == null) {
+            return new File(Tools.DIR_GAME_NEW);
+        }
         MinecraftProfile profileObject = LauncherProfiles.mainProfileJson.profiles.get(currentProfile);
-        if(profileObject == null) return new File(Tools.DIR_GAME_NEW);
+        if (profileObject == null) return new File(Tools.DIR_GAME_NEW);
         return Tools.getGameDirPath(profileObject);
     }
 

@@ -35,6 +35,23 @@ class AetherRedesignTest {
             "https://discord.com/invite/aether-demo",
             DiscordLinkHelper.normalizeAndValidateInviteUrl("https://discord.com/invite/aether-demo")
         )
+        assertEquals(
+            "https://discord.gg/DdtPb8ehqR",
+            DiscordLinkHelper.DEFAULT_DISCORD_INVITE_URL
+        )
+        assertEquals(
+            DiscordLinkHelper.DEFAULT_DISCORD_INVITE_URL,
+            DiscordLinkHelper.normalizeAndValidateInviteUrl(DiscordLinkHelper.DEFAULT_DISCORD_INVITE_URL)
+        )
+        assertEquals(
+            DiscordLinkHelper.DEFAULT_DISCORD_INVITE_URL,
+            AetherDashboardUiState().discordInviteUrl
+        )
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertEquals(
+            DiscordLinkHelper.DEFAULT_DISCORD_INVITE_URL,
+            context.getString(net.kdt.pojavlaunch.R.string.discord_invite)
+        )
     }
 
     @Test

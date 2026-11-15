@@ -120,23 +120,27 @@ public class AsyncAssetManager {
         String[] lwjglVersions = {"3.3.3", "3.4.1"};
         for (String lwjglVer : lwjglVersions) {
             File versionFile = new File(Tools.DIR_GAME_HOME + String.format("/lwjgl3/%s/version", lwjglVer));
-            InputStream is = am.open("components/lwjgl3/" + lwjglVer + "/version");
             String pathToLwjglNatives = String.format("lwjgl-%s-natives/", lwjglVer) + sArch;
 
             boolean shouldUpdate = true;
             if (versionFile.exists()) {
-                FileInputStream fis = new FileInputStream(versionFile);
-                String release1 = Tools.read(is);
-                String release2 = Tools.read(fis);
-                if (release1.equals(release2))
-                    shouldUpdate = false;
+                try (InputStream is = am.open("components/lwjgl3/" + lwjglVer + "/version");
+                     FileInputStream fis = new FileInputStream(versionFile)) {
+                    String release1 = Tools.read(is);
+                    String release2 = Tools.read(fis);
+                    if (release1.equals(release2)) {
+                        shouldUpdate = false;
+                    }
+                }
             }
 
             if (shouldUpdate) {
                 Log.i("UnpackLwjgl", lwjglVer + " was installed manually, or does not exist, unpacking new...");
                 String[] fileList = am.list("components/" + pathToLwjglNatives);
-                for (String fileName : fileList) {
-                    Tools.copyAssetFile(ctx, "components/" + pathToLwjglNatives + "/" + fileName, rootDir + "/" + pathToLwjglNatives, true);
+                if (fileList != null) {
+                    for (String fileName : fileList) {
+                        Tools.copyAssetFile(ctx, "components/" + pathToLwjglNatives + "/" + fileName, rootDir + "/" + pathToLwjglNatives, true);
+                    }
                 }
             } else {
                 Log.i("UnpackLwjgl", lwjglVer + " is up-to-date with the launcher, continuing...");
@@ -149,31 +153,42 @@ public class AsyncAssetManager {
         String rootDir = privateDirectory ? Tools.DIR_DATA : Tools.DIR_GAME_HOME;
 
         File versionFile = new File(rootDir + "/" + component + "/version");
-        InputStream is = am.open("components/" + component + "/version");
-        if(!versionFile.exists()) {
-            if (versionFile.getParentFile().exists() && versionFile.getParentFile().isDirectory()) {
+        if (!versionFile.exists()) {
+            if (versionFile.getParentFile() != null && versionFile.getParentFile().exists() && versionFile.getParentFile().isDirectory()) {
                 FileUtils.deleteDirectory(versionFile.getParentFile());
             }
-            versionFile.getParentFile().mkdir();
+            if (versionFile.getParentFile() != null) {
+                versionFile.getParentFile().mkdirs();
+            }
 
             Log.i("UnpackPrep", component + ": Pack was installed manually, or does not exist, unpacking new...");
             String[] fileList = am.list("components/" + component);
-            for(String s : fileList) {
-                Tools.copyAssetFile(ctx, "components/" + component + "/" + s, rootDir + "/" + component, true);
+            if (fileList != null) {
+                for (String s : fileList) {
+                    Tools.copyAssetFile(ctx, "components/" + component + "/" + s, rootDir + "/" + component, true);
+                }
             }
         } else {
-            FileInputStream fis = new FileInputStream(versionFile);
-            String release1 = Tools.read(is);
-            String release2 = Tools.read(fis);
-            if (!release1.equals(release2)) {
-                if (versionFile.getParentFile().exists() && versionFile.getParentFile().isDirectory()) {
+            boolean matches;
+            try (InputStream is = am.open("components/" + component + "/version");
+                 FileInputStream fis = new FileInputStream(versionFile)) {
+                String release1 = Tools.read(is);
+                String release2 = Tools.read(fis);
+                matches = release1.equals(release2);
+            }
+            if (!matches) {
+                if (versionFile.getParentFile() != null && versionFile.getParentFile().exists() && versionFile.getParentFile().isDirectory()) {
                     FileUtils.deleteDirectory(versionFile.getParentFile());
                 }
-                versionFile.getParentFile().mkdir();
+                if (versionFile.getParentFile() != null) {
+                    versionFile.getParentFile().mkdirs();
+                }
 
                 String[] fileList = am.list("components/" + component);
-                for (String fileName : fileList) {
-                    Tools.copyAssetFile(ctx, "components/" + component + "/" + fileName, rootDir + "/" + component, true);
+                if (fileList != null) {
+                    for (String fileName : fileList) {
+                        Tools.copyAssetFile(ctx, "components/" + component + "/" + fileName, rootDir + "/" + component, true);
+                    }
                 }
             } else {
                 Log.i("UnpackPrep", component + ": Pack is up-to-date with the launcher, continuing...");

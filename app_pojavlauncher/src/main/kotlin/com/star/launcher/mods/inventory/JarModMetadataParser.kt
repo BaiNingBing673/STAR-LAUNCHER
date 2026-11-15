@@ -17,7 +17,8 @@ data class ParsedJarModMetadata(
     val version: String?,
     val loaderType: ModLoaderType?,
     val mcVersionHint: String?,
-    val source: ModMetadataSource
+    val source: ModMetadataSource,
+    val isValidArchive: Boolean = true
 )
 
 /**
@@ -25,6 +26,15 @@ data class ParsedJarModMetadata(
  * NeoForge, and Forge metadata files without executing any bytecode.
  */
 object JarModMetadataParser {
+
+    fun isValidZipArchive(file: File): Boolean {
+        if (!file.isFile || file.length() <= 0L) return false
+        return runCatching {
+            ZipFile(file).use { zip ->
+                zip.entries().hasMoreElements()
+            }
+        }.getOrDefault(false)
+    }
 
     fun parse(file: File): ParsedJarModMetadata {
         val cleanBaseName = file.name
@@ -38,12 +48,15 @@ object JarModMetadataParser {
                 version = null,
                 loaderType = null,
                 mcVersionHint = null,
-                source = ModMetadataSource.FILENAME_INFERRED
+                source = ModMetadataSource.FILENAME_INFERRED,
+                isValidArchive = false
             )
         }
 
+        var archiveReadable = false
         val parsedFromZip = runCatching {
             ZipFile(file).use { zip ->
+                archiveReadable = zip.entries().hasMoreElements()
                 parseFabric(zip)
                     ?: parseQuilt(zip)
                     ?: parseNeoForgeToml(zip)
@@ -54,7 +67,7 @@ object JarModMetadataParser {
 
         if (parsedFromZip != null) return parsedFromZip
 
-        return inferFromFileName(cleanBaseName)
+        return inferFromFileName(cleanBaseName, isValidArchive = archiveReadable)
     }
 
     private fun parseFabric(zip: ZipFile): ParsedJarModMetadata? {
@@ -156,7 +169,10 @@ object JarModMetadataParser {
         return regex.find(toml)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
     }
 
-    private fun inferFromFileName(cleanBaseName: String): ParsedJarModMetadata {
+    private fun inferFromFileName(
+        cleanBaseName: String,
+        isValidArchive: Boolean = true
+    ): ParsedJarModMetadata {
         val lower = cleanBaseName.lowercase()
         val loader = when {
             lower.contains("neoforge") -> ModLoaderType.NEOFORGE
@@ -172,7 +188,8 @@ object JarModMetadataParser {
             version = null,
             loaderType = loader,
             mcVersionHint = mcMatch,
-            source = ModMetadataSource.FILENAME_INFERRED
+            source = ModMetadataSource.FILENAME_INFERRED,
+            isValidArchive = isValidArchive
         )
     }
 }

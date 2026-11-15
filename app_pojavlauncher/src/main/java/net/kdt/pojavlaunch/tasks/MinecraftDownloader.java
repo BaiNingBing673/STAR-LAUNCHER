@@ -12,6 +12,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.kdt.mcgui.ProgressLayout;
+import com.star.launcher.diagnostics.StartupProfiler;
 
 import net.kdt.pojavlaunch.JAssetInfo;
 import net.kdt.pojavlaunch.JAssets;
@@ -111,6 +112,18 @@ public class MinecraftDownloader {
     private InstallProgressListener mInstallListener;
     private InstallStage mCurrentStage = InstallStage.FETCHING_METADATA;
     private boolean mSkipRuntimeCheckInDownloader = false;
+    private boolean mUseLegacyLauncherProfiles = true;
+    @Nullable
+    private String mExplicitProfileRuntime = null;
+
+    /**
+     * Configure an explicit runtime name (e.g. from STAR Launcher's {@code AetherLaunchPayload})
+     * so downloader runtime verification does not read or mutate {@code launcher_profiles.json}.
+     */
+    public void setExplicitRuntimeOverride(@Nullable String runtimeName) {
+        this.mUseLegacyLauncherProfiles = false;
+        this.mExplicitProfileRuntime = runtimeName;
+    }
 
     private static final ThreadLocal<byte[]> sThreadLocalDownloadBuffer = new ThreadLocal<>();
 
@@ -138,6 +151,7 @@ public class MinecraftDownloader {
         }
 
         sExecutorService.execute(() -> {
+            final long launchStageStart = StartupProfiler.beginStage();
             try {
                 if (realVersion == null || realVersion.trim().isEmpty() || "unknown".equalsIgnoreCase(realVersion.trim())) {
                     throw new IOException("No Minecraft version selected for this instance. Select or configure a valid version (e.g. 1.21.4) before launching.");
@@ -153,7 +167,10 @@ public class MinecraftDownloader {
                         // This reads the .json associated with the provided version. If it fails, we can assume it's not installed.
                         File providedJsonFile = new File(Tools.DIR_HOME_VERSION + "/" + realVersion + "/" + realVersion + ".json");
                         JMinecraftVersionList.Version providedJson = Tools.GLOBAL_GSON.fromJson(Tools.read(providedJsonFile.getAbsolutePath()), JMinecraftVersionList.Version.class);
-                        if (providedJson != null && providedJson.javaVersion != null && providedJson.javaVersion.majorVersion > 0) {
+                        if (providedJson == null) {
+                            throw new RuntimeException("Version metadata JSON could not be parsed for " + realVersion);
+                        }
+                        if (providedJson.javaVersion != null && providedJson.javaVersion.majorVersion > 0) {
                             requiredJavaVersion = providedJson.javaVersion.majorVersion;
                         }
 
@@ -177,12 +194,23 @@ public class MinecraftDownloader {
                         Tools.showErrorRemote(versionMessage + " is not currently installed. "+ tryagain, e);
                     }
                     if (filesValid) {
-                        if (activity == null || NewJREUtil.ensureRuntimeReady(activity, requiredJavaVersion, isOnline)) {
+                        final long rtCheckStart = StartupProfiler.beginStage();
+                        boolean runtimeReady = (activity == null || NewJREUtil.ensureRuntimeReady(
+                                activity,
+                                requiredJavaVersion,
+                                isOnline,
+                                mExplicitProfileRuntime,
+                                mUseLegacyLauncherProfiles
+                        ));
+                        StartupProfiler.endStage("launch_runtime_selection", rtCheckStart, "Java " + requiredJavaVersion);
+                        if (runtimeReady) {
+                            StartupProfiler.endStage("launch_download_and_validate", launchStageStart, realVersion);
                             listener.onDownloadDone();
                         }
                     }
                 }else {
                     if (downloadGame(activity, version, realVersion)) {
+                        StartupProfiler.endStage("launch_download_and_validate", launchStageStart, realVersion);
                         listener.onDownloadDone();
                     }
                 }
@@ -556,7 +584,12 @@ public class MinecraftDownloader {
         }
 
         boolean deferRuntimeCheckToParent = verInfo.javaVersion == null && Tools.isValidString(verInfo.inheritsFrom);
-        if(!deferRuntimeCheckToParent && activity != null && !NewJREUtil.installNewJreIfNeeded(activity, verInfo)){
+        if(!deferRuntimeCheckToParent && activity != null && !NewJREUtil.installNewJreIfNeeded(
+                activity,
+                verInfo,
+                mExplicitProfileRuntime,
+                mUseLegacyLauncherProfiles
+        )){
             return false;
         }
 

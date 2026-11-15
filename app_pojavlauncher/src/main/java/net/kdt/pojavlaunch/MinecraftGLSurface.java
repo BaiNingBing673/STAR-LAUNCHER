@@ -28,6 +28,8 @@ import android.view.ViewGroup;
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
+import com.star.launcher.hud.StarHudInputManager;
+
 import net.kdt.pojavlaunch.customcontrols.ControlLayout;
 import net.kdt.pojavlaunch.customcontrols.gamepad.DefaultDataProvider;
 import net.kdt.pojavlaunch.customcontrols.gamepad.Gamepad;
@@ -106,6 +108,19 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         CallbackBridge.setDirectGamepadEnableHandler(this);
     }
 
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        StarHudInputManager.getInstance().registerResetParticipant(mIngameProcessor);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        StarHudInputManager.getInstance().unregisterResetParticipant(mIngameProcessor);
+        StarHudInputManager.getInstance().releaseAllInputs("gl_surface_detached");
+        super.onDetachedFromWindow();
+    }
+
     @RequiresApi(api = Build.VERSION_CODES.O)
     private void setUpPointerCapture(AbstractTouchpad touchpad) {
         if(mPointerCapture != null) mPointerCapture.detach();
@@ -150,6 +165,7 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
                 @Override
                 public void surfaceCreated(@NonNull SurfaceHolder holder) {
                     if(isCalled) {
+                        StarHudInputManager.getInstance().releaseAllInputs("surface_recreated");
                         JREUtils.setupBridgeWindow(mNativeSurface);
                         if (sdlEnabled) SDLSurface.setNativeSurface(mNativeSurface);
                         refreshSize(true);
@@ -170,13 +186,7 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
 
                 @Override
                 public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
-                    /*
-                    Surface recreation in SurfaceView happens very often. When tabbing back in from
-                    out, when minimizing floating window, when turning into floating window, etc.
-                    Whenever the surface isn't in view, it is destroyed. When going into floating
-                    window, it appears to automatically release the associated ANativeWindow. This
-                    can cause a crash if not handled.
-                     */
+                    StarHudInputManager.getInstance().releaseAllInputs("surface_destroyed");
                     if (sdlEnabled) SDLActivity.getSDLSurface().surfaceDestroyed(holder);
                 }
             });
@@ -195,6 +205,7 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
                     mNativeSurface = new Surface(surface);
                     setupSDL(getContext(), mNativeSurface, (ViewGroup) getParent());
                     if(isCalled) {
+                        StarHudInputManager.getInstance().releaseAllInputs("texture_recreated");
                         JREUtils.setupBridgeWindow(mNativeSurface);
                         if (sdlEnabled) SDLSurface.setNativeSurface(mNativeSurface);
                         return;
@@ -214,11 +225,7 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
 
                 @Override
                 public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surface) {
-                    /*
-                    Surface recreation in TextureView can only really happen once, when turning
-                    into a floating window. Subsequent turns to floating window no longer trigger
-                    recreation. Tabbing out and in does not trigger recreation.
-                     */
+                    StarHudInputManager.getInstance().releaseAllInputs("texture_destroyed");
                     if (sdlEnabled) SDLActivity.getSDLSurface().surfaceDestroyed(null);
                     return true;
                 }
@@ -479,19 +486,49 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         // Initial size set. Request immedate refresh, otherwise the initial width and height for the game
         // may be broken/unknown.
         refreshSize(true);
-        // Ensures we run at correct refresh rate (should also NOT change the resolution being used)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            float maxHz = 120f; // Set to 120 by default just to be safe
-            for (float altHz : getDisplay().getMode().getAlternativeRefreshRates()) {
-                maxHz = Math.max(maxHz, altHz);
+        // Ensures we run at target frame rate / highest refresh rate supported by display
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            android.view.Display display = getDisplay();
+            float desiredHz = 120f;
+            if (display != null && display.getMode() != null) {
+                float maxSupportedHz = display.getMode().getRefreshRate();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    for (float altHz : display.getMode().getAlternativeRefreshRates()) {
+                        maxSupportedHz = Math.max(maxSupportedHz, altHz);
+                    }
+                }
+                int targetFps = LauncherPreferences.PREF_FPS_LIMIT;
+                if (targetFps <= 0) {
+                    desiredHz = maxSupportedHz;
+                } else {
+                    desiredHz = Math.min((float) targetFps, maxSupportedHz);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        float bestMatch = maxSupportedHz;
+                        for (float altHz : display.getMode().getAlternativeRefreshRates()) {
+                            if (altHz >= targetFps && altHz < bestMatch) {
+                                bestMatch = altHz;
+                            }
+                        }
+                        if (Math.abs(display.getMode().getRefreshRate() - targetFps) < 1f) {
+                            bestMatch = display.getMode().getRefreshRate();
+                        }
+                        desiredHz = bestMatch >= targetFps ? bestMatch : targetFps;
+                    }
+                }
+            } else if (LauncherPreferences.PREF_FPS_LIMIT > 0) {
+                desiredHz = LauncherPreferences.PREF_FPS_LIMIT;
             }
-            surface.setFrameRate(maxHz, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT, Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
+            int changeStrategy = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                    ? Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS
+                    : 0;
+            surface.setFrameRate(desiredHz, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT, changeStrategy);
         }
 
         //Load Minecraft options:
         MCOptionUtils.set("fullscreen", "off");
         MCOptionUtils.set("overrideWidth", String.valueOf(windowWidth));
         MCOptionUtils.set("overrideHeight", String.valueOf(windowHeight));
+        MCOptionUtils.applyFpsLimit(LauncherPreferences.PREF_FPS_LIMIT, LauncherPreferences.PREF_FORCE_VSYNC);
         MCOptionUtils.save();
         getMcScale();
 
@@ -524,6 +561,9 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         TouchEventProcessor desiredProcessor = pickEventProcessor(isGrabbing);
         if (mLastGrabState != isGrabbing || mCurrentTouchProcessor != desiredProcessor) {
             mCurrentTouchProcessor.cancelPendingActions();
+            if (!isGrabbing) {
+                StarHudInputManager.getInstance().releaseAllInputs("grab_lost");
+            }
             mCurrentTouchProcessor = desiredProcessor;
             mLastGrabState = isGrabbing;
         }

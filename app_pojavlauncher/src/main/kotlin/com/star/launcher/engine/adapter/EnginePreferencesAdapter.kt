@@ -18,6 +18,7 @@ data class EnginePreferencesSnapshot(
     val alternateSurface: Boolean = false,
     val forceVsync: Boolean = false,
     val vsyncInZink: Boolean = false,
+    val fpsLimit: Int = 0, // 0 = Unlimited, 30/60/90/120 or custom 10..260
     // MobileGlues Renderer Settings
     val mgGlslCacheSizeMb: String = "0",
     val mgAngleMode: String = "1",
@@ -124,6 +125,10 @@ object EnginePreferencesAdapter {
                 ?: LauncherPreferences.PREF_FORCE_VSYNC,
             vsyncInZink = prefs?.getBoolean("vsync_in_zink", LauncherPreferences.PREF_VSYNC_IN_ZINK)
                 ?: LauncherPreferences.PREF_VSYNC_IN_ZINK,
+            fpsLimit = LauncherPreferences.normalizeFpsLimit(
+                prefs?.getInt("fpsLimit", LauncherPreferences.PREF_FPS_LIMIT)
+                    ?: LauncherPreferences.PREF_FPS_LIMIT
+            ),
             mgGlslCacheSizeMb = prefs?.getString("mg_renderer_setting_glsl_cache_size", "0") ?: "0",
             mgAngleMode = prefs?.getString("mg_renderer_setting_angle", "1") ?: "1",
             mgErrorSetting = prefs?.getString("mg_renderer_setting_errorSetting", "0") ?: "0",

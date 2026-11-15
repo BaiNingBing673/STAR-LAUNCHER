@@ -76,6 +76,12 @@ import net.kdt.pojavlaunch.utils.TouchControllerUtils;
 import com.star.launcher.diagnostics.CrossProcessSpoolBridge;
 import com.star.launcher.engine.adapter.AetherLaunchPayload;
 import com.star.launcher.engine.adapter.PojavLaunchBridge;
+import com.star.launcher.hud.StarHudConfig;
+import com.star.launcher.hud.StarHudConfigStore;
+import com.star.launcher.hud.StarHudInputManager;
+import com.star.launcher.hud.StarTouchHudOverlay;
+import com.star.launcher.lyrics.overlay.LiveLyricsInGameController;
+import com.star.launcher.lyrics.overlay.StarLiveLyricsOverlay;
 
 import net.kdt.pojavlaunch.value.MinecraftAccount;
 import net.kdt.pojavlaunch.value.launcherprofiles.LauncherProfiles;
@@ -108,6 +114,9 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     private GyroControl mGyroControl = null;
     private ControlLayout mControlLayout;
     private HotbarView mHotbarView;
+    private StarTouchHudOverlay mStarTouchHudOverlay;
+    private StarLiveLyricsOverlay mStarLiveLyricsOverlay;
+    private LiveLyricsInGameController mLiveLyricsController;
     private FrameLayout contentFrame;
 
     @Nullable
@@ -125,6 +134,8 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     public ArrayAdapter<String> ingameControlsEditorArrayAdapter;
     public AdapterView.OnItemClickListener ingameControlsEditorListener;
     private GameService.LocalBinder mServiceBinder;
+    private boolean mServiceBound;
+    private MCOptionUtils.MCOptionListener mOptionListener;
 
     private QuickSettingSideDialog mQuickSettingSideDialog;
 
@@ -143,6 +154,16 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         Tools.useANGLE = minecraftProfile.useANGLE;
 
         String gameDirPath = Tools.getGameDirPath(minecraftProfile).getAbsolutePath();
+        File optionsFile = new File(gameDirPath, "options.txt");
+        if (!optionsFile.exists() || optionsFile.length() == 0L) {
+            com.star.launcher.compat.GraphicsPreset activePreset = com.star.launcher.compat.AdaptiveGraphicsManager.INSTANCE.getCurrentPreset(this);
+            if (activePreset != com.star.launcher.compat.GraphicsPreset.CUSTOM) {
+                com.star.launcher.compat.AdaptiveGraphicsManager.INSTANCE.applySpecToMcOptions(
+                        gameDirPath,
+                        com.star.launcher.compat.AdaptiveGraphicsManager.INSTANCE.specForPreset(activePreset)
+                );
+            }
+        }
         MCOptionUtils.load(gameDirPath);
 
         Intent gameServiceIntent = new Intent(this, GameService.class);
@@ -184,8 +205,8 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         };
 
         // Recompute the gui scale when options are changed
-        MCOptionUtils.MCOptionListener optionListener = MCOptionUtils::getMcScale;
-        MCOptionUtils.addMCOptionListener(optionListener);
+        mOptionListener = MCOptionUtils::getMcScale;
+        MCOptionUtils.addMCOptionListener(mOptionListener);
         mControlLayout.setModifiable(false);
 
         // Listen to IME insets animation
@@ -218,6 +239,17 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
                 imeHeight = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom;
                 refreshImeTranslation();
             }
+            if (mStarTouchHudOverlay != null || mLiveLyricsController != null) {
+                androidx.core.graphics.Insets safe = insets.getInsets(
+                        WindowInsetsCompat.Type.displayCutout() | WindowInsetsCompat.Type.systemBars()
+                );
+                if (mStarTouchHudOverlay != null) {
+                    mStarTouchHudOverlay.updateSafeInsets(safe.left, safe.top, safe.right, safe.bottom);
+                }
+                if (mLiveLyricsController != null) {
+                    mLiveLyricsController.updateSafeInsets(safe.left, safe.top, safe.right, safe.bottom);
+                }
+            }
             return insets;
         });
 
@@ -225,7 +257,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         // execute the correct method
         ContextExecutor.setActivity(this);
         //Now, attach to the service. The game will only start when this happens, to make sure that we know the right state.
-        bindService(gameServiceIntent, this, 0);
+        mServiceBound = bindService(gameServiceIntent, this, 0);
     }
 
     protected void initLayout(int resId) {
@@ -281,6 +313,11 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
                     case 2: dialogSendCustomKey(); break;
                     case 3: openQuickSettings(); break;
                     case 4: openCustomControls(); break;
+                    case 5:
+                        if (mLiveLyricsController != null) {
+                            mLiveLyricsController.toggleQuickControls();
+                        }
+                        break;
                 }
                 drawerLayout.closeDrawers();
             };
@@ -311,6 +348,25 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     }
 
     private void loadControls() {
+        StarHudConfig starHudConfig = StarHudConfigStore.load(this);
+        boolean useStarHud = starHudConfig.getUseStarHud()
+                && (minecraftProfile == null || minecraftProfile.controlFile == null);
+
+        if (mStarTouchHudOverlay != null) {
+            mStarTouchHudOverlay.setConfig(starHudConfig);
+        }
+
+        if (useStarHud && mStarTouchHudOverlay != null) {
+            mControlLayout.loadLayout((CustomControls) null);
+            mStarTouchHudOverlay.setHudActive(true);
+            mDrawerPullButton.setVisibility(View.VISIBLE);
+            return;
+        }
+
+        if (mStarTouchHudOverlay != null) {
+            mStarTouchHudOverlay.setHudActive(false);
+        }
+
         try {
             // Load keys
             mControlLayout.loadLayout(
@@ -349,17 +405,35 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         drawerLayout = findViewById(R.id.main_drawer_options);
         navDrawer = findViewById(R.id.main_navigation_view);
         loggerView = findViewById(R.id.mainLoggerView);
-        mControlLayout = findViewById(R.id.main_control_layout);
         touchCharInput = findViewById(R.id.mainTouchCharInput);
         touchControllerInputView = findViewById(R.id.touch_controller_input);
         mDrawerPullButton = findViewById(R.id.drawer_button);
         mHotbarView = findViewById(R.id.hotbar_view);
+        mStarTouchHudOverlay = findViewById(R.id.star_touch_hud_overlay);
+        if (mStarTouchHudOverlay != null) {
+            mStarTouchHudOverlay.setHostContainer(mControlLayout);
+            mStarTouchHudOverlay.setHotbarView(mHotbarView);
+        }
+        mStarLiveLyricsOverlay = findViewById(R.id.star_live_lyrics_overlay);
+        if (mStarLiveLyricsOverlay != null) {
+            mLiveLyricsController = new LiveLyricsInGameController(this, mStarLiveLyricsOverlay);
+        }
         contentFrame = findViewById(R.id.content_frame);
     }
 
     @Override
     public void onResume() {
         super.onResume();
+        if (mStarTouchHudOverlay != null) {
+            StarHudConfig latestConfig = StarHudConfigStore.load(this);
+            mStarTouchHudOverlay.setConfig(latestConfig);
+            boolean useStarHud = latestConfig.getUseStarHud()
+                    && (minecraftProfile == null || minecraftProfile.controlFile == null);
+            mStarTouchHudOverlay.setHudActive(useStarHud);
+        }
+        if (mLiveLyricsController != null) {
+            mLiveLyricsController.onResume();
+        }
         if(PREF_ENABLE_GYRO) mGyroControl.enable();
         CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, 1);
         CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_HOVERED, 1);
@@ -368,6 +442,13 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     @Override
     protected void onPause() {
         mGyroControl.disable();
+        StarHudInputManager.getInstance().releaseAllInputs("activity_onPause");
+        if (mStarTouchHudOverlay != null) {
+            mStarTouchHudOverlay.releaseAllInputs();
+        }
+        if (mLiveLyricsController != null) {
+            mLiveLyricsController.onPause();
+        }
         if (CallbackBridge.isGrabbing()){
             sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_ESCAPE);
         }
@@ -388,13 +469,35 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
     @Override
     protected void onStop() {
+        StarHudInputManager.getInstance().releaseAllInputs("activity_onStop");
+        if (mStarTouchHudOverlay != null) {
+            mStarTouchHudOverlay.releaseAllInputs();
+        }
         CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_VISIBLE, 0);
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
+        StarHudInputManager.getInstance().releaseAllInputs("activity_onDestroy");
+        if (mStarTouchHudOverlay != null) {
+            mStarTouchHudOverlay.releaseAllInputs();
+        }
+        if (mLiveLyricsController != null) {
+            mLiveLyricsController.onDestroy();
+        }
         super.onDestroy();
+        if (mOptionListener != null) {
+            MCOptionUtils.removeMCOptionListener(mOptionListener);
+            mOptionListener = null;
+        }
+        if (mServiceBound) {
+            try {
+                unbindService(this);
+            } catch (IllegalArgumentException ignored) {
+            }
+            mServiceBound = false;
+        }
         CallbackBridge.removeGrabListener(touchpad);
         CallbackBridge.removeGrabListener(minecraftGLView);
         ContextExecutor.clearActivity();
@@ -402,6 +505,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
     @Override
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        StarHudInputManager.getInstance().releaseAllInputs("activity_onConfigurationChanged");
         super.onConfigurationChanged(newConfig);
         if(mGyroControl != null) mGyroControl.updateOrientation();
         // Layout resize is practically guaranteed on a configuration change, and `onConfigurationChanged`
@@ -414,6 +518,13 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
             minecraftGLView.refreshSize();
             Tools.updateWindowSize(this);
             mControlLayout.refreshControlButtonPositions();
+            mHotbarView.onResolutionChanged();
+            if (mStarTouchHudOverlay != null) {
+                mStarTouchHudOverlay.relayoutElements();
+            }
+            if (mLiveLyricsController != null) {
+                mLiveLyricsController.onConfigurationChanged();
+            }
             touchControllerInputView.setSize(minecraftGLView.getWidth(), minecraftGLView.getHeight());
         });
     }
@@ -499,7 +610,8 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
         String requestedAccount = mAetherPayload != null ? mAetherPayload.getAccountName() : null;
         MinecraftAccount minecraftAccount = PojavProfile.getCurrentProfileContent(this, requestedAccount);
-        if (hasMods("sodium"))
+        File resolvedGameDir = Tools.getGameDirPath(minecraftProfile);
+        if (hasMods(resolvedGameDir, "sodium"))
             Logger.appendToLog("WARNING: Sodium is being used, STAR Launcher does NOT support this mod, you are on your own");
         Logger.appendToLog("--------- Starting game with Launcher Debug!");
         Tools.printLauncherInfo(versionId, Tools.isValidString(minecraftProfile.javaArgs) ? minecraftProfile.javaArgs : LauncherPreferences.PREF_CUSTOM_JAVA_ARGS, Tools.getTotalDeviceMemory(this));
@@ -507,7 +619,9 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
             LauncherPreferences.writeMGRendererSettings();
         }
         JREUtils.redirectAndPrintJRELog();
-        LauncherProfiles.load();
+        if (mAetherPayload == null) {
+            LauncherProfiles.load();
+        }
         int requiredJavaVersion = 8;
         if(version.javaVersion != null) requiredJavaVersion = version.javaVersion.majorVersion;
         boolean launchFailed = false;
@@ -546,6 +660,11 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
     boolean isInEditor;
     private void openCustomControls() {
+        StarHudInputManager.getInstance().releaseAllInputs("openCustomControls");
+        if (mStarTouchHudOverlay != null && mStarTouchHudOverlay.isHudActive()) {
+            mStarTouchHudOverlay.setCustomizeMode(!mStarTouchHudOverlay.isCustomizeMode());
+            return;
+        }
         if(ingameControlsEditorListener == null || ingameControlsEditorArrayAdapter == null) return;
 
         mControlLayout.setModifiable(true);
@@ -556,10 +675,12 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     }
 
     private void openLogOutput() {
+        StarHudInputManager.getInstance().releaseAllInputs("openLogOutput");
         loggerView.setVisibility(View.VISIBLE);
     }
 
     private void openQuickSettings() {
+        StarHudInputManager.getInstance().releaseAllInputs("openQuickSettings");
         if(mQuickSettingSideDialog == null) {
             mQuickSettingSideDialog = new QuickSettingSideDialog(this, mControlLayout) {
                 @Override
@@ -592,6 +713,22 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (mStarLiveLyricsOverlay != null &&
+                (mStarLiveLyricsOverlay.isPositionEditingMode() || mStarLiveLyricsOverlay.isQuickControlPanelVisible())) {
+            if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
+                mStarLiveLyricsOverlay.hideQuickControlPanel();
+                return true;
+            }
+            return super.dispatchKeyEvent(event);
+        }
+        if (mStarTouchHudOverlay != null && mStarTouchHudOverlay.isCustomizeMode()) {
+            if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
+                StarHudConfigStore.save(this, mStarTouchHudOverlay.getConfig());
+                mStarTouchHudOverlay.setCustomizeMode(false);
+                return true;
+            }
+            return super.dispatchKeyEvent(event);
+        }
         if(isInEditor) {
             if(event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
                 if(event.getAction() == KeyEvent.ACTION_DOWN) mControlLayout.askToExit(this);
@@ -683,6 +820,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
     @Override
     public void onClickedMenu() {
+        StarHudInputManager.getInstance().releaseAllInputs("menu_drawer_opened");
         drawerLayout.openDrawer(navDrawer);
         navDrawer.requestLayout();
     }
@@ -692,7 +830,6 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         try {
             mControlLayout.loadLayout((CustomControls)null);
             mControlLayout.setModifiable(false);
-            System.gc();
             mControlLayout.loadLayout(
                     minecraftProfile.controlFile == null
                             ? LauncherPreferences.PREF_DEFAULTCTRL_PATH
@@ -717,7 +854,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
     @Override
     public void onServiceDisconnected(ComponentName name) {
-
+        StarHudInputManager.getInstance().releaseAllInputs("game_service_disconnected");
     }
 
     /*
@@ -744,6 +881,12 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
+        if (!hasFocus) {
+            StarHudInputManager.getInstance().releaseAllInputs("window_focus_lost");
+            if (mStarLiveLyricsOverlay != null) {
+                mStarLiveLyricsOverlay.onWindowFocusLost();
+            }
+        }
         if (hasFocus) {
             Tools.setFullscreen(this, setFullscreen());
         }
@@ -754,6 +897,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
+        com.star.launcher.ui.components.AetherImageCache.trimMemory(level >= TRIM_MEMORY_RUNNING_LOW);
     }
 
     @Override

@@ -26,6 +26,9 @@ import com.star.launcher.engine.adapter.RuntimeDescriptor
 import com.star.launcher.engine.adapter.mapRendererSpec
 import com.star.launcher.version.VersionCatalogService
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import net.kdt.pojavlaunch.Architecture
 import net.kdt.pojavlaunch.Tools
 import net.kdt.pojavlaunch.value.launcherprofiles.MinecraftProfile
@@ -38,7 +41,8 @@ sealed interface LaunchPreparationResult {
         val instanceName: String,
         val useAngle: Boolean,
         val spec: EngineLaunchSpec,
-        val compatibility: TieredCompatibilityReport
+        val compatibility: TieredCompatibilityReport,
+        val recoveredFromMissingProfile: Boolean = false
     ) : LaunchPreparationResult
 
     data class Blocked(
@@ -65,6 +69,9 @@ class InstanceManager(
     private val clockMillis: () -> Long = { System.currentTimeMillis() },
     private val idGenerator: () -> String = { UUID.randomUUID().toString() }
 ) {
+    private val instanceMutationMutex = Mutex()
+    private val activeLaunchPrepCounts = mutableMapOf<String, Int>()
+
     fun observeInstances(): Flow<List<GameInstanceEntity>> = gameInstanceDao.observeAll()
 
     fun observeRuntimes(): Flow<List<RuntimeRegistryEntity>> = runtimeRegistryDao.observeAll()
@@ -72,6 +79,46 @@ class InstanceManager(
     fun observeRendererProfiles(): Flow<List<RendererProfileEntity>> = rendererProfileDao.observeAll()
 
     suspend fun getInstance(instanceId: String): GameInstanceEntity? = gameInstanceDao.getById(instanceId)
+
+    suspend fun getAllInstances(): List<GameInstanceEntity> = gameInstanceDao.observeAll().first()
+
+    suspend fun acquireLaunchPreparation(instanceId: String): Boolean = instanceMutationMutex.withLock {
+        if (gameInstanceDao.getById(instanceId) == null) {
+            return@withLock false
+        }
+        activeLaunchPrepCounts[instanceId] = (activeLaunchPrepCounts[instanceId] ?: 0) + 1
+        true
+    }
+
+    suspend fun releaseLaunchPreparation(instanceId: String) {
+        instanceMutationMutex.withLock {
+            val current = activeLaunchPrepCounts[instanceId] ?: 0
+            if (current <= 1) {
+                activeLaunchPrepCounts.remove(instanceId)
+            } else {
+                activeLaunchPrepCounts[instanceId] = current - 1
+            }
+        }
+    }
+
+    suspend fun isLaunchPreparationActive(instanceId: String): Boolean = instanceMutationMutex.withLock {
+        (activeLaunchPrepCounts[instanceId] ?: 0) > 0
+    }
+
+    suspend fun findFallbackInstance(
+        excludedInstanceId: String? = null,
+        preferredVersionId: String? = null
+    ): GameInstanceEntity? {
+        val candidates = gameInstanceDao.observeAll().first().filter { it.instanceId != excludedInstanceId }
+        if (candidates.isEmpty()) return null
+        val preferredMatches = if (!preferredVersionId.isNullOrBlank()) {
+            candidates.filter { it.versionId == preferredVersionId }
+        } else {
+            emptyList()
+        }
+        val pool = preferredMatches.ifEmpty { candidates }
+        return pool.maxByOrNull { it.lastPlayedAt ?: it.createdAt }
+    }
 
     /**
      * Synchronizes discovered upstream JREs and compatible GPU renderers into Room
@@ -134,7 +181,7 @@ class InstanceManager(
         allocatedRamMb: Int,
         customJvmArgs: String?,
         controlMapPath: String?
-    ): GameInstanceEntity {
+    ): GameInstanceEntity = instanceMutationMutex.withLock {
         val existing = requireNotNull(gameInstanceDao.getById(instanceId)) { "Unknown instance: $instanceId" }
         val cleanName = name.trim().ifBlank { existing.name }
         val capabilities = probeAndPersistDevice()
@@ -166,7 +213,7 @@ class InstanceManager(
             controlMapPath = controlMapPath?.takeIf { it.isNotBlank() }
         )
         gameInstanceDao.upsertInstanceWithCompatibility(updated, compatReport.theoretical)
-        return updated
+        updated
     }
 
     suspend fun createInstance(
@@ -196,7 +243,7 @@ class InstanceManager(
                 requiredJavaMajor = version?.requiredJavaMajor ?: 8,
                 rendererId = profile?.rendererId ?: "opengles_mobileglues",
                 modLoaderType = version?.modLoaderType ?: ModLoaderType.VANILLA,
-                selectedRuntimeId = runtimeId,
+                selectedRuntimeId = runtime?.runtimeId,
                 selectedRuntimeJavaMajor = runtime?.majorVersion,
                 persistedVersionId = version?.versionId
             )
@@ -261,154 +308,208 @@ class InstanceManager(
 
     suspend fun prepareLaunch(
         instanceId: String,
-        allowWarningsOrExperimental: Boolean = true
+        allowWarningsOrExperimental: Boolean = true,
+        fallbackIfMissing: Boolean = false
     ): LaunchPreparationResult {
-        val instance = gameInstanceDao.getById(instanceId)
-            ?: return LaunchPreparationResult.Blocked(listOf("Instance '$instanceId' not found"))
-
-        val resolvedVersionId = instance.versionId?.trim()?.takeIf { isValidVersionId(it) }
-        val version = resolvedVersionId?.let { gameVersionDao.getById(it) }
-        val requiredJava = version?.requiredJavaMajor
-            ?: resolvedVersionId?.let { VersionCatalogService.inferJavaForRelease(it) }
-            ?: 8
-        val capabilities = probeAndPersistDevice()
-        val deviceArchId = expectedDeviceArchId(capabilities)
-
-        val requestedRuntime = instance.runtimeId?.let { runtimeRegistryDao.getById(it) }
-        val isRequestedUsable = requestedRuntime != null &&
-            requestedRuntime.isVerified &&
-            requestedRuntime.majorVersion >= requiredJava &&
-            isRuntimeArchCompatibleForDevice(requestedRuntime.arch, deviceArchId)
-
-        val selectedRuntimeEntity = if (isRequestedUsable) {
-            requestedRuntime
-        } else {
-            runtimeRegistryDao.getAll()
-                .filter {
-                    it.isVerified &&
-                        it.majorVersion >= requiredJava &&
-                        isRuntimeArchCompatibleForDevice(it.arch, deviceArchId)
+        var recoveredFromMissing = false
+        var resolvedInstance = gameInstanceDao.getById(instanceId)
+        if (resolvedInstance == null) {
+            if (fallbackIfMissing) {
+                resolvedInstance = findFallbackInstance(excludedInstanceId = instanceId)
+                if (resolvedInstance != null) {
+                    recoveredFromMissing = true
                 }
-                .minByOrNull { it.majorVersion }
-        }
-
-        val profile = instance.rendererProfileId?.let { rendererProfileDao.getById(it) }
-        val rendererId = profile?.rendererId ?: "opengles_mobileglues"
-        val rendererSpec: RendererSpec = mapRendererSpec(rendererId, profile?.displayName ?: rendererId)
-
-        val runtimeDesc = if (selectedRuntimeEntity != null) {
-            RuntimeDescriptor(
-                runtimeId = selectedRuntimeEntity.runtimeId,
-                displayName = selectedRuntimeEntity.displayName,
-                majorJavaVersion = selectedRuntimeEntity.majorVersion,
-                arch = selectedRuntimeEntity.arch,
-                versionString = selectedRuntimeEntity.binaryVersion,
-                isInternal = selectedRuntimeEntity.isInternal
-            )
-        } else {
-            RuntimeDescriptor(
-                runtimeId = "",
-                displayName = "Missing Java $requiredJava+",
-                majorJavaVersion = requestedRuntime?.majorVersion ?: 0,
-                arch = requestedRuntime?.arch ?: capabilities.cpuAbiPrimary,
-                versionString = requestedRuntime?.binaryVersion,
-                isInternal = false
-            )
-        }
-
-        val compat = compatibilityEvaluator.evaluate(
-            capabilities = capabilities,
-            target = CompatibilityTarget(
-                instanceId = instance.instanceId,
-                versionId = resolvedVersionId ?: "",
-                requiredJavaMajor = requiredJava,
-                rendererId = rendererId,
-                modLoaderType = version?.modLoaderType ?: ModLoaderType.VANILLA,
-                selectedRuntimeId = selectedRuntimeEntity?.runtimeId,
-                selectedRuntimeJavaMajor = selectedRuntimeEntity?.majorVersion ?: requestedRuntime?.majorVersion,
-                persistedVersionId = version?.versionId
-            )
-        )
-
-        val spec = EngineLaunchSpec(
-            instanceId = instance.instanceId,
-            versionId = resolvedVersionId ?: "",
-            gameDirPath = instance.gameDirPath,
-            runtime = runtimeDesc,
-            renderer = rendererSpec,
-            inputProfile = InputProfileSpec(controlMapPath = instance.controlMapPath),
-            allocatedRamMb = instance.allocatedRamMb,
-            customJvmArgs = instance.customJvmArgs
-        )
-
-        val adapterIssues = nativeEngineAdapter.validateLaunchSpec(spec)
-        val hardCompatBlock = compat.theoretical.status == CompatibilityStatus.FAIL ||
-            compat.theoretical.status == CompatibilityStatus.UNSUPPORTED
-        val softCompatBlock = !allowWarningsOrExperimental &&
-            (compat.theoretical.status == CompatibilityStatus.WARN ||
-                compat.theoretical.status == CompatibilityStatus.EXPERIMENTAL)
-
-        val blockReasons = buildList {
-            if (resolvedVersionId == null) {
-                add(
-                    "Instance '${instance.name}' has no Minecraft version selected. " +
-                        "Open Library -> Instance Settings -> Target Version ID to choose a version (e.g. 1.21.4)."
+            }
+            if (resolvedInstance == null) {
+                return LaunchPreparationResult.Blocked(
+                    listOf("The selected profile no longer exists. Please create or select a profile before launching.")
                 )
             }
-            if (selectedRuntimeEntity == null) {
-                if (requestedRuntime != null && !isRuntimeArchCompatibleForDevice(requestedRuntime.arch, deviceArchId)) {
-                    add(
-                        "Runtime '${requestedRuntime.displayName}' (${requestedRuntime.arch}) is incompatible " +
-                            "with device ABI ${capabilities.cpuAbiPrimary}. Install a Java $requiredJava+ runtime " +
-                            "for ${capabilities.cpuAbiPrimary} in Settings -> Java Runtimes."
-                    )
-                } else {
-                    add(
-                        "No compatible Java $requiredJava+ runtime is installed for ${capabilities.cpuAbiPrimary}. " +
-                            "Open Settings -> Java Runtimes to download External-$requiredJava or import a compatible runtime."
-                    )
-                }
-            }
-            addAll(adapterIssues)
-            if (hardCompatBlock || softCompatBlock) {
-                add(compat.theoretical.summaryReason)
-            }
-        }.distinct()
-        if (blockReasons.isNotEmpty()) {
-            return LaunchPreparationResult.Blocked(blockReasons, compat)
         }
 
-        val sessionId = diagnosticsManager.startSession(
-            instanceId = instance.instanceId,
-            versionId = instance.versionId,
-            runtimeId = selectedRuntimeEntity?.runtimeId,
-            rendererProfileId = instance.rendererProfileId,
-            deviceFingerprint = capabilities.deviceFingerprint,
-            startupSummary = "Preparing launch instance=${instance.name} version=${spec.versionId} renderer=$rendererId runtime=${selectedRuntimeEntity?.runtimeId ?: "none"}"
-        )
-        gameInstanceDao.update(instance.copy(lastPlayedAt = clockMillis()))
-        return LaunchPreparationResult.Ready(
-            sessionId = sessionId,
-            instanceName = instance.name,
-            useAngle = profile?.useAngle ?: false,
-            spec = spec,
-            compatibility = compat
-        )
+        val targetId = resolvedInstance.instanceId
+        if (!acquireLaunchPreparation(targetId)) {
+            val fallback = if (fallbackIfMissing) findFallbackInstance(excludedInstanceId = targetId) else null
+            if (fallback != null && acquireLaunchPreparation(fallback.instanceId)) {
+                resolvedInstance = fallback
+                recoveredFromMissing = true
+            } else {
+                return LaunchPreparationResult.Blocked(
+                    listOf("The selected profile no longer exists. Please create or select a profile before launching.")
+                )
+            }
+        }
+
+        val lockedId = resolvedInstance.instanceId
+        return try {
+            val instance = gameInstanceDao.getById(lockedId)
+                ?: return LaunchPreparationResult.Blocked(
+                    listOf("The selected profile no longer exists. Please create or select a profile before launching.")
+                )
+
+            val resolvedVersionId = instance.versionId?.trim()?.takeIf { isValidVersionId(it) }
+            val version = resolvedVersionId?.let { gameVersionDao.getById(it) }
+            val requiredJava = version?.requiredJavaMajor
+                ?: resolvedVersionId?.let { VersionCatalogService.inferJavaForRelease(it) }
+                ?: 8
+            val capabilities = probeAndPersistDevice()
+            val deviceArchId = expectedDeviceArchId(capabilities)
+
+            val requestedRuntime = instance.runtimeId?.let { runtimeRegistryDao.getById(it) }
+            val isRequestedUsable = requestedRuntime != null &&
+                requestedRuntime.isVerified &&
+                requestedRuntime.majorVersion >= requiredJava &&
+                isRuntimeArchCompatibleForDevice(requestedRuntime.arch, deviceArchId)
+
+            val selectedRuntimeEntity = if (isRequestedUsable) {
+                requestedRuntime
+            } else {
+                runtimeRegistryDao.getAll()
+                    .filter {
+                        it.isVerified &&
+                            it.majorVersion >= requiredJava &&
+                            isRuntimeArchCompatibleForDevice(it.arch, deviceArchId)
+                    }
+                    .minByOrNull { it.majorVersion }
+            }
+
+            val profile = instance.rendererProfileId?.let { rendererProfileDao.getById(it) }
+            val rendererId = profile?.rendererId ?: "opengles_mobileglues"
+            val rendererSpec: RendererSpec = mapRendererSpec(rendererId, profile?.displayName ?: rendererId)
+
+            val runtimeDesc = if (selectedRuntimeEntity != null) {
+                RuntimeDescriptor(
+                    runtimeId = selectedRuntimeEntity.runtimeId,
+                    displayName = selectedRuntimeEntity.displayName,
+                    majorJavaVersion = selectedRuntimeEntity.majorVersion,
+                    arch = selectedRuntimeEntity.arch,
+                    versionString = selectedRuntimeEntity.binaryVersion,
+                    isInternal = selectedRuntimeEntity.isInternal
+                )
+            } else {
+                RuntimeDescriptor(
+                    runtimeId = "",
+                    displayName = "Missing Java $requiredJava+",
+                    majorJavaVersion = requestedRuntime?.majorVersion ?: 0,
+                    arch = requestedRuntime?.arch ?: capabilities.cpuAbiPrimary,
+                    versionString = requestedRuntime?.binaryVersion,
+                    isInternal = false
+                )
+            }
+
+            val compat = compatibilityEvaluator.evaluate(
+                capabilities = capabilities,
+                target = CompatibilityTarget(
+                    instanceId = instance.instanceId,
+                    versionId = resolvedVersionId ?: "",
+                    requiredJavaMajor = requiredJava,
+                    rendererId = rendererId,
+                    modLoaderType = version?.modLoaderType ?: ModLoaderType.VANILLA,
+                    selectedRuntimeId = selectedRuntimeEntity?.runtimeId,
+                    selectedRuntimeJavaMajor = selectedRuntimeEntity?.majorVersion ?: requestedRuntime?.majorVersion,
+                    persistedVersionId = version?.versionId
+                )
+            )
+
+            val spec = EngineLaunchSpec(
+                instanceId = instance.instanceId,
+                versionId = resolvedVersionId ?: "",
+                gameDirPath = instance.gameDirPath,
+                runtime = runtimeDesc,
+                renderer = rendererSpec,
+                inputProfile = InputProfileSpec(controlMapPath = instance.controlMapPath),
+                allocatedRamMb = instance.allocatedRamMb,
+                customJvmArgs = instance.customJvmArgs
+            )
+
+            val adapterIssues = nativeEngineAdapter.validateLaunchSpec(spec)
+            val hardCompatBlock = compat.theoretical.status == CompatibilityStatus.FAIL ||
+                compat.theoretical.status == CompatibilityStatus.UNSUPPORTED
+            val softCompatBlock = !allowWarningsOrExperimental &&
+                (compat.theoretical.status == CompatibilityStatus.WARN ||
+                    compat.theoretical.status == CompatibilityStatus.EXPERIMENTAL)
+
+            val blockReasons = buildList {
+                if (resolvedVersionId == null) {
+                    add(
+                        "Instance '${instance.name}' has no Minecraft version selected. " +
+                            "Open Library -> Instance Settings -> Target Version ID to choose a version (e.g. 1.21.4)."
+                    )
+                }
+                if (selectedRuntimeEntity == null) {
+                    if (requestedRuntime != null && !isRuntimeArchCompatibleForDevice(requestedRuntime.arch, deviceArchId)) {
+                        add(
+                            "Runtime '${requestedRuntime.displayName}' (${requestedRuntime.arch}) is incompatible " +
+                                "with device ABI ${capabilities.cpuAbiPrimary}. Install a Java $requiredJava+ runtime " +
+                                "for ${capabilities.cpuAbiPrimary} in Settings -> Java Runtimes."
+                        )
+                    } else {
+                        add(
+                            "No compatible Java $requiredJava+ runtime is installed for ${capabilities.cpuAbiPrimary}. " +
+                                "Open Settings -> Java Runtimes to download External-$requiredJava or import a compatible runtime."
+                        )
+                    }
+                }
+                addAll(adapterIssues)
+                if (hardCompatBlock || softCompatBlock) {
+                    add(compat.theoretical.summaryReason)
+                }
+            }.distinct()
+            if (blockReasons.isNotEmpty()) {
+                return LaunchPreparationResult.Blocked(blockReasons, compat)
+            }
+
+            // Validate profile still exists immediately before committing diagnostics & session launch
+            val verifiedInstance = instanceMutationMutex.withLock {
+                val latest = gameInstanceDao.getById(instance.instanceId) ?: return@withLock null
+                gameInstanceDao.update(latest.copy(lastPlayedAt = clockMillis()))
+                latest
+            } ?: return LaunchPreparationResult.Blocked(
+                listOf("The selected profile no longer exists. Please create or select a profile before launching.")
+            )
+
+            val sessionId = diagnosticsManager.startSession(
+                instanceId = verifiedInstance.instanceId,
+                versionId = verifiedInstance.versionId,
+                runtimeId = selectedRuntimeEntity?.runtimeId,
+                rendererProfileId = verifiedInstance.rendererProfileId,
+                deviceFingerprint = capabilities.deviceFingerprint,
+                startupSummary = "Preparing launch instance=${verifiedInstance.name} version=${spec.versionId} renderer=$rendererId runtime=${selectedRuntimeEntity?.runtimeId ?: "none"}"
+            )
+            LaunchPreparationResult.Ready(
+                sessionId = sessionId,
+                instanceName = verifiedInstance.name,
+                useAngle = profile?.useAngle ?: false,
+                spec = spec,
+                compatibility = compat,
+                recoveredFromMissingProfile = recoveredFromMissing
+            )
+        } finally {
+            releaseLaunchPreparation(lockedId)
+        }
     }
 
     /**
      * Deletes the Room instance record; deletes disk files ONLY inside STAR-owned `aether_instances/`.
+     * Returns false without deleting if a launch operation is currently being prepared for this instance.
      */
-    suspend fun deleteInstance(instanceId: String, deleteAetherOwnedFiles: Boolean = false) {
-        val existing = gameInstanceDao.getById(instanceId)
-        gameInstanceDao.deleteById(instanceId)
-        if (deleteAetherOwnedFiles && existing != null) {
+    suspend fun deleteInstance(instanceId: String, deleteAetherOwnedFiles: Boolean = false): Boolean {
+        val existing = instanceMutationMutex.withLock {
+            if ((activeLaunchPrepCounts[instanceId] ?: 0) > 0) {
+                return false
+            }
+            val current = gameInstanceDao.getById(instanceId) ?: return false
+            gameInstanceDao.deleteById(instanceId)
+            current
+        }
+        if (deleteAetherOwnedFiles) {
             val aetherRoot = storageManager.instancesRoot().canonicalPath
             val target = File(existing.gameDirPath).parentFile
             if (target != null && target.canonicalPath.startsWith(aetherRoot) && target.canonicalPath != aetherRoot) {
                 target.deleteRecursively()
             }
         }
+        return true
     }
 
     private suspend fun probeAndPersistDevice(): DeviceCapabilitiesSnapshot {

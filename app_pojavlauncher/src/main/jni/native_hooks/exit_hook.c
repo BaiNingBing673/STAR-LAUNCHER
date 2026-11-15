@@ -33,7 +33,8 @@ static void custom_atexit() {
     nominal_exit(exit_code, false);
 }
 
-static void create_hooks(bytehook_hook_all_t bytehook_hook_all_p) {
+static void create_hooks(bytehook_hook_all_t bytehook_hook_all_p,
+                         bytehook_hook_partial_t bytehook_hook_partial_p) {
     bytehook_stub_t stub_exit = bytehook_hook_all_p(NULL, "exit", &custom_exit, NULL, NULL);
     LOGI("Successfully initialized exit hook, stub: %p", stub_exit);
     // Only apply chmod hooks on devices where the game directory is in games/PojavLauncher
@@ -41,7 +42,7 @@ static void create_hooks(bytehook_hook_all_t bytehook_hook_all_p) {
     if(android_get_device_api_level() < 29) {
         create_chmod_hooks(bytehook_hook_all_p);
     }
-    create_dlopen_hooks(bytehook_hook_all_p);
+    create_dlopen_hooks(bytehook_hook_all_p, bytehook_hook_partial_p);
     create_sdl_hooks(bytehook_hook_all_p);
 }
 
@@ -52,9 +53,11 @@ static bool init_hooks() {
     }
 
     bytehook_hook_all_t bytehook_hook_all_p;
+    bytehook_hook_partial_t bytehook_hook_partial_p;
     int (*bytehook_init_p)(int mode, bool debug);
 
     bytehook_hook_all_p = dlsym(bytehook_handle, "bytehook_hook_all");
+    bytehook_hook_partial_p = dlsym(bytehook_handle, "bytehook_hook_partial");
     bytehook_init_p = dlsym(bytehook_handle, "bytehook_init");
 
     if(bytehook_hook_all_p == NULL || bytehook_init_p == NULL) {
@@ -62,7 +65,7 @@ static bool init_hooks() {
     }
     int bhook_status = bytehook_init_p(BYTEHOOK_MODE_AUTOMATIC, false);
     if(bhook_status == BYTEHOOK_STATUS_CODE_OK) {
-        create_hooks(bytehook_hook_all_p);
+        create_hooks(bytehook_hook_all_p, bytehook_hook_partial_p);
         return true;
     } else {
         LOGE("bytehook_init failed (%i)", bhook_status);

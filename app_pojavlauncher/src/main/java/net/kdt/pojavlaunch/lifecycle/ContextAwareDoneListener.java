@@ -13,6 +13,7 @@ import net.kdt.pojavlaunch.MainActivity;
 import net.kdt.pojavlaunch.R;
 import net.kdt.pojavlaunch.Tools;
 import com.star.launcher.core.AetherContainer;
+import com.star.launcher.diagnostics.StartupProfiler;
 import net.kdt.pojavlaunch.lifecycle.ContextExecutor;
 import net.kdt.pojavlaunch.lifecycle.ContextExecutorTask;
 import net.kdt.pojavlaunch.progresskeeper.ProgressKeeper;
@@ -58,8 +59,10 @@ public class ContextAwareDoneListener implements AsyncMinecraftDownloader.DoneLi
     @Override
     public void executeWithActivity(Activity activity) {
         try {
+            long handoffStart = StartupProfiler.beginStage();
             Intent gameStartIntent = createGameStartIntent(activity);
             AetherContainer.flushWalIfInitialized();
+            StartupProfiler.endStage("launch_handoff_to_game", handoffStart, mNormalizedVersionid);
             activity.startActivity(gameStartIntent);
             activity.finish();
             android.os.Process.killProcess(android.os.Process.myPid()); //You should kill yourself, NOW!

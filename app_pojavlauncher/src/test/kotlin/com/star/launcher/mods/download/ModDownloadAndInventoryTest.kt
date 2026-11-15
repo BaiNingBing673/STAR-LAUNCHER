@@ -355,6 +355,109 @@ class ModDownloadAndInventoryTest {
         assertFalse(File(modsDir, "iris-1.7.2.jar").exists())
     }
 
+    @Test
+    fun `rejects non-zip corrupted jar payload and rolls back failed multi-mod batch atomically`() = runTest {
+        val htmlErrorPayload = "<html><body>502 Bad Gateway</body></html>".toByteArray()
+        val htmlSha1 = sha1Hex(htmlErrorPayload)
+        val corruptedFile = sampleModFile(901L, 301L, "corrupt-html.jar", htmlErrorPayload, htmlSha1)
+        val corruptMod = sampleMod(301L, "CorruptMod")
+
+        val installer = ModDownloadInstaller(
+            repository = stubDownloadUrlRepo("https://dl.example/corrupt-html.jar"),
+            downloadTaskDao = db.downloadTaskDao(),
+            installedModDao = db.installedModDao(),
+            storageManager = storage,
+            httpTransport = object : HttpTransport {
+                override suspend fun downloadToFile(url: String, destinationFile: File, onProgress: suspend (Long, Long) -> Unit) {
+                    destinationFile.writeBytes(htmlErrorPayload)
+                    onProgress(htmlErrorPayload.size.toLong(), htmlErrorPayload.size.toLong())
+                }
+            }
+        )
+
+        val corruptOutcome = installer.installSingleFile(corruptMod, corruptedFile, env)
+        assertTrue(corruptOutcome is ModInstallOutcome.Failed)
+        assertFalse(File(instDir, "mods/corrupt-html.jar").exists())
+        assertTrue((File(instDir, "mods").listFiles() ?: emptyArray()).none { it.name.endsWith(".part") })
+
+        // Corrupt existing jar in mods/ is flagged by JarModMetadataParser
+        val badExisting = File(instDir, "mods/broken.jar").apply {
+            parentFile?.mkdirs()
+            writeBytes(htmlErrorPayload)
+        }
+        val parsedBad = JarModMetadataParser.parse(badExisting)
+        assertFalse(parsedBad.isValidArchive)
+        badExisting.delete()
+
+        // Atomic batch install: first file downloads validly, second fails -> neither is committed to mods/
+        val validBytes = createFabricModJarBytes("liba", "LibA", "1.0.0")
+        val validSha1 = sha1Hex(validBytes)
+        val libMod = sampleMod(401L, "LibA")
+        val libFile = sampleModFile(1001L, 401L, "liba-1.0.0.jar", validBytes, validSha1)
+        val failMod = sampleMod(402L, "BrokenDep")
+        val failFile = sampleModFile(1002L, 402L, "brokendep-1.0.0.jar", validBytes, validSha1)
+
+        val batchInstaller2 = ModDownloadInstaller(
+            repository = CurseForgeRepository(
+                cred,
+                object : CurseForgeTransport {
+                    override suspend fun get(url: String, headers: Map<String, String>): CurseForgeHttpResponse =
+                        CurseForgeHttpResponse(200, """{"data":"https://dl.example/valid.jar"}""")
+                }
+            ),
+            downloadTaskDao = db.downloadTaskDao(),
+            installedModDao = db.installedModDao(),
+            storageManager = storage,
+            httpTransport = object : HttpTransport {
+                override suspend fun downloadToFile(url: String, destinationFile: File, onProgress: suspend (Long, Long) -> Unit) {
+                    if (url.contains("liba")) {
+                        destinationFile.writeBytes(validBytes)
+                        onProgress(validBytes.size.toLong(), validBytes.size.toLong())
+                    } else {
+                        throw java.io.IOException("Simulated CDN failure")
+                    }
+                }
+            }
+        )
+
+        val compat = com.star.launcher.mods.compat.ModCompatibilityAssessment(
+            level = ModCompatibilityLevel.COMPATIBLE,
+            summary = "Compatible",
+            reasons = listOf("Matches 1.20.1 & Fabric"),
+            apiFacts = emptyList(),
+            starInferences = emptyList(),
+            canInstall = true
+        )
+        val plan = com.star.launcher.mods.deps.ModInstallPlan(
+            rootItem = com.star.launcher.mods.deps.PlannedModInstallItem(
+                mod = failMod,
+                file = failFile.copy(downloadUrl = "https://dl.example/brokendep-1.0.0.jar"),
+                isRootMod = true,
+                compatibility = compat
+            ),
+            requiredDependencies = listOf(
+                com.star.launcher.mods.deps.PlannedModInstallItem(
+                    mod = libMod,
+                    file = libFile.copy(downloadUrl = "https://dl.example/liba-1.0.0.jar"),
+                    isRootMod = false,
+                    compatibility = compat
+                )
+            ),
+            optionalDependencies = emptyList(),
+            alreadyInstalledDependencies = emptyList(),
+            unresolvedDependencies = emptyList(),
+            conflicts = emptyList(),
+            detectedCycles = emptyList(),
+            targetInstanceId = env.instanceId,
+            targetInstanceName = env.instanceName,
+            targetModsDirPath = File(instDir, "mods").absolutePath
+        )
+        val batchOutcome = batchInstaller2.installPlan(plan, env, allowOverwrite = false)
+        assertTrue(batchOutcome is ModInstallOutcome.Failed)
+        assertFalse(File(instDir, "mods/liba-1.0.0.jar").exists())
+        assertFalse(File(instDir, "mods/brokendep-1.0.0.jar").exists())
+    }
+
     private fun stubDownloadUrlRepo(downloadUrl: String) = CurseForgeRepository(
         cred,
         object : CurseForgeTransport {

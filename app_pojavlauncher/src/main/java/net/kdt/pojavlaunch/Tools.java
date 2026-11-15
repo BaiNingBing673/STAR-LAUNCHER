@@ -287,13 +287,31 @@ public final class Tools {
     }
 
     /**
+     * Searches for mod in mods directory of the supplied game directory.
+     * Not case-sensitive.
+     */
+    public static boolean hasMods(File gameDir, String... filenames) {
+        return !getMods(gameDir, filenames).isEmpty();
+    }
+
+    /**
      * Searches for mod in mods directory of current selected profile
      * Not case-sensitive
      * @param filenames Filename(s) of the .jar mod(s)
      * @return The found mods
      */
     public static List<File> getMods(String... filenames) {
-        File gameDir = getGameDir();
+        return getMods(getGameDir(), filenames);
+    }
+
+    /**
+     * Searches for mod in mods directory of the supplied game directory
+     * Not case-sensitive
+     * @param gameDir Game directory containing mods/
+     * @param filenames Filename(s) of the .jar mod(s)
+     * @return The found mods
+     */
+    public static List<File> getMods(File gameDir, String... filenames) {
         File modsDir = new File(gameDir, "mods");
         File[] modFiles = modsDir.listFiles(file -> file.isFile() && file.getName().toLowerCase().endsWith(".jar"));
         if (modFiles == null) return new ArrayList<>();
@@ -316,7 +334,7 @@ public final class Tools {
     public static void deleteSodiumMods() {
         File modsDir = new File(getGameDir(), "mods");
         File[] mods = modsDir.listFiles(file -> file.isFile() && file.getName().endsWith(".jar"));
-        if(mods == null) ;
+        if(mods == null) return;
         for(File file : mods) {
             String name = file.getName().toLowerCase();
             if(name.contains("sodium") ||
@@ -511,9 +529,9 @@ public final class Tools {
         // We only ever reach this point when user has already used the force run switch
         boolean hasSodiumMod = false;
         for (String modName : sodiumMods) {
-            if (hasMods(sodiumMods)) {
+            if (hasMods(gamedir, sodiumMods)) {
                 hasSodiumMod = true;
-                File mixinPropertiesConfigFile = new File(getGameDir(), "config/" + modName + "-mixins.properties");
+                File mixinPropertiesConfigFile = new File(gamedir, "config/" + modName + "-mixins.properties");
                 // Write mixin configs to somewhat help stability. We don't want more people complaining.
                 String[] propertiesToAdd = {
                         "mixin.features.buffer_builder.intrinsics=false",
@@ -575,28 +593,33 @@ public final class Tools {
                 Tools.dialog(activity, activity.getString(R.string.global_warning), activity.getString(R.string.controllableFound));
             });
             Thread mitigationThread = new Thread(() -> {
-                // This is total garbage but it seems to be the best jank for the job
+                // Bounded poll instead of 100% CPU busy-wait while waiting for Controllable to extract libSDL2.so.
                 Log.i(TAG, "Controllable detected! Starting mitigation thread");
                 try {org.apache.commons.io.FileUtils.deleteDirectory(deleted);} catch (IOException ignored) {}
-                while (!Thread.currentThread().isInterrupted()) {
-                    // Looks for controllable_natives/SDL/<sdl_version_number>/libSDL2.so and
-                    // deletes it. We can assume array index 0 because this dir gets fully deleted
-                    // before the loop is started.
+                int attempts = 0;
+                while (!Thread.currentThread().isInterrupted() && attempts < 400) {
+                    attempts++;
                     if (deleted.isDirectory()) {
-                        if (deleted.listFiles().length > 0) {
-                            if (deleted.listFiles()[0].listFiles().length > 0) {
-                                if (deleted.listFiles()[0].listFiles()[0].exists()) {
-                                    deleted.listFiles()[0].listFiles()[0].delete();
-                                    break;
-                                }
+                        File[] level1 = deleted.listFiles();
+                        if (level1 != null && level1.length > 0) {
+                            File[] level2 = level1[0].listFiles();
+                            if (level2 != null && level2.length > 0 && level2[0].exists()) {
+                                level2[0].delete();
+                                break;
                             }
                         }
+                    }
+                    try {
+                        Thread.sleep(50L);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
                     }
                 }
                 // We can end here because SdlNativeLibraryLoader only extracts libSDL2.so once
                 // If NativeLibrary can't find it in the folder to load() it uses java.library.path
-                Log.i(TAG, "Success! Ending Controllable crash mitigation..");
-            });
+                Log.i(TAG, "Ending Controllable crash mitigation");
+            }, "ControllableMitigation");
             mitigationThread.start();
             controllableMitigationLogListener = loggedLine -> {
                 // Hard off switch if it somehow didn't delete anything, just in case.
@@ -1794,7 +1817,6 @@ public final class Tools {
     /** Releases the cache of compatible renderers. */
     public static void releaseRenderersCache() {
         sCompatibleRenderers = null;
-        System.gc();
     }
 
     public static boolean deviceSupportsGyro(@NonNull Context context) {
@@ -1881,11 +1903,7 @@ public final class Tools {
     }
 
     public static String getSelectedVanillaMcVer(){
-        String selectedProfile = LauncherPreferences.DEFAULT_PREF.getString(LauncherPreferences.PREF_KEY_CURRENT_PROFILE, "");
-        MinecraftProfile selected = LauncherProfiles.mainProfileJson.profiles.get(selectedProfile);
-        if (selected == null) { // This should NEVER happen.
-            throw new RuntimeException("No profile selected, how did you reach this? Go ask in the discord or github");
-        }
+        MinecraftProfile selected = LauncherProfiles.getCurrentProfile();
         String currentMCVersion = selected.lastVersionId;
         String vanillaVersion = currentMCVersion;
         File providedJsonFile = new File(Tools.DIR_HOME_VERSION + "/" + currentMCVersion + "/" + currentMCVersion + ".json");

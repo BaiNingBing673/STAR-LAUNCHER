@@ -39,6 +39,8 @@ sealed interface AetherRoute {
         val initialCategory: PreferenceCategory = PreferenceCategory.ALL
     ) : AetherRoute
     data object GamepadMapper : AetherRoute
+    data object HudCustomization : AetherRoute
+    data object LiveLyricsSettings : AetherRoute
     data class ModDetail(val modId: Long) : AetherRoute
 
     fun encode(): String = when (this) {
@@ -50,6 +52,8 @@ sealed interface AetherRoute {
         MicrosoftAuth -> "microsoft_auth"
         is EnginePreferences -> "engine_prefs:${initialCategory.name}"
         GamepadMapper -> "gamepad_mapper"
+        HudCustomization -> "hud_customization"
+        LiveLyricsSettings -> "live_lyrics_settings"
         is ModDetail -> "mod_detail:$modId"
     }
 
@@ -59,7 +63,7 @@ sealed interface AetherRoute {
             is InstanceDetail -> DashboardTab.LIBRARY
             is VersionInstallProgress -> DashboardTab.VERSIONS
             is ModDetail -> DashboardTab.MODS
-            RuntimeManagement, is RuntimeDetail, MicrosoftAuth, is EnginePreferences, GamepadMapper ->
+            RuntimeManagement, is RuntimeDetail, MicrosoftAuth, is EnginePreferences, GamepadMapper, HudCustomization, LiveLyricsSettings ->
                 DashboardTab.SETTINGS
         }
 
@@ -96,6 +100,8 @@ sealed interface AetherRoute {
                     EnginePreferences(cat)
                 }
                 encoded == "gamepad_mapper" -> GamepadMapper
+                encoded == "hud_customization" -> HudCustomization
+                encoded == "live_lyrics_settings" -> LiveLyricsSettings
                 encoded.startsWith("mod_detail:") -> {
                     val modId = encoded.removePrefix("mod_detail:").toLongOrNull()
                     if (modId != null && modId > 0L) ModDetail(modId) else null
@@ -109,6 +115,8 @@ sealed interface AetherRoute {
                 encoded.equals("SETTINGS", ignoreCase = true) -> Tab(DashboardTab.SETTINGS)
                 encoded.equals("AUTH", ignoreCase = true) -> MicrosoftAuth
                 encoded.equals("GAMEPAD", ignoreCase = true) -> GamepadMapper
+                encoded.equals("HUD", ignoreCase = true) || encoded.equals("HUD_CUSTOMIZE", ignoreCase = true) -> HudCustomization
+                encoded.equals("LIVE_LYRICS", ignoreCase = true) -> LiveLyricsSettings
                 encoded.equals("RUNTIME_MANAGEMENT", ignoreCase = true) -> RuntimeManagement
                 encoded.equals("ENGINE_PREFS", ignoreCase = true) -> EnginePreferences(PreferenceCategory.ALL)
                 else -> null

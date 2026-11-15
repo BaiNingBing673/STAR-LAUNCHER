@@ -58,6 +58,8 @@ import com.star.launcher.ui.navigation.AetherRoute
 import com.star.launcher.ui.navigation.PreferenceCategory
 import com.star.launcher.ui.screens.CommunityScreen
 import com.star.launcher.ui.screens.EnginePreferencesScreen
+import com.star.launcher.ui.screens.HudCustomizationScreen
+import com.star.launcher.ui.screens.LiveLyricsSettingsScreen
 import com.star.launcher.ui.screens.GamepadMapperScreen
 import com.star.launcher.ui.screens.HomeScreen
 import com.star.launcher.ui.screens.InstanceDetailScreen
@@ -75,9 +77,12 @@ import com.star.launcher.ui.theme.AetherSpacing
 import com.star.launcher.ui.theme.AetherTheme
 import com.star.launcher.version.VersionFilter
 import com.star.launcher.version.VersionSort
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import net.kdt.pojavlaunch.CustomControlsActivity
 import net.kdt.pojavlaunch.Tools
 import net.kdt.pojavlaunch.contracts.OpenDocumentWithExtension
@@ -130,12 +135,16 @@ class AetherDashboardActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        com.star.launcher.compat.UiPerformanceProfileManager.ensureInitialized(this)
+        com.star.launcher.diagnostics.PerformanceTelemetryTracker.ensureInitialized(this)
         Tools.initStorageConstants(this)
         ContextExecutor.setActivity(this)
-        AsyncVersionList().getVersionList(
-            { versions -> ExtraCore.setValue(ExtraConstants.RELEASE_TABLE, versions) },
-            false
-        )
+        if (ExtraCore.getValue(ExtraConstants.RELEASE_TABLE) == null) {
+            AsyncVersionList().getVersionList(
+                { versions -> ExtraCore.setValue(ExtraConstants.RELEASE_TABLE, versions) },
+                false
+            )
+        }
 
         val container = AetherContainer.get(this)
         val controller = stateViewModel.controller
@@ -199,8 +208,12 @@ class AetherDashboardActivity : ComponentActivity() {
                     modsController = modsController,
                     currentRoute = currentRoute,
                     accountRepository = container.accountRepository,
-                    onSelectTab = { tab -> stateViewModel.onTabSelected(tab) },
+                    onSelectTab = { tab ->
+                        com.star.launcher.diagnostics.PerformanceTelemetryTracker.onNavigationStarted(tab.name.lowercase())
+                        stateViewModel.onTabSelected(tab)
+                    },
                     onNavigateRoute = { route ->
+                        com.star.launcher.diagnostics.PerformanceTelemetryTracker.onNavigationStarted(route.ownerTab.name.lowercase())
                         navigation.push(route)
                         stateViewModel.syncControllerWithCurrentRoute()
                     },
@@ -352,7 +365,27 @@ class AetherDashboardActivity : ComponentActivity() {
             installTracker = ModloaderInstallTracker(this)
         }
         installTracker?.attach()
+        if (!firstLaunchGraphicsChecked) {
+            firstLaunchGraphicsChecked = true
+            lifecycleScope.launch(Dispatchers.IO) {
+                runCatching {
+                    val container = AetherContainer.get(this@AetherDashboardActivity)
+                    com.star.launcher.compat.AdaptiveGraphicsManager.initializeDefaultsOnFirstLaunch(
+                        this@AetherDashboardActivity,
+                        container.capabilityProbe.probe()
+                    )
+                }
+            }
+        }
         stateViewModel.controller.refreshEnvironmentAndSpools()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        com.star.launcher.ui.components.AetherImageCache.trimMemory(
+            aggressive = level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN
+        )
     }
 
     override fun onPause() {
@@ -386,62 +419,130 @@ class AetherDashboardActivity : ComponentActivity() {
             return
         }
         lifecycleScope.launch {
-            val (normalizedVersionId, mcVersion) = withContext(Dispatchers.IO) {
-                var normalized = AsyncMinecraftDownloader.normalizeVersionId(payload.versionId)
-                var listed = AsyncMinecraftDownloader.getListedVersion(normalized)
-                val localJson = File(Tools.DIR_HOME_VERSION, "$normalized/$normalized.json")
-                if (listed == null && !localJson.canRead()) {
-                    AsyncVersionList.ensureReleaseTableLoadedSync()
-                    normalized = AsyncMinecraftDownloader.normalizeVersionId(payload.versionId)
-                    listed = AsyncMinecraftDownloader.getListedVersion(normalized)
-                }
-                normalized to listed
+            val container = AetherContainer.get(this@AetherDashboardActivity)
+            val instanceManager = container.instanceManager
+            val locked = withContext(Dispatchers.IO) {
+                instanceManager.acquireLaunchPreparation(payload.instanceId)
             }
-            if (!InstanceManager.isValidVersionId(normalizedVersionId)) {
-                stateViewModel.controller.reportStatus(
-                    "Unable to resolve Minecraft version '${payload.versionId}' for '${payload.instanceName}'."
-                )
+            if (!locked) {
+                val fallback = withContext(Dispatchers.IO) {
+                    instanceManager.findFallbackInstance(excludedInstanceId = payload.instanceId)
+                }
+                if (fallback != null) {
+                    stateViewModel.controller.selectFeaturedInstance(fallback.instanceId)
+                    stateViewModel.controller.prepareInstanceLaunch(fallback.instanceId) { _, nextPayload ->
+                        launchGameWithPayload(nextPayload)
+                    }
+                } else {
+                    stateViewModel.controller.reportStatus(
+                        "The selected profile no longer exists. Please create or select a profile before launching."
+                    )
+                }
                 return@launch
             }
-            val verification = withContext(Dispatchers.IO) {
-                AetherContainer.get(this@AetherDashboardActivity)
-                    .versionInstallCoordinator
-                    .verifyInstalledVersion(normalizedVersionId)
-            }
-            if (!verification.isValid) {
-                stateViewModel.controller.reportVersionVerificationFailure(normalizedVersionId, verification)
-                return@launch
-            }
-            val resolvedPayload = payload.copy(versionId = normalizedVersionId)
-            val launchExtras = PojavLaunchBridge.toBundle(resolvedPayload)
-            val aetherAwareListener = object : AsyncMinecraftDownloader.DoneListener {
-                private val delegate = ContextAwareDoneListener(
-                    this@AetherDashboardActivity,
-                    normalizedVersionId,
-                    launchExtras
-                )
 
-                override fun onDownloadDone() {
-                    delegate.onDownloadDone()
-                }
-
-                override fun onDownloadFailed(throwable: Throwable) {
-                    runOnUiThread {
-                        stateViewModel.controller.reportLaunchError(normalizedVersionId, throwable)
+            val lockReleased = AtomicBoolean(false)
+            fun releaseLockAsync() {
+                if (lockReleased.compareAndSet(false, true)) {
+                    CoroutineScope(Dispatchers.IO + NonCancellable).launch {
+                        instanceManager.releaseLaunchPreparation(payload.instanceId)
                     }
                 }
             }
-            MinecraftDownloader().start(
-                this@AetherDashboardActivity,
-                mcVersion,
-                normalizedVersionId,
-                aetherAwareListener
-            )
+
+            try {
+                val (normalizedVersionId, mcVersion) = withContext(Dispatchers.IO) {
+                    var normalized = AsyncMinecraftDownloader.normalizeVersionId(payload.versionId)
+                    var listed = AsyncMinecraftDownloader.getListedVersion(normalized)
+                    val localJson = File(Tools.DIR_HOME_VERSION, "$normalized/$normalized.json")
+                    if (listed == null && !localJson.canRead()) {
+                        AsyncVersionList.ensureReleaseTableLoadedSync()
+                        normalized = AsyncMinecraftDownloader.normalizeVersionId(payload.versionId)
+                        listed = AsyncMinecraftDownloader.getListedVersion(normalized)
+                    }
+                    normalized to listed
+                }
+                if (!InstanceManager.isValidVersionId(normalizedVersionId)) {
+                    releaseLockAsync()
+                    stateViewModel.controller.reportStatus(
+                        "Unable to resolve Minecraft version '${payload.versionId}' for '${payload.instanceName}'."
+                    )
+                    return@launch
+                }
+                val verifyStart = com.star.launcher.diagnostics.StartupProfiler.beginStage()
+                val verification = withContext(Dispatchers.IO) {
+                    container.versionInstallCoordinator.verifyInstalledVersion(normalizedVersionId)
+                }
+                com.star.launcher.diagnostics.StartupProfiler.endStage("launch_verify_version", verifyStart, normalizedVersionId)
+                if (!verification.isValid) {
+                    releaseLockAsync()
+                    stateViewModel.controller.reportVersionVerificationFailure(normalizedVersionId, verification)
+                    return@launch
+                }
+                val currentInstance = withContext(Dispatchers.IO) {
+                    instanceManager.getInstance(payload.instanceId)
+                }
+                if (currentInstance == null) {
+                    releaseLockAsync()
+                    val fallback = withContext(Dispatchers.IO) {
+                        instanceManager.findFallbackInstance(excludedInstanceId = payload.instanceId)
+                    }
+                    if (fallback != null) {
+                        stateViewModel.controller.selectFeaturedInstance(fallback.instanceId)
+                        stateViewModel.controller.prepareInstanceLaunch(fallback.instanceId) { _, nextPayload ->
+                            launchGameWithPayload(nextPayload)
+                        }
+                    } else {
+                        stateViewModel.controller.reportStatus(
+                            "The selected profile no longer exists. Please create or select a profile before launching."
+                        )
+                    }
+                    return@launch
+                }
+                val resolvedPayload = payload.copy(
+                    versionId = normalizedVersionId,
+                    instanceName = currentInstance.name
+                )
+                val launchExtras = PojavLaunchBridge.toBundle(resolvedPayload)
+                val aetherAwareListener = object : AsyncMinecraftDownloader.DoneListener {
+                    private val delegate = ContextAwareDoneListener(
+                        this@AetherDashboardActivity,
+                        normalizedVersionId,
+                        launchExtras
+                    )
+
+                    override fun onDownloadDone() {
+                        releaseLockAsync()
+                        delegate.onDownloadDone()
+                    }
+
+                    override fun onDownloadFailed(throwable: Throwable) {
+                        releaseLockAsync()
+                        runOnUiThread {
+                            stateViewModel.controller.reportLaunchError(normalizedVersionId, throwable)
+                        }
+                    }
+                }
+                val downloader = MinecraftDownloader()
+                downloader.setExplicitRuntimeOverride(resolvedPayload.runtimeId)
+                downloader.start(
+                    this@AetherDashboardActivity,
+                    mcVersion,
+                    normalizedVersionId,
+                    aetherAwareListener
+                )
+            } catch (t: Throwable) {
+                releaseLockAsync()
+                stateViewModel.controller.reportLaunchError(payload.versionId, t)
+            }
         }
     }
 
     companion object {
         const val EXTRA_INITIAL_ROUTE = "aether_initial_route"
+
+        @Volatile
+        private var firstLaunchGraphicsChecked = false
 
         @JvmStatic
         fun createIntent(context: Context): Intent =
@@ -522,6 +623,8 @@ fun AetherDashboardScreen(
     onSaveDiscordInviteUrl: (String) -> Unit,
     onSetReducedMotion: (Boolean) -> Unit,
     onOpenEnginePreferences: () -> Unit = { onNavigateRoute(AetherRoute.EnginePreferences()) },
+    onOpenHudCustomization: () -> Unit = { onNavigateRoute(AetherRoute.HudCustomization) },
+    onOpenLiveLyrics: () -> Unit = { onNavigateRoute(AetherRoute.LiveLyricsSettings) },
     onStatusMessage: (String) -> Unit,
     onDismissBanner: () -> Unit
 ) {
@@ -644,6 +747,9 @@ fun AetherDashboardScreen(
                     }
 
                     Box(modifier = Modifier.weight(1f)) {
+                        LaunchedEffect(currentRoute) {
+                            com.star.launcher.diagnostics.PerformanceTelemetryTracker.onNavigationSettled(currentRoute.ownerTab.name.lowercase())
+                        }
                         when (currentRoute) {
                             is AetherRoute.Tab -> when (currentRoute.tab) {
                                 DashboardTab.HOME -> HomeScreen(
@@ -770,7 +876,9 @@ fun AetherDashboardScreen(
                                     onExportDiagnostics = onExportDiagnostics,
                                     onShareLogs = onShareLogs,
                                     onRefreshEnvironment = onRefresh,
-                                    onOpenEnginePreferences = onOpenEnginePreferences
+                                    onOpenEnginePreferences = onOpenEnginePreferences,
+                                    onOpenHudCustomization = onOpenHudCustomization,
+                                    onOpenLiveLyrics = onOpenLiveLyrics
                                 )
                             }
 
@@ -836,11 +944,23 @@ fun AetherDashboardScreen(
                                 onOpenCustomControls = onOpenCustomControls,
                                 onOpenGamepadMapper = onOpenGamepadMapper,
                                 onStatusMessage = onStatusMessage,
-                                onPreferencesUpdated = onRefresh
+                                onPreferencesUpdated = onRefresh,
+                                onOpenHudCustomization = onOpenHudCustomization
                             )
 
                             AetherRoute.GamepadMapper -> GamepadMapperScreen(
                                 onBack = onNavigateBack
+                            )
+
+                            AetherRoute.HudCustomization -> HudCustomizationScreen(
+                                onBack = onNavigateBack,
+                                onOpenLegacyControls = onOpenCustomControls,
+                                onStatusMessage = onStatusMessage
+                            )
+
+                            AetherRoute.LiveLyricsSettings -> LiveLyricsSettingsScreen(
+                                onBack = onNavigateBack,
+                                onStatusMessage = onStatusMessage
                             )
 
                             is AetherRoute.ModDetail -> {
@@ -868,6 +988,9 @@ fun AetherDashboardScreen(
                                 )
                             }
                         }
+                        com.star.launcher.diagnostics.PerformanceMonitorOverlay(
+                            modifier = Modifier.align(Alignment.TopEnd)
+                        )
                     }
                 }
             }

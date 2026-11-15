@@ -281,6 +281,158 @@ class CurseForgeApiAndSecurityTest {
         assertEquals(CurseForgeModLoader.NEOFORGE, repo.getModLoaders("1.21.1").getOrThrow().first().type)
     }
 
+    @Test
+    fun `json null fields do not leak literal string null into mod or link metadata`() = runTest {
+        credentialProvider.saveDeveloperApiKey("valid-test-key-abcdef")
+        val repo = CurseForgeRepository(credentialProvider, object : CurseForgeTransport {
+            override suspend fun get(url: String, headers: Map<String, String>): CurseForgeHttpResponse {
+                return CurseForgeHttpResponse(
+                    200,
+                    """{"data":{"id":202,"name":"CleanMod","slug":null,"summary":null,"downloadCount":10,"logo":{"id":1,"thumbnailUrl":null,"url":null},"links":{"websiteUrl":null,"wikiUrl":null,"issuesUrl":null,"sourceUrl":null},"latestFiles":[]}}"""
+                )
+            }
+        })
+        val mod = repo.getMod(202L).getOrThrow()
+        assertEquals("", mod.summary)
+        assertNull(mod.logo?.thumbnailUrl)
+        assertNull(mod.logo?.url)
+        assertNull(mod.links.websiteUrl)
+        assertNull(mod.links.sourceUrl)
+    }
+
+    @Test
+    fun `developer api key normalization strips quotes prefix and invisibles while http 403 exposes safe auth reason`() = runTest {
+        val rawExpected = "\$2a\$10\$CleanedKeyValue123456"
+        credentialProvider.saveDeveloperApiKey("  \uFEFFx-api-key: \"$rawExpected\" \u200B ")
+        val auth = credentialProvider.getAuthConfig() as CurseForgeAuthConfig.DirectVaultKey
+        assertEquals(rawExpected, auth.apiKey)
+
+        val dummyErr = runCatching { credentialProvider.saveDeveloperApiKey("DUMMY") }.exceptionOrNull()
+        assertTrue(dummyErr is IllegalArgumentException)
+
+        val repo403 = CurseForgeRepository(credentialProvider, object : CurseForgeTransport {
+            override suspend fun get(url: String, headers: Map<String, String>): CurseForgeHttpResponse {
+                return CurseForgeHttpResponse(403, "Forbidden: API Key missing or invalid ($rawExpected)")
+            }
+        })
+        val err = repo403.searchMods(CurseForgeSearchQuery()).exceptionOrNull()
+        assertTrue(err is CurseForgeApiException.Forbidden)
+        val forbidden = err as CurseForgeApiException.Forbidden
+        assertFalse(forbidden.isDistributionRestriction)
+        assertTrue(forbidden.message.contains("API Key missing or invalid"))
+        assertFalse(forbidden.message.contains(rawExpected))
+    }
+
+    @Test
+    fun `release fallback uses bundled key or public Modrinth catalog when unconfigured or 403 rejected`() = runTest {
+        val dummyCred = CurseForgeCredentialProvider(vault, settings) { "DUMMY\n" }
+        assertEquals(CurseForgeCredentialStatus.UNCONFIGURED, dummyCred.getCredentialStatus())
+
+        val bundledCred = CurseForgeCredentialProvider(vault, settings) { "  \$2a\$10\$BundledReleaseKey9999  \n" }
+        assertEquals(CurseForgeCredentialStatus.DEVELOPER_VAULT_KEY_CONFIGURED, bundledCred.getCredentialStatus())
+        assertEquals("\$2a\$10\$BundledReleaseKey9999", (bundledCred.getAuthConfig() as CurseForgeAuthConfig.DirectVaultKey).apiKey)
+
+        // Even with unconfigured or 403-rejected CurseForge key, enablePublicFallback=true serves real mods
+        credentialProvider.saveDeveloperApiKey("stale-invalid-vault-key-403")
+        val fallbackRepo = CurseForgeRepository(
+            credentialProvider = credentialProvider,
+            enablePublicFallback = true,
+            transport = object : CurseForgeTransport {
+                override suspend fun get(url: String, headers: Map<String, String>): CurseForgeHttpResponse {
+                    return when {
+                        url.startsWith("https://api.curseforge.com") ->
+                            CurseForgeHttpResponse(403, "Forbidden: API Key missing or invalid")
+                        url.startsWith("https://api.modrinth.com/v2/search") ->
+                            CurseForgeHttpResponse(
+                                200,
+                                """
+                                {
+                                  "hits": [
+                                    {
+                                      "project_id": "AANobbMI",
+                                      "slug": "sodium",
+                                      "title": "Sodium",
+                                      "description": "The fastest rendering optimization mod",
+                                      "author": "jellysquid3",
+                                      "downloads": 55000000,
+                                      "icon_url": "https://cdn.modrinth.com/sodium.png",
+                                      "versions": ["1.20.1", "1.21.1"],
+                                      "categories": ["fabric", "neoforge", "optimization"]
+                                    }
+                                  ],
+                                  "offset": 0,
+                                  "limit": 20,
+                                  "total_hits": 1
+                                }
+                                """.trimIndent()
+                            )
+                        url.startsWith("https://api.modrinth.com/v2/project/AANobbMI/version") ->
+                            CurseForgeHttpResponse(
+                                200,
+                                """
+                                [
+                                  {
+                                    "id": "ver123",
+                                    "project_id": "AANobbMI",
+                                    "name": "Sodium 0.6.0",
+                                    "version_type": "release",
+                                    "game_versions": ["1.21.1"],
+                                    "loaders": ["fabric"],
+                                    "files": [
+                                      {
+                                        "url": "https://cdn.modrinth.com/data/AANobbMI/sodium-0.6.0.jar",
+                                        "filename": "sodium-0.6.0.jar",
+                                        "primary": true,
+                                        "size": 1048576,
+                                        "hashes": {"sha1": "11223344556677889900aabbccddeeff00112233"}
+                                      }
+                                    ],
+                                    "dependencies": []
+                                  }
+                                ]
+                                """.trimIndent()
+                            )
+                        url.startsWith("https://api.modrinth.com/v2/project/AANobbMI") ->
+                            CurseForgeHttpResponse(
+                                200,
+                                """
+                                {
+                                  "id": "AANobbMI",
+                                  "slug": "sodium",
+                                  "title": "Sodium",
+                                  "description": "The fastest rendering optimization mod",
+                                  "body": "<p>Full description of Sodium</p>",
+                                  "downloads": 55000000,
+                                  "game_versions": ["1.20.1", "1.21.1"],
+                                  "loaders": ["fabric", "neoforge"],
+                                  "categories": ["optimization"]
+                                }
+                                """.trimIndent()
+                            )
+                        else -> CurseForgeHttpResponse(404, "{}")
+                    }
+                }
+            }
+        )
+
+        val searchRes = fallbackRepo.searchMods(CurseForgeSearchQuery(searchFilter = "sodium")).getOrThrow()
+        assertEquals(1, searchRes.mods.size)
+        val mod = searchRes.mods.first()
+        assertEquals("Sodium", mod.name)
+        assertTrue(mod.supportedLoadersFromLatest.contains(CurseForgeModLoader.FABRIC))
+
+        val detailMod = fallbackRepo.getMod(mod.id).getOrThrow()
+        assertEquals("Sodium", detailMod.name)
+        val desc = fallbackRepo.getModDescription(mod.id).getOrThrow()
+        assertEquals("Full description of Sodium", desc)
+
+        val files = fallbackRepo.getModFiles(mod.id, gameVersion = "1.21.1", modLoader = CurseForgeModLoader.FABRIC).getOrThrow().files
+        assertEquals(1, files.size)
+        val dl = fallbackRepo.resolveDownloadUrl(detailMod, files.first()).getOrThrow()
+        assertTrue(dl is CurseForgeDownloadUrlResult.Available)
+        assertEquals("https://cdn.modrinth.com/data/AANobbMI/sodium-0.6.0.jar", (dl as CurseForgeDownloadUrlResult.Available).url)
+    }
+
     private suspend fun repoStatus(): CurseForgeCredentialStatus =
         credentialProvider.getCredentialStatus()
 }

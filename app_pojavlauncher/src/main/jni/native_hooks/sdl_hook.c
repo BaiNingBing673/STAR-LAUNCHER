@@ -387,3 +387,22 @@ void create_sdl_hooks(bytehook_hook_all_t bytehook_hook_all_p) {
     bytehook_stub_t stub_SDL_CloseGamepad  = bytehook_hook_all_p(NULL, "SDL_CloseGamepad",  &custom_SDL_CloseGamepad_Func,  NULL, NULL);
     LOGI("Successfully initialized SDL hook, stub: %p\n", stub_SDL_InitSubSystem);
 }
+
+JNIEXPORT void JNICALL Java_net_kdt_pojavlaunch_utils_JREUtils_setAndroidSurfaceReady(
+        __attribute__((unused)) JNIEnv *env,
+        __attribute__((unused)) jclass clazz,
+        jboolean ready) {
+    static unsigned long s_surface_gen = 1;
+    void *sdlHandle = dlopen("libSDL3.so", RTLD_NOLOAD);
+    if (!sdlHandle) return;
+    SET_DLSYM_PTR(sdlHandle, SDL_SetHint);
+    if (SDL_SetHint_p) {
+        if (ready) {
+            char genBuf[32];
+            s_surface_gen++;
+            snprintf(genBuf, sizeof(genBuf), "%lu", s_surface_gen);
+            SDL_SetHint_p("SDL_AETHER_SURFACE_GEN", genBuf);
+        }
+        SDL_SetHint_p("SDL_AETHER_SURFACE_READY", ready ? "1" : "0");
+    }
+}

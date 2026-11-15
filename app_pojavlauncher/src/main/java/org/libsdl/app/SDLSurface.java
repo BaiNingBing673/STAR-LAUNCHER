@@ -17,6 +17,7 @@ import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Build;
+import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Display;
@@ -35,6 +36,7 @@ import android.view.ScaleGestureDetector;
 
 import net.kdt.pojavlaunch.MinecraftGLSurface;
 import net.kdt.pojavlaunch.Tools;
+import net.kdt.pojavlaunch.utils.JREUtils;
 import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 
 /**
@@ -124,6 +126,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
         if (!MinecraftGLSurface.sdlEnabled) return;
         Log.v("SDL", "surfaceCreated()");
         SDLActivity.onNativeSurfaceCreated();
+        JREUtils.setAndroidSurfaceReady(true);
     }
 
     // Called when we lose the surface
@@ -132,11 +135,15 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
         if (!MinecraftGLSurface.sdlEnabled) return;
         Log.v("SDL", "surfaceDestroyed()");
 
+        JREUtils.setAndroidSurfaceReady(false);
+        mIsSurfaceReady = false;
+        // Let any in-flight vkCreateAndroidSurfaceKHR on the render thread finish before releasing ANativeWindow.
+        SystemClock.sleep(25);
+
         // Transition to pause, if needed
         SDLActivity.mNextNativeState = SDLActivity.NativeState.PAUSED;
         SDLActivity.handleNativeState();
 
-        mIsSurfaceReady = false;
         SDLActivity.onNativeSurfaceDestroyed();
     }
 
@@ -222,6 +229,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
 
         /* Surface is ready */
         mIsSurfaceReady = true;
+        JREUtils.setAndroidSurfaceReady(true);
 
         SDLActivity.mNextNativeState = SDLActivity.NativeState.RESUMED;
         SDLActivity.handleNativeState();

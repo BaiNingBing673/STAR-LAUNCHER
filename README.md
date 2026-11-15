@@ -73,21 +73,22 @@ All capabilities below are verified directly against the codebase (full breakdow
 
 ### Implemented
 
-- **5-Tab Material 3 Compose Hub (`AetherDashboardActivity` internal Activity)**: `Home`, `Library`, `Versions`, `Community`, and `Settings` with adaptive `NavigationBar`/`NavigationRail` and `SavedStateHandle` navigation stack persistence.
+- **6-Tab Material 3 Compose Hub (`AetherDashboardActivity` internal Activity)**: `Home`, `Library`, `Versions`, `Mods`, `Community`, and `Settings` with adaptive `NavigationBar`/`NavigationRail`, `UiPerformanceProfileManager` tier scaling, and `SavedStateHandle` navigation stack persistence.
 - **Isolated Instance Management (`InstanceManager`, `LibraryScreen`, `InstanceDetailScreen`)**: Per-instance `.minecraft` directories (under the preserved internal directory `aether_instances/<id>/.minecraft`), per-instance RAM allocation, custom JVM arguments, runtime & renderer bindings, featured instance pinning, and legacy `.minecraft` profile import.
-- **Version Catalog & Installer (`VersionCatalogService`, `VersionInstallCoordinator`)**: Syncs Mojang `version_manifest_v2.json` (releases, snapshots, historical betas/alphas), installs Fabric and Quilt loader profiles, tracks byte/file progress, validates SHA-1 hashes, and cleans interrupted `.aetherpart` downloads.
+- **Version Catalog & Installer (`VersionCatalogService`, `VersionInstallCoordinator`)**: Syncs Mojang `version_manifest_v2.json` (releases, snapshots, historical betas/alphas), installs Fabric, Quilt, Forge, and NeoForge loader profiles, tracks byte/file progress, validates SHA-1 hashes, and cleans interrupted `.aetherpart` downloads.
+- **In-App Mods Hub (`ModsScreen`, `ModDetailScreen`, `ModsController`, `CurseForgeRepository`, `ModrinthFallbackCatalog`)**: Browse, filter, and install mods directly into isolated instance `mods/` directories with CurseForge API integration, automatic Modrinth fallback catalog support, dependency resolution (`ModDependencyResolver`), compatibility checks (`ModCompatibilityEngine`), and local `.jar` metadata inspection (`JarModMetadataParser`, `InstalledModManager`).
 - **OpenJDK Runtime Manager (`RuntimeManagementScreen`, `MultiRTUtils`, `NewJREUtil`)**: Validates `libjvm.so` and ABI match, downloads External OpenJDK **8, 17, 21, and 25** builds (where device ABI supports them), or imports local `.tar.xz` archives.
-- **Renderer Filtering & MobileGlues Tuning (`EnginePreferencesScreen`, `PojavRendererFacade`)**: Probes hardware support before listing renderers and exposes MobileGlues controls (GLSL cache size, ANGLE backend toggle, AMD FSR 1 upscaling, experimental GL extension flags).
+- **Renderer Filtering, Adaptive Graphics & MobileGlues Tuning (`EnginePreferencesScreen`, `PojavRendererFacade`, `AdaptiveGraphicsManager`)**: Probes hardware support before listing renderers, tunes settings by device capability tier, and exposes MobileGlues controls (GLSL cache size, ANGLE backend toggle, AMD FSR 1 upscaling, experimental GL extension flags).
 - **Accounts & Hardware-Backed Encryption (`AccountRepository`, `TokenVault`, `MicrosoftAuthScreen`)**: Microsoft OAuth2 + Xbox Live WebView login, offline local profiles (3–16 chars), and AES-GCM secret mirroring via Android Keystore (`aether_token_vault_v1`).
-- **Controls & `DocumentsProvider`**: On-screen custom controls editor (`CustomControlsActivity`), `.json` control import/export, gamepad button remapper (`GamepadMapperScreen`), and scoped file exposure via `FolderProvider` (`com.star.launcher.scoped.gamefolder`).
-- **Diagnostics & Cross-Process Spooling**: Redacted `star-support-*.txt` export (`DiagnosticExporter`), `SensitiveLogRedactor`, and atomic `:game` -> `:launcher` JSON exit spooling (`CrossProcessSpoolBridge`).
+- **STAR Touch HUD & Controls (`StarTouchHudOverlay`, `HudCustomizationScreen`, `CustomControlsActivity`, `GamepadMapperScreen`)**: Customizable in-game touch HUD (`StarJoystickView`, `StarHudButtonView`, `StarHudLayoutSolver`), classic custom controls editor, `.json` control import/export, gamepad button remapper, and scoped file exposure via `FolderProvider` (`com.star.launcher.scoped.gamefolder`).
+- **STAR Live Lyrics & Audio Overlay (`StarLiveLyricsOverlay`, `LiveLyricsSettingsScreen`, `StarMusicPlayerService`, `LrcLibClient`)**: In-game synchronized lyrics overlay (`KineticLyricsView`, `MiniVisualizerView`), external media session tracking (`StarMediaNotificationListener`), LrcLib provider lookup, and built-in music playback service.
+- **Diagnostics, Performance Overlay & Cross-Process Spooling (`DiagnosticExporter`, `CrashReportCoordinator`, `PerformanceMonitorOverlay`, `StartupProfiler`, `CrossProcessSpoolBridge`)**: Redacted `star-support-*.txt` export, `SensitiveLogRedactor`, live frame/memory performance overlay, and atomic `:game` -> `:launcher` JSON exit spooling.
 
 ### Partially Implemented / Planned
 
 - **Compatibility Passport**: Capability probing (`DETECTED`), rule evaluation (`THEORETICAL`), and real-run verification (`VERIFIED_RUNTIME`) are **implemented** in backend + `Settings` / `InstanceDetail` badges; curated `TESTED` matrix data (`EmptyTestedMatrixProvider` stub) and a dedicated full-screen Passport browser are **planned**.
-- **STAR Doctor**: Automated log redaction, native library checks (`verifyEngineLibrariesPresent`), and support report export are **implemented**; interactive automated crash-diagnosis and one-tap remediation cards are **planned**.
-- **STAR Pulse**: Local session and exit/crash recording (`GameSessions` + `CrossProcessSpoolBridge`) is **implemented**; live FPS/frame-time HUD overlays and opt-in compatibility telemetry are **planned**.
-- **In-App Online Mod / Modpack Search**: Local `.jar` installer and `.zip`/`.mrpack` file import are **implemented**; an interactive Compose Modrinth/CurseForge store browser is **planned**.
+- **STAR Doctor**: Automated log redaction, native library checks (`verifyEngineLibrariesPresent`), crash report coordination (`CrashReportCoordinator`), and support report export are **implemented**; interactive one-tap remediation cards are **planned**.
+- **STAR Pulse**: Local session/exit recording (`GameSessions` + `CrossProcessSpoolBridge`) and live in-app performance monitor overlay (`PerformanceMonitorOverlay`) are **implemented**; opt-in cloud compatibility telemetry is **planned**.
 
 ---
 
@@ -134,7 +135,7 @@ Verified from [`app_pojavlauncher/build.gradle`](app_pojavlauncher/build.gradle)
 
 ## Installation & First-Time Setup
 
-Pre-built release APKs are **not** published in this repository yet. To install STAR Launcher right now, build the debug APK from source (see [Building from Source](#building-from-source)) and install `app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk` on your Android device or emulator.
+Download the latest universal APK (`STAR-Launcher-v3.0.0.apk`) from [GitHub Releases](https://github.com/BaiNingBing673/STAR-LAUNCHER/releases) and verify its `.sha256` checksum before installing on your Android device (Android 5.0+ / API 21+), or build from source (see [Building from Source](#building-from-source)).
 
 ### First-Time Setup Guide
 

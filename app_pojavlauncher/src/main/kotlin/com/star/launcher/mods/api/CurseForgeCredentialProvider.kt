@@ -32,8 +32,19 @@ enum class CurseForgeCredentialStatus {
  */
 class CurseForgeCredentialProvider(
     private val tokenVault: TokenVault,
-    private val settingsRepository: AetherSettingsRepository
+    private val settingsRepository: AetherSettingsRepository,
+    private val bundledApiKeyProvider: () -> String? = { null }
 ) {
+    fun getBundledAuthConfig(): CurseForgeAuthConfig.DirectVaultKey? {
+        val raw = runCatching { bundledApiKeyProvider() }.getOrNull() ?: return null
+        val normalized = normalizeDeveloperKey(raw)
+        return if (isPlausibleDeveloperKey(normalized)) {
+            CurseForgeAuthConfig.DirectVaultKey(apiKey = normalized)
+        } else {
+            null
+        }
+    }
+
     suspend fun getAuthConfig(): CurseForgeAuthConfig {
         val mode = settingsRepository.getString(KEY_AUTH_MODE, MODE_UNCONFIGURED)
         return when (mode) {
@@ -43,23 +54,25 @@ class CurseForgeCredentialProvider(
                     val token = tokenVault.getSecret(VAULT_ALIAS_PROXY_TOKEN)?.trim()?.takeIf { it.isNotEmpty() }
                     CurseForgeAuthConfig.BackendProxy(proxyBaseUrl = url, clientToken = token)
                 } else {
-                    CurseForgeAuthConfig.Unconfigured
+                    getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
                 }
             }
             MODE_DIRECT_VAULT -> {
-                val key = tokenVault.getSecret(VAULT_ALIAS_DEV_KEY)?.trim()?.takeIf { it.isNotEmpty() }
+                val key = tokenVault.getSecret(VAULT_ALIAS_DEV_KEY)?.let { normalizeDeveloperKey(it) }
+                    ?.takeIf { isPlausibleDeveloperKey(it) }
                 if (key != null) {
                     CurseForgeAuthConfig.DirectVaultKey(apiKey = key)
                 } else {
-                    CurseForgeAuthConfig.Unconfigured
+                    getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
                 }
             }
             else -> {
-                val fallbackKey = tokenVault.getSecret(VAULT_ALIAS_DEV_KEY)?.trim()?.takeIf { it.isNotEmpty() }
+                val fallbackKey = tokenVault.getSecret(VAULT_ALIAS_DEV_KEY)?.let { normalizeDeveloperKey(it) }
+                    ?.takeIf { isPlausibleDeveloperKey(it) }
                 if (fallbackKey != null) {
                     CurseForgeAuthConfig.DirectVaultKey(apiKey = fallbackKey)
                 } else {
-                    CurseForgeAuthConfig.Unconfigured
+                    getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
                 }
             }
         }
@@ -72,10 +85,17 @@ class CurseForgeCredentialProvider(
     }
 
     suspend fun saveDeveloperApiKey(rawKey: String) {
-        val trimmed = rawKey.trim()
-        require(trimmed.length >= 8) { "CurseForge API key appears too short" }
-        require(!trimmed.contains('\n') && !trimmed.contains('\r')) { "Invalid API key format" }
-        tokenVault.putSecret(VAULT_ALIAS_DEV_KEY, trimmed)
+        val rawHasNewline = rawKey.trim().any { it == '\n' || it == '\r' }
+        require(!rawHasNewline) { "Invalid API key format" }
+        val normalized = normalizeDeveloperKey(rawKey)
+        require(isPlausibleDeveloperKey(normalized)) {
+            if (normalized.equals("DUMMY", ignoreCase = true) || normalized.equals("YOUR_API_KEY", ignoreCase = true)) {
+                "Placeholder text is not a valid CurseForge API key"
+            } else {
+                "CurseForge API key appears too short or malformed"
+            }
+        }
+        tokenVault.putSecret(VAULT_ALIAS_DEV_KEY, normalized)
         settingsRepository.setString(KEY_AUTH_MODE, MODE_DIRECT_VAULT)
     }
 
@@ -114,6 +134,37 @@ class CurseForgeCredentialProvider(
 
         const val VAULT_ALIAS_DEV_KEY = "curseforge_dev_api_key"
         const val VAULT_ALIAS_PROXY_TOKEN = "curseforge_proxy_client_token"
+
+        fun normalizeDeveloperKey(raw: String): String {
+            var cleaned = raw
+                .replace("\u200B", "")
+                .replace("\u200C", "")
+                .replace("\u200D", "")
+                .replace("\uFEFF", "")
+                .replace('\u00A0', ' ')
+                .trim()
+            if (cleaned.startsWith("x-api-key", ignoreCase = true)) {
+                val sepIdx = cleaned.indexOfFirst { it == ':' || it == '=' }
+                if (sepIdx >= 0) {
+                    cleaned = cleaned.substring(sepIdx + 1).trim()
+                }
+            }
+            if ((cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+                (cleaned.startsWith('\'') && cleaned.endsWith('\''))
+            ) {
+                if (cleaned.length >= 2) {
+                    cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+                }
+            }
+            return cleaned
+        }
+
+        fun isPlausibleDeveloperKey(key: String): Boolean {
+            if (key.length < 8) return false
+            if (key.any { it.isWhitespace() || it.isISOControl() }) return false
+            if (key.equals("DUMMY", ignoreCase = true) || key.equals("YOUR_API_KEY", ignoreCase = true)) return false
+            return true
+        }
 
         fun isValidProxyUrl(url: String): Boolean {
             if (url.isBlank()) return false

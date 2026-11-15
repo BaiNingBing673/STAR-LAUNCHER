@@ -15,6 +15,8 @@ enum class DiscordOpenOutcome {
 }
 
 object DiscordLinkHelper {
+    const val DEFAULT_DISCORD_INVITE_URL = "https://discord.gg/DdtPb8ehqR"
+
     private val VALID_DISCORD_HOSTS = setOf(
         "discord.gg",
         "www.discord.gg",

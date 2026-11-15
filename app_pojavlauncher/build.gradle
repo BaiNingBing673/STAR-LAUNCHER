@@ -10,7 +10,7 @@ static def getDate() { return new Date().format('yyyyMMdd') }
 def getVersionName = {
     // Get the last version tag, as well as the short head of the last commit
     String TAG = ""
-    String semVer = "1.1.7"
+    String semVer = "3.0.0"
     // Used by the fallback for github actions
     String TAG_PART_COMMIT = ""
     String TAG_STRING
@@ -59,10 +59,11 @@ def getVersionName = {
 
 def getCFApiKey = {
     String key = System.getenv("CURSEFORGE_API_KEY");
-    if(key != null) return key;
+    if(key != null && !key.trim().isEmpty()) return key.trim();
     File curseforgeKeyFile = new File("$projectDir/curseforge_key.txt");
     if(curseforgeKeyFile.canRead() && curseforgeKeyFile.isFile()) {
-        return curseforgeKeyFile.text;
+        String fileKey = curseforgeKeyFile.text.trim();
+        if(!fileKey.isEmpty()) return fileKey;
     }
     logger.warn('BUILD: You have no CurseForge key, the curseforge api will get disabled !');
     return "DUMMY";
@@ -106,8 +107,8 @@ android {
         applicationId "com.star.launcher"
         minSdkVersion 21
         targetSdkVersion 34
-        versionCode 10000000
-        versionName getVersionName()
+        versionCode 10000001
+        versionName "3.0.0"
         multiDexEnabled true //important
         resValue 'string', 'curseforge_api_key', getCFApiKey()
         externalNativeBuild {
@@ -145,7 +146,8 @@ android {
             // Don't set to true or java.awt will be a.a or something similar.
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.customRelease
+            def releaseStorePass = System.getenv("GPLAY_KEYSTORE_PASSWORD")
+            signingConfig((releaseStorePass != null && !releaseStorePass.trim().isEmpty()) ? signingConfigs.customRelease : signingConfigs.customDebug)
             // defaultConfig already set
             // multiDexEnabled = true
             // debuggable = true

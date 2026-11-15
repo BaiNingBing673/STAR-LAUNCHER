@@ -59,28 +59,38 @@ class VersionManager(
         if (!versionsDir.isDirectory) return emptyList()
 
         val folders = versionsDir.listFiles()?.filter { it.isDirectory } ?: return emptyList()
-        val parsedMap = LinkedHashMap<String, Pair<ParsedVersionManifest, File>>()
+        val parsedMap = LinkedHashMap<String, Triple<ParsedVersionManifest, JSONObject, File>>()
 
         for (dir in folders) {
             val manifestFile = File(dir, "${dir.name}.json")
             if (!manifestFile.isFile || manifestFile.length() <= 0L) continue
-            val parsed = runCatching { parseManifestJson(manifestFile.readText(), dir.name) }.getOrNull() ?: continue
+            val rawJson = runCatching { manifestFile.readText() }.getOrNull() ?: continue
+            val rootObj = runCatching { JSONObject(rawJson) }.getOrNull() ?: continue
+            val parsed = runCatching { parseManifestJson(rawJson, dir.name) }.getOrNull() ?: continue
             val clientJar = File(dir, "${dir.name}.jar")
             val hasJar = clientJar.isFile && clientJar.length() > 0L
             if (hasJar || parsed.inheritsFrom != null) {
-                parsedMap[parsed.versionId] = parsed to manifestFile
+                parsedMap[parsed.versionId] = Triple(parsed, rootObj, manifestFile)
             }
         }
 
-        val entities = parsedMap.values.map { (parsed, manifestFile) ->
-            val effectiveJava = resolveInheritedJavaMajor(parsed, parsedMap)
+        val entities = parsedMap.values.map { (parsed, _, manifestFile) ->
+            val effectiveJava = resolveInheritedJavaMajorForTriples(parsed, parsedMap)
             val ownJar = File(manifestFile.parentFile, "${parsed.versionId}.jar")
             val hasOwnJar = ownJar.isFile && ownJar.length() > 0L
-            val parentHasJar = parsed.inheritsFrom?.let { parentId ->
-                val parentPair = parsedMap[parentId]
-                val parentJar = parentPair?.second?.parentFile?.let { File(it, "$parentId.jar") }
+            val parentId = parsed.inheritsFrom
+            val parentHasJar = parentId?.let { pId ->
+                val parentPair = parsedMap[pId]
+                val parentJar = parentPair?.third?.parentFile?.let { File(it, "$pId.jar") }
                 parentPair != null && parentJar != null && parentJar.isFile && parentJar.length() > 0L
             } ?: false
+
+            val isDiscoveredInstalled = if (parentId == null) {
+                hasOwnJar
+            } else {
+                hasOwnJar || parentHasJar
+            }
+
             val entity = GameVersionEntity(
                 versionId = parsed.versionId,
                 inheritsFrom = parsed.inheritsFrom,
@@ -90,13 +100,27 @@ class VersionManager(
                 requiredJavaMajor = effectiveJava,
                 lwjglMajor = parsed.lwjglMajor,
                 manifestPath = manifestFile.absolutePath,
-                isInstalled = hasOwnJar || parentHasJar,
+                isInstalled = isDiscoveredInstalled,
                 releaseTimeEpochMs = parsed.releaseTimeEpochMs
             )
             gameVersionDao.upsert(entity)
             entity
         }
         return entities
+    }
+
+    private fun resolveInheritedJavaMajorForTriples(
+        manifest: ParsedVersionManifest,
+        map: Map<String, Triple<ParsedVersionManifest, JSONObject, File>>
+    ): Int {
+        if (manifest.hasJavaVersionDeclared) return manifest.requiredJavaMajor
+        val visited = HashSet<String>()
+        var current: ParsedVersionManifest? = manifest
+        while (current != null && visited.add(current.versionId)) {
+            if (current.hasJavaVersionDeclared) return current.requiredJavaMajor
+            current = current.inheritsFrom?.let { map[it]?.first }
+        }
+        return manifest.requiredJavaMajor
     }
 
     /**

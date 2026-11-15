@@ -224,9 +224,11 @@ struct ANativeWindow_real
 // endregion
 
 void setNativeWindowSwapInterval(struct ANativeWindow* nativeWindow, int swapInterval) {
-    if(!getenv("POJAV_VSYNC_IN_ZINK")) {
+    if (nativeWindow == NULL) {
         return;
     }
+    const char* vsyncZink = getenv("POJAV_VSYNC_IN_ZINK");
+    int effectiveInterval = (vsyncZink != NULL && strcmp(vsyncZink, "1") == 0) ? swapInterval : 0;
     struct ANativeWindow_real* nativeWindowReal = (struct ANativeWindow_real*) nativeWindow;
     if(nativeWindowReal->common.magic != ANDROID_NATIVE_WINDOW_MAGIC) {
         LOGW("ANativeWindow magic does not match. Expected %i, got %i",
@@ -239,7 +241,7 @@ void setNativeWindowSwapInterval(struct ANativeWindow* nativeWindow, int swapInt
         return;
     }
     int error;
-    if((error = nativeWindowReal->setSwapInterval(nativeWindow, swapInterval)) != 0) {
+    if((error = nativeWindowReal->setSwapInterval(nativeWindow, effectiveInterval)) != 0) {
         LOGW("Failed to set swap interval: %s", strerror(-error));
     }
 }

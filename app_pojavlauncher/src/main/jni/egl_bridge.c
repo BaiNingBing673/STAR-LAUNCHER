@@ -24,6 +24,8 @@
 #include <string.h>
 #include <environ/environ.h>
 #include <android/dlext.h>
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
 #include "utils.h"
 #include "ctxbridges/bridge_tbl.h"
 #include "ctxbridges/osm_bridge.h"
@@ -83,6 +85,10 @@ EXTERNAL_API void pojavTerminate() {
 }
 
 JNIEXPORT void JNICALL Java_net_kdt_pojavlaunch_utils_JREUtils_setupBridgeWindow(JNIEnv* env, ABI_COMPAT jclass clazz, jobject surface) {
+    if (pojav_environ->pojavWindow != NULL) {
+        ANativeWindow_release(pojav_environ->pojavWindow);
+        pojav_environ->pojavWindow = NULL;
+    }
     pojav_environ->pojavWindow = ANativeWindow_fromSurface(env, surface);
     if(br_setup_window != NULL) br_setup_window();
 }
@@ -90,7 +96,10 @@ JNIEXPORT void JNICALL Java_net_kdt_pojavlaunch_utils_JREUtils_setupBridgeWindow
 
 JNIEXPORT void JNICALL
 Java_net_kdt_pojavlaunch_utils_JREUtils_releaseBridgeWindow(ABI_COMPAT JNIEnv *env, ABI_COMPAT jclass clazz) {
-    ANativeWindow_release(pojav_environ->pojavWindow);
+    if (pojav_environ->pojavWindow != NULL) {
+        ANativeWindow_release(pojav_environ->pojavWindow);
+        pojav_environ->pojavWindow = NULL;
+    }
 }
 
 EXTERNAL_API void* pojavGetCurrentContext() {
@@ -137,14 +146,69 @@ static void set_vulkan_ptr(void* ptr) {
     setenv("VULKAN_PTR", envval, 1);
 }
 
+static bool vulkan_has_physical_devices(void *vulkan_ptr) {
+    if (vulkan_ptr == NULL) {
+        return false;
+    }
+    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr_p =
+            (PFN_vkGetInstanceProcAddr) dlsym(vulkan_ptr, "vkGetInstanceProcAddr");
+    if (vkGetInstanceProcAddr_p == NULL) {
+        return false;
+    }
+    PFN_vkCreateInstance vkCreateInstance_p =
+            (PFN_vkCreateInstance) vkGetInstanceProcAddr_p(VK_NULL_HANDLE, "vkCreateInstance");
+    if (vkCreateInstance_p == NULL) {
+        return false;
+    }
+
+    VkApplicationInfo appInfo = {0};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "STARLauncherProbe";
+    appInfo.apiVersion = VK_API_VERSION_1_0;
+
+    VkInstanceCreateInfo createInfo = {0};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+
+    VkInstance instance = VK_NULL_HANDLE;
+    VkResult res = vkCreateInstance_p(&createInfo, NULL, &instance);
+    if (res != VK_SUCCESS || instance == VK_NULL_HANDLE) {
+        printf("AdrenoSupp: Turnip vkCreateInstance probe failed (%d)\n", res);
+        return false;
+    }
+
+    PFN_vkEnumeratePhysicalDevices vkEnumeratePhysicalDevices_p =
+            (PFN_vkEnumeratePhysicalDevices) vkGetInstanceProcAddr_p(instance, "vkEnumeratePhysicalDevices");
+    PFN_vkDestroyInstance vkDestroyInstance_p =
+            (PFN_vkDestroyInstance) vkGetInstanceProcAddr_p(instance, "vkDestroyInstance");
+
+    uint32_t gpuCount = 0;
+    bool ok = false;
+    if (vkEnumeratePhysicalDevices_p != NULL) {
+        VkResult enumRes = vkEnumeratePhysicalDevices_p(instance, &gpuCount, NULL);
+        ok = (enumRes == VK_SUCCESS && gpuCount > 0);
+        if (!ok) {
+            printf("AdrenoSupp: Turnip physical device probe failed (res=%d, count=%u)\n", enumRes, gpuCount);
+        }
+    }
+    if (vkDestroyInstance_p != NULL) {
+        vkDestroyInstance_p(instance, NULL);
+    }
+    return ok;
+}
+
 void load_vulkan() {
     if(android_get_device_api_level() >= 28) { // the loader does not support below that
 #ifdef ADRENO_POSSIBLE
         void* result = load_turnip_vulkan();
         if(result != NULL) {
-            printf("AdrenoSupp: Loaded Turnip, loader address: %p\n", result);
-            set_vulkan_ptr(result);
-            return;
+            if (vulkan_has_physical_devices(result)) {
+                printf("AdrenoSupp: Loaded Turnip, loader address: %p\n", result);
+                set_vulkan_ptr(result);
+                return;
+            }
+            printf("AdrenoSupp: Turnip unusable on this GPU, falling back to system Vulkan\n");
+            dlclose(result);
         }
 #endif
     }
@@ -157,12 +221,11 @@ void load_vulkan() {
 int pojavInitOpenGL() {
     // Only affects GL4ES as of now
     const char *forceVsync = getenv("FORCE_VSYNC");
-    if (strcmp(forceVsync, "true") == 0)
-        pojav_environ->force_vsync = true;
+    pojav_environ->force_vsync = (forceVsync != NULL && strcmp(forceVsync, "true") == 0);
 
     // NOTE: Override for now.
     const char *renderer = getenv("AMETHYST_RENDERER");
-    if (strncmp("opengles", renderer, 8) == 0) {
+    if (renderer != NULL && strncmp("opengles", renderer, 8) == 0) {
         pojav_environ->config_renderer = RENDERER_GL4ES;
         if (!strcmp(renderer, "opengles3_desktopgl_zink_kopper")) {
             load_vulkan();
@@ -171,7 +234,7 @@ int pojavInitOpenGL() {
             setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", true);
         }
         set_gl_bridge_tbl();
-    } else if (strcmp(renderer, "vulkan_zink") == 0) {
+    } else if (renderer != NULL && strcmp(renderer, "vulkan_zink") == 0) {
         pojav_environ->config_renderer = RENDERER_VK_ZINK;
         load_vulkan();
         setenv("GALLIUM_DRIVER","zink",1);
@@ -210,9 +273,9 @@ EXTERNAL_API void pojavSetWindowHint(int hint, int value) {
             break;
         case GLFW_OPENGL_API: {
             const char *renderer = getenv("AMETHYST_RENDERER");
-            if (strncmp(renderer, "opengles", 8) == 0) {
+            if (renderer != NULL && strncmp(renderer, "opengles", 8) == 0) {
                 pojav_environ->config_renderer = RENDERER_GL4ES;
-            } else if (strcmp(renderer, "vulkan_zink") == 0) {
+            } else if (renderer != NULL && strcmp(renderer, "vulkan_zink") == 0) {
                 pojav_environ->config_renderer = RENDERER_VK_ZINK;
             }
             /* Nothing to do: initialization is called in pojavCreateContext */

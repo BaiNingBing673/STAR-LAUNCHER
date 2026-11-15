@@ -11,11 +11,14 @@ import android.content.Context;
 import android.content.res.AssetManager;
 import android.util.Log;
 
+import androidx.annotation.Nullable;
+
 import com.kdt.mcgui.ProgressLayout;
 
 import net.kdt.pojavlaunch.multirt.MultiRTConfigDialog;
 import net.kdt.pojavlaunch.multirt.MultiRTUtils;
 import net.kdt.pojavlaunch.multirt.Runtime;
+import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 import net.kdt.pojavlaunch.progresskeeper.DownloaderProgressWrapper;
 import net.kdt.pojavlaunch.utils.DownloadUtils;
 import net.kdt.pojavlaunch.utils.MathUtils;
@@ -34,9 +37,9 @@ public class NewJREUtil {
     private static boolean checkInternalRuntime(AssetManager assetManager, InternalRuntime internalRuntime) {
         String launcher_runtime_version;
         String installed_runtime_version = MultiRTUtils.readInternalRuntimeVersion(internalRuntime.name);
-        try {
-            launcher_runtime_version = Tools.read(assetManager.open(internalRuntime.path+"/version"));
-        }catch (IOException exc) {
+        try (java.io.InputStream verStream = assetManager.open(internalRuntime.path + "/version")) {
+            launcher_runtime_version = Tools.read(verStream);
+        } catch (IOException exc) {
             //we don't have a runtime included!
             //if we have one installed -> return true -> proceed (no updates but the current one should be functional)
             //if we don't -> return false -> Cannot find compatible Java runtime
@@ -49,14 +52,15 @@ public class NewJREUtil {
     }
 
     private static boolean unpackInternalRuntime(AssetManager assetManager, InternalRuntime internalRuntime, String version) {
-        try {
+        try (java.io.InputStream universalStream = assetManager.open(internalRuntime.path + "/universal.tar.xz");
+             java.io.InputStream binStream = assetManager.open(internalRuntime.path + "/bin-" + archAsString(Tools.DEVICE_ARCHITECTURE) + ".tar.xz")) {
             MultiRTUtils.installRuntimeNamedBinpack(
-                    assetManager.open(internalRuntime.path+"/universal.tar.xz"),
-                    assetManager.open(internalRuntime.path+"/bin-" + archAsString(Tools.DEVICE_ARCHITECTURE) + ".tar.xz"),
+                    universalStream,
+                    binStream,
                     internalRuntime.name, version);
             MultiRTUtils.postPrepare(internalRuntime.name);
             return true;
-        }catch (IOException e) {
+        } catch (IOException e) {
             Log.e("NewJREAuto", "Internal JRE unpack failed", e);
             return false;
         }
@@ -108,10 +112,20 @@ public class NewJREUtil {
 
     /** @return true if everything is good, false otherwise.  */
     public static boolean installNewJreIfNeeded(Activity activity, JMinecraftVersionList.Version versionInfo) {
+        return installNewJreIfNeeded(activity, versionInfo, null, true);
+    }
+
+    /** @return true if everything is good, false otherwise. */
+    public static boolean installNewJreIfNeeded(
+            Activity activity,
+            JMinecraftVersionList.Version versionInfo,
+            @Nullable String explicitProfileRuntime,
+            boolean useLegacyLauncherProfiles
+    ) {
         int gameRequiredVersion = (versionInfo != null && versionInfo.javaVersion != null && versionInfo.javaVersion.majorVersion > 0)
                 ? versionInfo.javaVersion.majorVersion
                 : 8;
-        return ensureRuntimeReady(activity, gameRequiredVersion, true);
+        return ensureRuntimeReady(activity, gameRequiredVersion, true, explicitProfileRuntime, useLegacyLauncherProfiles);
     }
 
     /**
@@ -119,12 +133,38 @@ public class NewJREUtil {
      * is available before starting Minecraft. Works for both online and local/offline launches.
      */
     public static boolean ensureRuntimeReady(Activity activity, int gameRequiredVersion, boolean allowDownload) {
+        return ensureRuntimeReady(activity, gameRequiredVersion, allowDownload, null, true);
+    }
+
+    /**
+     * Ensures a valid, architecture-compatible Java runtime matching {@code gameRequiredVersion}
+     * is available before starting Minecraft.
+     *
+     * When {@code useLegacyLauncherProfiles} is false (e.g. STAR Launcher instance launch), this does not
+     * read or mutate {@code launcher_profiles.json} or fail when legacy profile keys are absent.
+     */
+    public static boolean ensureRuntimeReady(
+            Activity activity,
+            int gameRequiredVersion,
+            boolean allowDownload,
+            @Nullable String explicitProfileRuntime,
+            boolean useLegacyLauncherProfiles
+    ) {
         int requiredJava = gameRequiredVersion > 0 ? gameRequiredVersion : 8;
 
-        LauncherProfiles.load();
         AssetManager assetManager = activity.getAssets();
-        MinecraftProfile minecraftProfile = LauncherProfiles.getCurrentProfile();
-        String profileRuntime = Tools.getSelectedRuntime(minecraftProfile);
+        MinecraftProfile minecraftProfile = null;
+        String profileRuntime;
+        if (useLegacyLauncherProfiles) {
+            LauncherProfiles.load();
+            minecraftProfile = LauncherProfiles.getCurrentProfile();
+            profileRuntime = Tools.getSelectedRuntime(minecraftProfile);
+        } else if (explicitProfileRuntime != null && !explicitProfileRuntime.trim().isEmpty()
+                && MultiRTUtils.hasValidRuntimeStructure(explicitProfileRuntime.trim())) {
+            profileRuntime = explicitProfileRuntime.trim();
+        } else {
+            profileRuntime = LauncherPreferences.PREF_DEFAULT_RUNTIME;
+        }
         MultiRTUtils.RuntimeValidationReport selectedReport =
                 MultiRTUtils.inspectRuntime(profileRuntime, requiredJava, true);
 

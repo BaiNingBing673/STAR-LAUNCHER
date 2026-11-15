@@ -7,11 +7,14 @@ import com.star.launcher.data.db.model.DownloadStatus
 import com.star.launcher.data.db.model.DownloadTaskType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.security.MessageDigest
 import java.util.UUID
@@ -24,40 +27,115 @@ interface HttpTransport {
     )
 }
 
-class UrlConnectionHttpTransport : HttpTransport {
+class UrlConnectionHttpTransport(
+    private val connectTimeoutMs: Int = 15_000,
+    private val readTimeoutMs: Int = 30_000,
+    private val maxTransientRetries: Int = 2
+) : HttpTransport {
     override suspend fun downloadToFile(
         url: String,
         destinationFile: File,
         onProgress: suspend (downloadedBytes: Long, totalBytes: Long) -> Unit
     ) = withContext(Dispatchers.IO) {
         destinationFile.parentFile?.mkdirs()
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15_000
-            readTimeout = 30_000
-            requestMethod = "GET"
-            setRequestProperty("User-Agent", "STARLauncher/1.0")
-        }
-        try {
-            val code = conn.responseCode
-            check(code in 200..299) { "HTTP $code downloading $url" }
-            val total = conn.contentLengthLong.coerceAtLeast(0L)
-            var downloaded = 0L
-            conn.inputStream.use { input ->
-                FileOutputStream(destinationFile).use { output ->
-                    val buffer = ByteArray(16 * 1024)
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read == -1) break
-                        output.write(buffer, 0, read)
-                        downloaded += read
-                        onProgress(downloaded, total)
-                    }
+        var attempt = 0
+        var backoffMs = 400L
+        while (true) {
+            try {
+                downloadWithResume(url, destinationFile, onProgress)
+                return@withContext
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: IOException) {
+                if (attempt >= maxTransientRetries || e is NonRetryableHttpException) {
+                    throw e
                 }
+                attempt++
+                delay(backoffMs)
+                backoffMs = (backoffMs * 2L).coerceAtMost(2_500L)
             }
-        } finally {
-            conn.disconnect()
         }
     }
+
+    private suspend fun downloadWithResume(
+        initialUrl: String,
+        destinationFile: File,
+        onProgress: suspend (downloadedBytes: Long, totalBytes: Long) -> Unit
+    ) {
+        var existingBytes = if (destinationFile.isFile) destinationFile.length().coerceAtLeast(0L) else 0L
+        var currentUrl = initialUrl
+        var redirects = 0
+        while (true) {
+            val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = connectTimeoutMs
+                readTimeout = readTimeoutMs
+                requestMethod = "GET"
+                instanceFollowRedirects = false
+                setRequestProperty("User-Agent", "STARLauncher/1.0")
+                if (existingBytes > 0L) {
+                    setRequestProperty("Range", "bytes=$existingBytes-")
+                }
+            }
+            try {
+                val code = conn.responseCode
+                if (code in 300..399 && redirects < 5) {
+                    val location = conn.getHeaderField("Location")?.trim()
+                    if (!location.isNullOrEmpty()) {
+                        currentUrl = URL(URL(currentUrl), location).toString()
+                        redirects++
+                        continue
+                    }
+                }
+                if (code == 416 && existingBytes > 0L) {
+                    // Range not satisfiable (stale or already-complete partial file); restart cleanly.
+                    destinationFile.delete()
+                    existingBytes = 0L
+                    continue
+                }
+                if (code !in 200..299) {
+                    val retryable = code in setOf(408, 429, 502, 503, 504)
+                    val msg = "HTTP $code downloading $currentUrl"
+                    throw if (retryable) IOException(msg) else NonRetryableHttpException(msg)
+                }
+
+                val isResumeAccepted = code == HttpURLConnection.HTTP_PARTIAL && existingBytes > 0L
+                val appendOffset = if (isResumeAccepted) existingBytes else 0L
+                val remainingLength = conn.contentLengthLong.coerceAtLeast(0L)
+                val total = if (remainingLength > 0L) appendOffset + remainingLength else 0L
+
+                var downloaded = appendOffset
+                var lastReportedBytes = downloaded
+                var lastReportMs = 0L
+
+                conn.inputStream.use { input ->
+                    FileOutputStream(destinationFile, isResumeAccepted).use { output ->
+                        val buffer = ByteArray(32 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read == -1) break
+                            output.write(buffer, 0, read)
+                            downloaded += read
+                            val now = System.currentTimeMillis()
+                            if (downloaded - lastReportedBytes >= 64 * 1024L || now - lastReportMs >= 50L) {
+                                lastReportedBytes = downloaded
+                                lastReportMs = now
+                                onProgress(downloaded, total)
+                            }
+                        }
+                        output.flush()
+                    }
+                }
+                onProgress(downloaded, if (total > 0L) total else downloaded)
+                return
+            } catch (e: SocketTimeoutException) {
+                throw IOException("Timed out downloading $currentUrl", e)
+            } finally {
+                conn.disconnect()
+            }
+        }
+    }
+
+    private class NonRetryableHttpException(message: String) : IOException(message)
 }
 
 /**

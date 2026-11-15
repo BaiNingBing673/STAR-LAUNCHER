@@ -101,10 +101,8 @@ public class ProfileEditorFragment extends Fragment implements CropperUtils.Crop
         });
 
         mDeleteButton.setOnClickListener(v -> {
-            if(LauncherProfiles.mainProfileJson.profiles.size() > 1){
+            if (LauncherProfiles.removeProfile(mProfileKey)) {
                 ProfileIconCache.dropIcon(mProfileKey);
-                LauncherProfiles.mainProfileJson.profiles.remove(mProfileKey);
-                LauncherProfiles.write();
                 ExtraCore.setValue(ExtraConstants.REFRESH_VERSION_SPINNER, DELETED_PROFILE);
             }
 
@@ -130,7 +128,8 @@ public class ProfileEditorFragment extends Fragment implements CropperUtils.Crop
         // Set up the icon change click listener
         mProfileIcon.setOnClickListener(v -> CropperUtils.startCropper(mCropperLauncher));
 
-        loadValues(LauncherPreferences.DEFAULT_PREF.getString(LauncherPreferences.PREF_KEY_CURRENT_PROFILE, ""), view.getContext());
+        String currentProfileKey = LauncherProfiles.getCurrentProfileKey();
+        loadValues(currentProfileKey != null ? currentProfileKey : "", view.getContext());
     }
 
     private View.OnClickListener getGameDirListener() {

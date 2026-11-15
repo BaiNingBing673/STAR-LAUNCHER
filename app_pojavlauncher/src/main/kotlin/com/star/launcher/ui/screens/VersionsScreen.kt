@@ -539,7 +539,11 @@ private fun VersionListColumn(
         contentPadding = PaddingValues(bottom = AetherSpacing.Xl),
         verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)
     ) {
-        items(items, key = { it.versionId }) { item ->
+        items(
+            items = items,
+            key = { it.versionId },
+            contentType = { "version_row" }
+        ) { item ->
             VersionListRow(
                 item = item,
                 isSelected = item.versionId == selectedVersionId,

@@ -58,6 +58,7 @@ public class LauncherPreferences {
     public static boolean PREF_GYRO_INVERT_Y = false;
 
     public static boolean PREF_FORCE_VSYNC = false;
+    public static int PREF_FPS_LIMIT = 0; // 0 = Unlimited, otherwise explicit FPS cap (10..260)
 
     public static boolean PREF_BUTTON_ALL_CAPS = true;
     public static boolean PREF_DUMP_SHADERS = false;
@@ -68,12 +69,13 @@ public class LauncherPreferences {
     public static boolean PREF_VERIFY_MANIFEST = true;
     public static String PREF_DOWNLOAD_SOURCE = "default";
     public static boolean PREF_SKIP_NOTIFICATION_PERMISSION_CHECK = false;
-    public static boolean PREF_VSYNC_IN_ZINK = true;
+    public static boolean PREF_VSYNC_IN_ZINK = false;
     public static boolean PREF_FORCE_ENABLE_TOUCHCONTROLLER = false;
     public static int PREF_TOUCHCONTROLLER_VIBRATE_LENGTH = 100;
 
     public static boolean PREF_MOUSE_GRAB_FORCE = false;
     public static boolean PREF_KEYBOARD_PANNING = true;
+    public static volatile float PREF_CAMERA_SENSITIVITY = 1f;
 
 
     public static void loadPreferences(Context ctx) {
@@ -104,7 +106,8 @@ public class LauncherPreferences {
         PREF_GYRO_SMOOTHING = DEFAULT_PREF.getBoolean("gyroSmoothing", true);
         PREF_GYRO_INVERT_X = DEFAULT_PREF.getBoolean("gyroInvertX", false);
         PREF_GYRO_INVERT_Y = DEFAULT_PREF.getBoolean("gyroInvertY", false);
-        PREF_FORCE_VSYNC = DEFAULT_PREF.getBoolean("force_vsync", isDevicePowerful);
+        PREF_FORCE_VSYNC = DEFAULT_PREF.getBoolean("force_vsync", false);
+        PREF_FPS_LIMIT = normalizeFpsLimit(DEFAULT_PREF.getInt("fpsLimit", 0));
         PREF_BUTTON_ALL_CAPS = DEFAULT_PREF.getBoolean("buttonAllCaps", true);
         PREF_DUMP_SHADERS = DEFAULT_PREF.getBoolean("dump_shaders", false);
         PREF_DEADZONE_SCALE = ((float) DEFAULT_PREF.getInt("gamepad_deadzone_scale", 100))/100f;
@@ -113,11 +116,19 @@ public class LauncherPreferences {
         PREF_DOWNLOAD_SOURCE = DEFAULT_PREF.getString("downloadSource", "default");
         PREF_VERIFY_MANIFEST = DEFAULT_PREF.getBoolean("verifyManifest", true);
         PREF_SKIP_NOTIFICATION_PERMISSION_CHECK = DEFAULT_PREF.getBoolean(PREF_KEY_SKIP_NOTIFICATION_CHECK, false);
-        PREF_VSYNC_IN_ZINK = DEFAULT_PREF.getBoolean("vsync_in_zink", true);
+        PREF_VSYNC_IN_ZINK = DEFAULT_PREF.getBoolean("vsync_in_zink", false);
         PREF_FORCE_ENABLE_TOUCHCONTROLLER = DEFAULT_PREF.getBoolean("forceEnableTouchController", false);
         PREF_TOUCHCONTROLLER_VIBRATE_LENGTH = DEFAULT_PREF.getInt("touchControllerVibrateLength", 100);
         PREF_MOUSE_GRAB_FORCE = DEFAULT_PREF.getBoolean("always_grab_mouse", false);
         PREF_KEYBOARD_PANNING = DEFAULT_PREF.getBoolean("keyboardPanning", true);
+        if (ctx != null) {
+            try {
+                com.star.launcher.hud.StarHudConfig hudConfig = com.star.launcher.hud.StarHudConfigStore.load(ctx);
+                PREF_CAMERA_SENSITIVITY = hudConfig.getCameraSensitivity();
+            } catch (Throwable ignored) {
+                PREF_CAMERA_SENSITIVITY = 1f;
+            }
+        }
 
         // User may have deleted their default control
         String userDefCtrl = DEFAULT_PREF.getString("defaultCtrl", Tools.CTRLDEF_FILE);
@@ -242,7 +253,7 @@ public class LauncherPreferences {
         };
          */
         MGConfigJson.put("enableANGLE", Tools.useANGLE ? 3 : 2);
-        MGConfigJson.put("enableNoError", Integer.parseInt(DEFAULT_PREF.getString("mg_renderer_setting_errorSetting", "0")));
+        MGConfigJson.put("enableNoError", parseIntSafe(DEFAULT_PREF.getString("mg_renderer_setting_errorSetting", "0"), 0));
 
         // These guys are SwitchPreferences so they get special treatment, they need to be converted to ints
         int computeShaderext = DEFAULT_PREF.getBoolean("mg_renderer_computeShaderext", false) ? 1 : 0;
@@ -253,7 +264,7 @@ public class LauncherPreferences {
         MGConfigJson.put("angleDepthClearFixMode", angleDepthClearFixMode);
         MGConfigJson.put("enableExtTimerQuery", timerQueryExt);
         MGConfigJson.put("enableExtDirectStateAccess", dsaExt);
-        MGConfigJson.put("maxGlslCacheSize", Integer.parseInt(DEFAULT_PREF.getString("mg_renderer_setting_glsl_cache_size", "128")));
+        MGConfigJson.put("maxGlslCacheSize", parseIntSafe(DEFAULT_PREF.getString("mg_renderer_setting_glsl_cache_size", "128"), 128));
         File configFile = new File(Tools.DIR_DATA + "/MobileGlues", "config.json");
         FileUtils.ensureParentDirectory(configFile);
         try {
@@ -262,6 +273,20 @@ public class LauncherPreferences {
             Logger.appendToLog("MG Config is " + Tools.GLOBAL_GSON.toJson(MGConfigJson));
         } catch (IOException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    public static int normalizeFpsLimit(int rawFps) {
+        if (rawFps <= 0) return 0;
+        return Math.max(10, Math.min(260, rawFps));
+    }
+
+    private static int parseIntSafe(String raw, int fallback) {
+        if (raw == null) return fallback;
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
         }
     }
 }

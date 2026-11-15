@@ -177,9 +177,10 @@ public class LauncherActivity extends BaseActivity {
             return false;
         }
 
-        String selectedProfile = LauncherPreferences.DEFAULT_PREF.getString(LauncherPreferences.PREF_KEY_CURRENT_PROFILE,"");
-        if (LauncherProfiles.mainProfileJson == null || !LauncherProfiles.mainProfileJson.profiles.containsKey(selectedProfile)){
-            Toast.makeText(this, R.string.error_no_version, Toast.LENGTH_LONG).show();
+        String selectedProfile = LauncherProfiles.getCurrentProfileKey();
+        if (selectedProfile == null || LauncherProfiles.mainProfileJson == null
+                || !LauncherProfiles.mainProfileJson.profiles.containsKey(selectedProfile)) {
+            Toast.makeText(this, "Please create or select a profile before launching.", Toast.LENGTH_LONG).show();
             return false;
         }
         MinecraftProfile prof = LauncherProfiles.mainProfileJson.profiles.get(selectedProfile);

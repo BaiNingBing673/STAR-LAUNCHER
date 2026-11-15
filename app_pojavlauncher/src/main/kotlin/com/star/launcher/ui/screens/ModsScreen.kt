@@ -299,7 +299,11 @@ fun ModsScreen(
                     LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)
                     ) {
-                        items(state.featuredMods, key = { "feat_${it.id}" }) { mod ->
+                        items(
+                            items = state.featuredMods,
+                            key = { "feat_${it.id}" },
+                            contentType = { "featured_mod_card" }
+                        ) { mod ->
                             FeaturedModCard(
                                 mod = mod,
                                 assessment = state.modAssessments[mod.id],
@@ -344,7 +348,11 @@ fun ModsScreen(
                     )
                 }
             } else if (err == null) {
-                items(state.searchResults, key = { "mod_${it.id}" }) { mod ->
+                items(
+                    items = state.searchResults,
+                    key = { "mod_${it.id}" },
+                    contentType = { "discover_mod_card" }
+                ) { mod ->
                     DiscoverModCard(
                         mod = mod,
                         assessment = state.modAssessments[mod.id],
@@ -1652,7 +1660,7 @@ private fun CurseForgeCredentialDialog(
     onClearCredentials: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var useProxyMode by remember {
+    var useProxyMode by remember(status) {
         mutableStateOf(status == CurseForgeCredentialStatus.BACKEND_PROXY_CONFIGURED)
     }
     var proxyUrl by remember { mutableStateOf("https://") }

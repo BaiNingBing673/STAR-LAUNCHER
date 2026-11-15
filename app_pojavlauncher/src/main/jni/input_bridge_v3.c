@@ -14,6 +14,7 @@
 #include <dlfcn.h>
 #include <jni.h>
 #include <libgen.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
@@ -196,7 +197,7 @@ void pojavStopPumping() {
     pojav_environ->outEventIndex = pojav_environ->outTargetIndex;
 
     // New events may have arrived while pumping, so remove only the difference before the start and end of execution
-    atomic_fetch_sub_explicit(&pojav_environ->eventCounter, pojav_environ->inEventCount, memory_order_acquire);
+    atomic_fetch_sub_explicit(&pojav_environ->eventCounter, pojav_environ->inEventCount, memory_order_release);
     // Make sure the next frame won't send mouse or monitor updates if it's unnecessary
     pojav_environ->shouldUpdateMouse = false;
     // Only reset the update flag if the monitor size was consumed by pojavStartPumping. This
@@ -242,7 +243,14 @@ Java_org_lwjgl_glfw_GLFW_glfwSetCursorPos(__attribute__((unused)) JNIEnv *env, _
 
 
 
+static pthread_mutex_t s_input_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void sendData(int type, int i1, int i2, int i3, int i4) {
+    pthread_mutex_lock(&s_input_queue_mutex);
+    if (atomic_load_explicit(&pojav_environ->eventCounter, memory_order_relaxed) >= EVENT_WINDOW_SIZE - 1) {
+        pthread_mutex_unlock(&s_input_queue_mutex);
+        return;
+    }
     GLFWInputEvent *event = &pojav_environ->events[pojav_environ->inEventIndex];
     event->type = type;
     event->i1 = i1;
@@ -253,7 +261,8 @@ void sendData(int type, int i1, int i2, int i3, int i4) {
     if (++pojav_environ->inEventIndex >= EVENT_WINDOW_SIZE)
         pojav_environ->inEventIndex -= EVENT_WINDOW_SIZE;
 
-    atomic_fetch_add_explicit(&pojav_environ->eventCounter, 1, memory_order_acquire);
+    atomic_fetch_add_explicit(&pojav_environ->eventCounter, 1, memory_order_release);
+    pthread_mutex_unlock(&s_input_queue_mutex);
 }
 
 void critical_set_stackqueue(jboolean use_input_stack_queue) {
@@ -320,14 +329,14 @@ Java_org_lwjgl_glfw_CallbackBridge_nativeEnableGamepadDirectInput(__attribute__(
 }
 
 JNIEXPORT jfloat JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeGetAndroidDPI(JNIEnv* env, __attribute__((unused)) jclass clazz) {
-    TRY_ATTACH_ENV(dvm_env, pojav_environ->dalvikJavaVMPtr, "getAndroidDPI failed!\n",);
+    TRY_ATTACH_ENV(dvm_env, pojav_environ->dalvikJavaVMPtr, "getAndroidDPI failed!\n", return 0.0f;);
     jfloat result = (*dvm_env)->CallStaticFloatMethod(dvm_env, pojav_environ->bridgeClazz,
                                                       pojav_environ->method_getAndroidDPI);
     return result;
 }
 
 JNIEXPORT jboolean JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeNotifyLauncher(JNIEnv* env, __attribute__((unused)) jclass clazz, jint type, jintArray action) {
-    TRY_ATTACH_ENV(dvm_env, pojav_environ->dalvikJavaVMPtr, "nativeNotifyLauncher failed!\n",);
+    TRY_ATTACH_ENV(dvm_env, pojav_environ->dalvikJavaVMPtr, "nativeNotifyLauncher failed!\n", return JNI_FALSE;);
     jboolean result = (*dvm_env)->CallStaticBooleanMethod(dvm_env, pojav_environ->bridgeClazz,
                                                       pojav_environ->method_notifyLauncher, type, convertIntArrayJVM(env, dvm_env, action));
     return result;
@@ -588,7 +597,15 @@ Java_org_lwjgl_glfw_CallbackBridge_nativeCreateGamepadAxisBuffer(JNIEnv *env, jc
 static inline void initSubsystem(void) {
     typedef int (*SDL_Init_Func)(uint32_t flags);
     void* handle = dlopen("libSDL3.so", RTLD_NOW);
+    if (handle == NULL) {
+        LOGW("initSubsystem: failed to open libSDL3.so: %s", dlerror());
+        return;
+    }
     SDL_Init_Func SDL_Init = (SDL_Init_Func)dlsym(handle, "SDL_Init");
+    if (SDL_Init == NULL) {
+        LOGW("initSubsystem: SDL_Init symbol missing: %s", dlerror());
+        return;
+    }
     SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK | SDL_INIT_EVENTS);
 }
 JNIEXPORT void JNICALL

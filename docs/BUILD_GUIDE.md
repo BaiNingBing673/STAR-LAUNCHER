@@ -51,7 +51,7 @@
   - Portable Eclipse Temurin **JDK 8** (`1.8.0_512-b09`) at `D:\tools\jdks\temurin-8` and **JDK 21** (`21.0.13+9-LTS`) at `D:\tools\jdks\temurin-21`.
   - **CMake `3.22.1`** installed via `sdkmanager "cmake;3.22.1"` at `D:\tools\android-sdk\cmake\3.22.1`.
   - Gitignored `local.properties`: `sdk.dir=D\:\\tools\\android-sdk`.
-  - User `C:\Users\jackp\.gradle\gradle.properties`: `org.gradle.java.installations.auto-detect=true` and `org.gradle.java.installations.paths=D\:/tools/jdks/temurin-8,D\:/tools/jdks/temurin-21`.
+  - User `%USERPROFILE%\.gradle\gradle.properties`: `org.gradle.java.installations.auto-detect=true` and `org.gradle.java.installations.paths=D\:/tools/jdks/temurin-8,D\:/tools/jdks/temurin-21`.
   - NTFS directory junction `D:\AetherLauncher` -> `D:\Aether Launcher` to eliminate `ndk-build` Windows path-with-spaces failures (`android/ndk#1400`).
 - **Command**: From `D:\AetherLauncher` (and `D:\what\AetherLauncher` for STAR Launcher builds), `.\gradlew.bat :app_pojavlauncher:assembleDebug --console=plain` (`JAVA_HOME=D:\tools\jdks\temurin-21`, `ANDROID_HOME=D:\tools\android-sdk`).
 - **Baseline Outcome**: **BUILD SUCCESSFUL in 4m 6s** (`246.62s`, `90 actionable tasks: 89 executed, 1 from cache`).
@@ -60,4 +60,4 @@
 - **Output APK**: `app_pojavlauncher\build\outputs\apk\debug\app_pojavlauncher-debug.apk`
 - **APK Size**: `142,782,102` bytes (`136.17 MB`)
 - **SHA-256**: `E95A8DC7B8B34213FE5154C49727F0D22A77E32110BCA81B1929E4035821A6E0`
-- **Archived Baseline Copy**: `C:\Users\jackp\.gemini\antigravity\brain\c0fd0333-52b6-4f9a-8870-8de53bdf4ce8\scratch\baseline\amethyst-baseline-166af615-debug.apk`
+- **Archived Baseline Copy**: `amethyst-baseline-166af615-debug.apk`

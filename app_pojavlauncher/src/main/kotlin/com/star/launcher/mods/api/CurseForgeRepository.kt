@@ -14,45 +14,95 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class CurseForgeRepository(
     private val credentialProvider: CurseForgeCredentialProvider,
-    private val transport: CurseForgeTransport = UrlConnectionCurseForgeTransport()
+    private val transport: CurseForgeTransport = UrlConnectionCurseForgeTransport(),
+    val enablePublicFallback: Boolean = false
 ) {
     private val cachedCategories = mutableListOf<CurseForgeCategory>()
     private val cachedMcVersions = mutableListOf<CurseForgeMinecraftVersion>()
     private val cachedLoaders = ConcurrentHashMap<String, List<CurseForgeModLoaderIndex>>()
+    private val searchCache = ConcurrentHashMap<CurseForgeSearchQuery, TimedEntry<CurseForgeSearchResponse>>()
+    private val modCache = ConcurrentHashMap<Long, TimedEntry<CurseForgeMod>>()
+    private val descriptionCache = ConcurrentHashMap<Long, TimedEntry<String>>()
+    private val filesCache = ConcurrentHashMap<String, TimedEntry<CurseForgeFilesResponse>>()
+    internal val fallbackCatalog = ModrinthFallbackCatalog(transport)
+    @Volatile
+    private var rejectedKeyInSession: String? = null
+
+    private val cacheTtlMs = 5 * 60 * 1000L
+
+    private data class TimedEntry<T>(val value: T, val timestampMs: Long = System.currentTimeMillis()) {
+        fun isFresh(ttlMs: Long): Boolean =
+            (System.currentTimeMillis() - timestampMs) <= ttlMs
+    }
+
+    private fun <K, V> putBounded(map: ConcurrentHashMap<K, TimedEntry<V>>, key: K, value: V, maxEntries: Int = 64) {
+        if (map.size >= maxEntries) {
+            val now = System.currentTimeMillis()
+            val expired = map.entries.filter { (now - it.value.timestampMs) > cacheTtlMs }.map { it.key }
+            expired.forEach { map.remove(it) }
+            if (map.size >= maxEntries) {
+                map.keys.firstOrNull()?.let { map.remove(it) }
+            }
+        }
+        map[key] = TimedEntry(value)
+    }
 
     suspend fun getCredentialStatus(): CurseForgeCredentialStatus =
         credentialProvider.getCredentialStatus()
 
-    suspend fun searchMods(query: CurseForgeSearchQuery): Result<CurseForgeSearchResponse> = runApiCall {
-        val params = LinkedHashMap<String, String>()
-        params["gameId"] = CurseForgeCredentialProvider.MINECRAFT_GAME_ID.toString()
-        params["classId"] = CurseForgeCredentialProvider.MODS_CLASS_ID.toString()
-        params["sortField"] = query.sortField.apiId.toString()
-        params["sortOrder"] = if (query.sortOrderDesc) "desc" else "asc"
-        params["index"] = query.index.coerceAtLeast(0).toString()
-        params["pageSize"] = query.pageSize.coerceIn(1, 50).toString()
-        if (query.searchFilter.isNotBlank()) {
-            params["searchFilter"] = query.searchFilter.trim()
+    private fun shouldFallbackToPublicCatalog(err: Throwable?): Boolean {
+        if (!enablePublicFallback || err == null) return false
+        return when (err) {
+            is CurseForgeApiException.NotConfigured -> true
+            is CurseForgeApiException.Unauthorized -> true
+            is CurseForgeApiException.Forbidden -> !err.isDistributionRestriction
+            else -> false
         }
-        if (!query.gameVersion.isNullOrBlank()) {
-            params["gameVersion"] = query.gameVersion.trim()
-        }
-        if (query.modLoader != CurseForgeModLoader.ANY) {
-            params["modLoaderType"] = query.modLoader.apiId.toString()
-        }
-        if (query.categoryId != null && query.categoryId > 0) {
-            params["categoryId"] = query.categoryId.toString()
-        }
+    }
 
-        val json = executeJsonGet("/v1/mods/search", params)
-        val data = json.optJSONArray("data") ?: JSONArray()
-        val mods = buildList {
-            for (i in 0 until data.length()) {
-                data.optJSONObject(i)?.let { add(parseMod(it)) }
+    suspend fun searchMods(query: CurseForgeSearchQuery): Result<CurseForgeSearchResponse> {
+        searchCache[query]?.takeIf { it.isFresh(cacheTtlMs) }?.let { return Result.success(it.value) }
+        val primary = runApiCall {
+            val params = LinkedHashMap<String, String>()
+            params["gameId"] = CurseForgeCredentialProvider.MINECRAFT_GAME_ID.toString()
+            params["classId"] = CurseForgeCredentialProvider.MODS_CLASS_ID.toString()
+            params["sortField"] = query.sortField.apiId.toString()
+            params["sortOrder"] = if (query.sortOrderDesc) "desc" else "asc"
+            params["index"] = query.index.coerceAtLeast(0).toString()
+            params["pageSize"] = query.pageSize.coerceIn(1, 50).toString()
+            if (query.searchFilter.isNotBlank()) {
+                params["searchFilter"] = query.searchFilter.trim()
             }
+            if (!query.gameVersion.isNullOrBlank()) {
+                params["gameVersion"] = query.gameVersion.trim()
+            }
+            if (query.modLoader != CurseForgeModLoader.ANY) {
+                params["modLoaderType"] = query.modLoader.apiId.toString()
+            }
+            if (query.categoryId != null && query.categoryId > 0) {
+                params["categoryId"] = query.categoryId.toString()
+            }
+
+            val json = executeJsonGet("/v1/mods/search", params)
+            val data = json.optJSONArray("data") ?: JSONArray()
+            val mods = buildList {
+                for (i in 0 until data.length()) {
+                    data.optJSONObject(i)?.let { add(parseMod(it)) }
+                }
+            }
+            val pagination = parsePagination(json.optJSONObject("pagination"), query.index, query.pageSize, mods.size)
+            CurseForgeSearchResponse(mods = mods, pagination = pagination)
         }
-        val pagination = parsePagination(json.optJSONObject("pagination"), query.index, query.pageSize, mods.size)
-        CurseForgeSearchResponse(mods = mods, pagination = pagination)
+        val resolved = if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            runApiCall { fallbackCatalog.searchMods(query) }
+        } else {
+            primary
+        }
+        resolved.getOrNull()?.let { resp ->
+            putBounded(searchCache, query, resp)
+            resp.mods.forEach { mod -> putBounded(modCache, mod.id, mod, maxEntries = 128) }
+        }
+        return resolved
     }
 
     suspend fun getFeaturedMods(
@@ -70,17 +120,47 @@ class CurseForgeRepository(
         )
     )
 
-    suspend fun getMod(modId: Long): Result<CurseForgeMod> = runApiCall {
-        val json = executeJsonGet("/v1/mods/$modId")
-        val data = json.optJSONObject("data")
-            ?: throw CurseForgeApiException.ParseError("Missing 'data' object for mod $modId")
-        parseMod(data)
+    suspend fun getMod(modId: Long): Result<CurseForgeMod> {
+        modCache[modId]?.takeIf { it.isFresh(cacheTtlMs) }?.let { return Result.success(it.value) }
+        if (enablePublicFallback && fallbackCatalog.isFallbackModId(modId)) {
+            return runApiCall { fallbackCatalog.getMod(modId) }.also { res ->
+                res.getOrNull()?.let { putBounded(modCache, modId, it, maxEntries = 128) }
+            }
+        }
+        val primary = runApiCall {
+            val json = executeJsonGet("/v1/mods/$modId")
+            val data = json.optJSONObject("data")
+                ?: throw CurseForgeApiException.ParseError("Missing 'data' object for mod $modId")
+            parseMod(data)
+        }
+        val resolved = if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            runApiCall { fallbackCatalog.getMod(modId) }
+        } else {
+            primary
+        }
+        resolved.getOrNull()?.let { putBounded(modCache, modId, it, maxEntries = 128) }
+        return resolved
     }
 
-    suspend fun getModDescription(modId: Long): Result<String> = runApiCall {
-        val json = executeJsonGet("/v1/mods/$modId/description")
-        val rawHtml = json.optString("data", "")
-        sanitizeHtmlDescription(rawHtml)
+    suspend fun getModDescription(modId: Long): Result<String> {
+        descriptionCache[modId]?.takeIf { it.isFresh(cacheTtlMs) }?.let { return Result.success(it.value) }
+        if (enablePublicFallback && fallbackCatalog.isFallbackModId(modId)) {
+            return runApiCall { fallbackCatalog.getModDescription(modId) }.also { res ->
+                res.getOrNull()?.let { putBounded(descriptionCache, modId, it) }
+            }
+        }
+        val primary = runApiCall {
+            val json = executeJsonGet("/v1/mods/$modId/description")
+            val rawHtml = json.optString("data", "")
+            sanitizeHtmlDescription(rawHtml)
+        }
+        val resolved = if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            runApiCall { fallbackCatalog.getModDescription(modId) }
+        } else {
+            primary
+        }
+        resolved.getOrNull()?.let { putBounded(descriptionCache, modId, it) }
+        return resolved
     }
 
     suspend fun getModFiles(
@@ -89,34 +169,59 @@ class CurseForgeRepository(
         modLoader: CurseForgeModLoader = CurseForgeModLoader.ANY,
         index: Int = 0,
         pageSize: Int = 50
-    ): Result<CurseForgeFilesResponse> = runApiCall {
-        val params = LinkedHashMap<String, String>()
-        params["index"] = index.coerceAtLeast(0).toString()
-        params["pageSize"] = pageSize.coerceIn(1, 50).toString()
-        if (!gameVersion.isNullOrBlank()) {
-            params["gameVersion"] = gameVersion.trim()
-        }
-        if (modLoader != CurseForgeModLoader.ANY) {
-            params["modLoaderType"] = modLoader.apiId.toString()
-        }
-        val json = executeJsonGet("/v1/mods/$modId/files", params)
-        val data = json.optJSONArray("data") ?: JSONArray()
-        val files = buildList {
-            for (i in 0 until data.length()) {
-                val fileObj = data.optJSONObject(i) ?: continue
-                val parsed = parseFile(fileObj)
-                if (!parsed.isServerPack) add(parsed)
+    ): Result<CurseForgeFilesResponse> {
+        val cacheKey = "$modId|${gameVersion.orEmpty()}|${modLoader.name}|$index|$pageSize"
+        filesCache[cacheKey]?.takeIf { it.isFresh(cacheTtlMs) }?.let { return Result.success(it.value) }
+        if (enablePublicFallback && fallbackCatalog.isFallbackModId(modId)) {
+            return runApiCall { fallbackCatalog.getModFiles(modId, gameVersion, modLoader, index, pageSize) }.also { res ->
+                res.getOrNull()?.let { putBounded(filesCache, cacheKey, it) }
             }
         }
-        val pagination = parsePagination(json.optJSONObject("pagination"), index, pageSize, files.size)
-        CurseForgeFilesResponse(files = files, pagination = pagination)
+        val primary = runApiCall {
+            val params = LinkedHashMap<String, String>()
+            params["index"] = index.coerceAtLeast(0).toString()
+            params["pageSize"] = pageSize.coerceIn(1, 50).toString()
+            if (!gameVersion.isNullOrBlank()) {
+                params["gameVersion"] = gameVersion.trim()
+            }
+            if (modLoader != CurseForgeModLoader.ANY) {
+                params["modLoaderType"] = modLoader.apiId.toString()
+            }
+            val json = executeJsonGet("/v1/mods/$modId/files", params)
+            val data = json.optJSONArray("data") ?: JSONArray()
+            val files = buildList {
+                for (i in 0 until data.length()) {
+                    val fileObj = data.optJSONObject(i) ?: continue
+                    val parsed = parseFile(fileObj)
+                    if (!parsed.isServerPack) add(parsed)
+                }
+            }
+            val pagination = parsePagination(json.optJSONObject("pagination"), index, pageSize, files.size)
+            CurseForgeFilesResponse(files = files, pagination = pagination)
+        }
+        val resolved = if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            runApiCall { fallbackCatalog.getModFiles(modId, gameVersion, modLoader, index, pageSize) }
+        } else {
+            primary
+        }
+        resolved.getOrNull()?.let { putBounded(filesCache, cacheKey, it) }
+        return resolved
     }
 
-    suspend fun getModFile(modId: Long, fileId: Long): Result<CurseForgeFile> = runApiCall {
-        val json = executeJsonGet("/v1/mods/$modId/files/$fileId")
-        val data = json.optJSONObject("data")
-            ?: throw CurseForgeApiException.ParseError("Missing 'data' object for file $fileId")
-        parseFile(data)
+    suspend fun getModFile(modId: Long, fileId: Long): Result<CurseForgeFile> {
+        if (enablePublicFallback && fallbackCatalog.isFallbackModId(modId)) {
+            return runApiCall { fallbackCatalog.getModFile(modId, fileId) }
+        }
+        val primary = runApiCall {
+            val json = executeJsonGet("/v1/mods/$modId/files/$fileId")
+            val data = json.optJSONObject("data")
+                ?: throw CurseForgeApiException.ParseError("Missing 'data' object for file $fileId")
+            parseFile(data)
+        }
+        if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            return runApiCall { fallbackCatalog.getModFile(modId, fileId) }
+        }
+        return primary
     }
 
     /**
@@ -132,7 +237,10 @@ class CurseForgeRepository(
                 )
             )
         }
-        return runApiCall {
+        if (enablePublicFallback && (fallbackCatalog.isFallbackModId(file.modId) || (mod != null && fallbackCatalog.isFallbackModId(mod.id)))) {
+            return runApiCall { fallbackCatalog.resolveDownloadUrl(mod, file) }
+        }
+        val primary = runApiCall {
             val auth = credentialProvider.getAuthConfig()
             val (url, headers) = buildRequest(auth, "/v1/mods/${file.modId}/files/${file.id}/download-url", emptyMap())
             val response = transport.get(url, headers)
@@ -150,106 +258,150 @@ class CurseForgeRepository(
                         )
                     }
                 }
-                403 -> CurseForgeDownloadUrlResult.Restricted(
-                    reason = "Third-party download is restricted by the mod author on CurseForge.",
-                    websiteUrl = mod?.links?.websiteUrl
-                )
+                403 -> {
+                    val snippet = sanitizeHttpErrorBody(response.body, (auth as? CurseForgeAuthConfig.DirectVaultKey)?.apiKey)
+                    val isAuthRejection = snippet?.contains("api key", ignoreCase = true) == true ||
+                        snippet?.contains("invalid", ignoreCase = true) == true ||
+                        snippet?.contains("missing", ignoreCase = true) == true
+                    if (isAuthRejection) {
+                        throw CurseForgeApiException.Forbidden(isDistributionRestriction = false, serverReason = snippet)
+                    }
+                    CurseForgeDownloadUrlResult.Restricted(
+                        reason = "Third-party download is restricted by the mod author on CurseForge.",
+                        websiteUrl = mod?.links?.websiteUrl
+                    )
+                }
                 else -> {
-                    mapHttpError(response, "/v1/mods/${file.modId}/files/${file.id}/download-url")
+                    mapHttpError(response, "/v1/mods/${file.modId}/files/${file.id}/download-url", auth)
                 }
             }
         }
+        if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            return runApiCall { fallbackCatalog.resolveDownloadUrl(mod, file) }
+        }
+        return primary
     }
 
-    suspend fun getCategories(forceRefresh: Boolean = false): Result<List<CurseForgeCategory>> = runApiCall {
-        if (!forceRefresh && cachedCategories.isNotEmpty()) {
-            return@runApiCall cachedCategories.toList()
-        }
-        val params = mapOf(
-            "gameId" to CurseForgeCredentialProvider.MINECRAFT_GAME_ID.toString(),
-            "classId" to CurseForgeCredentialProvider.MODS_CLASS_ID.toString()
-        )
-        val json = executeJsonGet("/v1/categories", params)
-        val data = json.optJSONArray("data") ?: JSONArray()
-        val parsed = buildList {
-            for (i in 0 until data.length()) {
-                data.optJSONObject(i)?.let { add(parseCategory(it)) }
+    suspend fun getCategories(forceRefresh: Boolean = false): Result<List<CurseForgeCategory>> {
+        val primary = runApiCall {
+            if (!forceRefresh && cachedCategories.isNotEmpty()) {
+                return@runApiCall cachedCategories.toList()
             }
-        }.sortedBy { it.name.lowercase() }
-        synchronized(cachedCategories) {
-            cachedCategories.clear()
-            cachedCategories.addAll(parsed)
+            val params = mapOf(
+                "gameId" to CurseForgeCredentialProvider.MINECRAFT_GAME_ID.toString(),
+                "classId" to CurseForgeCredentialProvider.MODS_CLASS_ID.toString()
+            )
+            val json = executeJsonGet("/v1/categories", params)
+            val data = json.optJSONArray("data") ?: JSONArray()
+            val parsed = buildList {
+                for (i in 0 until data.length()) {
+                    data.optJSONObject(i)?.let { add(parseCategory(it)) }
+                }
+            }.sortedBy { it.name.lowercase() }
+            synchronized(cachedCategories) {
+                cachedCategories.clear()
+                cachedCategories.addAll(parsed)
+            }
+            parsed
         }
-        parsed
+        if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            return Result.success(fallbackCatalog.getDefaultCategories())
+        }
+        return primary
     }
 
-    suspend fun getMinecraftVersions(forceRefresh: Boolean = false): Result<List<CurseForgeMinecraftVersion>> = runApiCall {
-        if (!forceRefresh && cachedMcVersions.isNotEmpty()) {
-            return@runApiCall cachedMcVersions.toList()
-        }
-        val json = executeJsonGet("/v1/minecraft/version")
-        val data = json.optJSONArray("data") ?: JSONArray()
-        val parsed = buildList {
-            for (i in 0 until data.length()) {
-                val obj = data.optJSONObject(i) ?: continue
-                val versionString = obj.optString("versionString")
-                if (versionString.isBlank()) continue
-                add(
-                    CurseForgeMinecraftVersion(
-                        id = obj.optInt("id"),
-                        versionString = versionString,
-                        approved = obj.optBoolean("approved", true)
+    suspend fun getMinecraftVersions(forceRefresh: Boolean = false): Result<List<CurseForgeMinecraftVersion>> {
+        val primary = runApiCall {
+            if (!forceRefresh && cachedMcVersions.isNotEmpty()) {
+                return@runApiCall cachedMcVersions.toList()
+            }
+            val json = executeJsonGet("/v1/minecraft/version")
+            val data = json.optJSONArray("data") ?: JSONArray()
+            val parsed = buildList {
+                for (i in 0 until data.length()) {
+                    val obj = data.optJSONObject(i) ?: continue
+                    val versionString = obj.optString("versionString")
+                    if (versionString.isBlank()) continue
+                    add(
+                        CurseForgeMinecraftVersion(
+                            id = obj.optInt("id"),
+                            versionString = versionString,
+                            approved = obj.optBoolean("approved", true)
+                        )
                     )
-                )
+                }
             }
+            synchronized(cachedMcVersions) {
+                cachedMcVersions.clear()
+                cachedMcVersions.addAll(parsed)
+            }
+            parsed
         }
-        synchronized(cachedMcVersions) {
-            cachedMcVersions.clear()
-            cachedMcVersions.addAll(parsed)
+        if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            return Result.success(fallbackCatalog.getDefaultMinecraftVersions())
         }
-        parsed
+        return primary
     }
 
     suspend fun getModLoaders(
         mcVersion: String? = null,
         includeAll: Boolean = false,
         forceRefresh: Boolean = false
-    ): Result<List<CurseForgeModLoaderIndex>> = runApiCall {
-        val cacheKey = "${mcVersion.orEmpty()}|$includeAll"
-        if (!forceRefresh) {
-            cachedLoaders[cacheKey]?.let { return@runApiCall it }
-        }
-        val params = LinkedHashMap<String, String>()
-        if (!mcVersion.isNullOrBlank()) params["version"] = mcVersion.trim()
-        if (includeAll) params["includeAll"] = "true"
-        val json = executeJsonGet("/v1/minecraft/modloader", params)
-        val data = json.optJSONArray("data") ?: JSONArray()
-        val parsed = buildList {
-            for (i in 0 until data.length()) {
-                val obj = data.optJSONObject(i) ?: continue
-                val name = obj.optString("name")
-                if (name.isBlank()) continue
-                add(
-                    CurseForgeModLoaderIndex(
-                        name = name,
-                        gameVersion = obj.optString("gameVersion"),
-                        latest = obj.optBoolean("latest", false),
-                        recommended = obj.optBoolean("recommended", false),
-                        type = CurseForgeModLoader.fromApiId(obj.optInt("type", -1))
-                    )
-                )
+    ): Result<List<CurseForgeModLoaderIndex>> {
+        val primary = runApiCall {
+            val cacheKey = "${mcVersion.orEmpty()}|$includeAll"
+            if (!forceRefresh) {
+                cachedLoaders[cacheKey]?.let { return@runApiCall it }
             }
+            val params = LinkedHashMap<String, String>()
+            if (!mcVersion.isNullOrBlank()) params["version"] = mcVersion.trim()
+            if (includeAll) params["includeAll"] = "true"
+            val json = executeJsonGet("/v1/minecraft/modloader", params)
+            val data = json.optJSONArray("data") ?: JSONArray()
+            val parsed = buildList {
+                for (i in 0 until data.length()) {
+                    val obj = data.optJSONObject(i) ?: continue
+                    val name = obj.optString("name")
+                    if (name.isBlank()) continue
+                    add(
+                        CurseForgeModLoaderIndex(
+                            name = name,
+                            gameVersion = obj.optString("gameVersion"),
+                            latest = obj.optBoolean("latest", false),
+                            recommended = obj.optBoolean("recommended", false),
+                            type = CurseForgeModLoader.fromApiId(obj.optInt("type", -1))
+                        )
+                    )
+                }
+            }
+            cachedLoaders[cacheKey] = parsed
+            parsed
         }
-        cachedLoaders[cacheKey] = parsed
-        parsed
+        if (primary.isFailure && shouldFallbackToPublicCatalog(primary.exceptionOrNull())) {
+            return Result.success(fallbackCatalog.getDefaultModLoaders(mcVersion))
+        }
+        return primary
     }
 
     private suspend fun executeJsonGet(path: String, params: Map<String, String> = emptyMap()): JSONObject {
         val auth = credentialProvider.getAuthConfig()
+        if (enablePublicFallback && auth is CurseForgeAuthConfig.DirectVaultKey && auth.apiKey == rejectedKeyInSession) {
+            throw CurseForgeApiException.Forbidden(isDistributionRestriction = false, serverReason = "API Key missing or invalid")
+        }
         val (url, headers) = buildRequest(auth, path, params)
-        val response = transport.get(url, headers)
+        var response = transport.get(url, headers)
+        if ((response.statusCode == 401 || response.statusCode == 403) && auth is CurseForgeAuthConfig.DirectVaultKey) {
+            val bundled = credentialProvider.getBundledAuthConfig()
+            if (bundled != null && bundled.apiKey != auth.apiKey) {
+                val (retryUrl, retryHeaders) = buildRequest(bundled, path, params)
+                response = transport.get(retryUrl, retryHeaders)
+            }
+            if (response.statusCode == 401 || response.statusCode == 403) {
+                rejectedKeyInSession = auth.apiKey
+            }
+        }
         if (response.statusCode !in 200..299) {
-            mapHttpError(response, path)
+            mapHttpError(response, path, auth)
         }
         return runCatching { JSONObject(response.body) }.getOrElse { err ->
             throw CurseForgeApiException.ParseError(err.message ?: "Invalid JSON")
@@ -284,25 +436,59 @@ class CurseForgeRepository(
         }
     }
 
-    private fun mapHttpError(response: CurseForgeHttpResponse, resource: String): Nothing {
+    private fun mapHttpError(
+        response: CurseForgeHttpResponse,
+        resource: String,
+        auth: CurseForgeAuthConfig? = null
+    ): Nothing {
+        val secret = when (auth) {
+            is CurseForgeAuthConfig.DirectVaultKey -> auth.apiKey
+            is CurseForgeAuthConfig.BackendProxy -> auth.clientToken
+            else -> null
+        }
+        val snippet = sanitizeHttpErrorBody(response.body, secret)
         when (response.statusCode) {
             401 -> throw CurseForgeApiException.Unauthorized()
-            403 -> throw CurseForgeApiException.Forbidden(
-                isDistributionRestriction = resource.endsWith("/download-url")
-            )
+            403 -> {
+                val isAuthRejection = snippet?.contains("api key", ignoreCase = true) == true ||
+                    snippet?.contains("invalid", ignoreCase = true) == true ||
+                    snippet?.contains("missing", ignoreCase = true) == true
+                throw CurseForgeApiException.Forbidden(
+                    isDistributionRestriction = resource.endsWith("/download-url") && !isAuthRejection,
+                    serverReason = snippet
+                )
+            }
             404 -> throw CurseForgeApiException.NotFound(resource)
             429 -> {
                 val retryAfter = response.headers["retry-after"]?.trim()?.toIntOrNull()
                 throw CurseForgeApiException.RateLimited(retryAfter)
             }
-            in 500..599 -> throw CurseForgeApiException.ServerError(response.statusCode)
-            else -> throw CurseForgeApiException.ServerError(response.statusCode)
+            in 500..599 -> throw CurseForgeApiException.ServerError(response.statusCode, snippet)
+            else -> throw CurseForgeApiException.ServerError(response.statusCode, snippet)
         }
+    }
+
+    private fun sanitizeHttpErrorBody(rawBody: String, secret: String?): String? {
+        if (rawBody.isBlank()) return null
+        val jsonMsg = runCatching {
+            val obj = JSONObject(rawBody)
+            obj.optString("message").takeIf { it.isNotBlank() && it != "null" }
+                ?: obj.optString("error").takeIf { it.isNotBlank() && it != "null" }
+        }.getOrNull()
+        val raw = jsonMsg ?: rawBody
+            .replace(Regex("<[^>]+>"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (raw.isBlank()) return null
+        val redacted = CurseForgeUrlBuilder.redactSecrets(raw, secret)
+        return if (redacted.length > 160) redacted.take(157) + "..." else redacted
     }
 
     private suspend inline fun <T> runApiCall(crossinline block: suspend () -> T): Result<T> {
         return try {
             Result.success(block())
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
         } catch (e: CurseForgeApiException) {
             Result.failure(e)
         } catch (t: Throwable) {
@@ -318,6 +504,12 @@ class CurseForgeRepository(
     }
 
     companion object {
+        private fun JSONObject.optCleanString(key: String): String? {
+            if (isNull(key)) return null
+            val raw = optString(key, "").trim()
+            return raw.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+        }
+
         internal fun parseMod(obj: JSONObject): CurseForgeMod {
             val authorsArr = obj.optJSONArray("authors") ?: JSONArray()
             val authors = buildList {
@@ -326,8 +518,8 @@ class CurseForgeRepository(
                     add(
                         CurseForgeAuthor(
                             id = a.optLong("id"),
-                            name = a.optString("name", "Unknown"),
-                            url = a.optString("url").takeIf { it.isNotBlank() && it != "null" }
+                            name = a.optCleanString("name") ?: "Unknown",
+                            url = a.optCleanString("url")
                         )
                     )
                 }
@@ -369,10 +561,10 @@ class CurseForgeRepository(
 
             val linksObj = obj.optJSONObject("links")
             val links = CurseForgeLinks(
-                websiteUrl = linksObj?.optString("websiteUrl")?.takeIf { it.isNotBlank() && it != "null" },
-                wikiUrl = linksObj?.optString("wikiUrl")?.takeIf { it.isNotBlank() && it != "null" },
-                issuesUrl = linksObj?.optString("issuesUrl")?.takeIf { it.isNotBlank() && it != "null" },
-                sourceUrl = linksObj?.optString("sourceUrl")?.takeIf { it.isNotBlank() && it != "null" }
+                websiteUrl = linksObj?.optCleanString("websiteUrl"),
+                wikiUrl = linksObj?.optCleanString("wikiUrl"),
+                issuesUrl = linksObj?.optCleanString("issuesUrl"),
+                sourceUrl = linksObj?.optCleanString("sourceUrl")
             )
 
             val allowDistribution = if (obj.has("allowModDistribution") && !obj.isNull("allowModDistribution")) {
@@ -383,9 +575,9 @@ class CurseForgeRepository(
 
             return CurseForgeMod(
                 id = obj.optLong("id"),
-                name = obj.optString("name", "Unnamed Mod"),
-                slug = obj.optString("slug").takeIf { it.isNotBlank() && it != "null" },
-                summary = obj.optString("summary", ""),
+                name = obj.optCleanString("name") ?: "Unnamed Mod",
+                slug = obj.optCleanString("slug"),
+                summary = obj.optCleanString("summary") ?: "",
                 downloadCount = obj.optLong("downloadCount", 0L),
                 authors = authors,
                 categories = categories,
@@ -393,7 +585,7 @@ class CurseForgeRepository(
                 screenshots = screenshots,
                 links = links,
                 allowModDistribution = allowDistribution,
-                dateModifiedIso = obj.optString("dateModified").takeIf { it.isNotBlank() && it != "null" },
+                dateModifiedIso = obj.optCleanString("dateModified"),
                 latestFiles = latestFiles,
                 supportedMinecraftVersionsFromLatest = indexVersions.toList(),
                 supportedLoadersFromLatest = indexLoaders
@@ -438,17 +630,18 @@ class CurseForgeRepository(
                     }
                 }
             }
+            val resolvedFileName = obj.optCleanString("fileName") ?: "mod-${obj.optLong("id")}.jar"
             return CurseForgeFile(
                 id = obj.optLong("id"),
                 modId = obj.optLong("modId"),
-                displayName = obj.optString("displayName").ifBlank { obj.optString("fileName", "Unknown File") },
-                fileName = obj.optString("fileName", "mod.jar"),
+                displayName = obj.optCleanString("displayName") ?: resolvedFileName,
+                fileName = resolvedFileName,
                 releaseType = CurseForgeReleaseType.fromApiId(obj.optInt("releaseType", 1)),
                 isAvailable = obj.optBoolean("isAvailable", true),
                 isServerPack = obj.optBoolean("isServerPack", false),
-                fileDateIso = obj.optString("fileDate").takeIf { it.isNotBlank() && it != "null" },
+                fileDateIso = obj.optCleanString("fileDate"),
                 fileLengthBytes = obj.optLong("fileLength", 0L),
-                downloadUrl = obj.optString("downloadUrl").takeIf { it.isNotBlank() && it != "null" },
+                downloadUrl = obj.optCleanString("downloadUrl"),
                 hashes = hashes,
                 gameVersions = gameVersions,
                 dependencies = deps
@@ -457,19 +650,19 @@ class CurseForgeRepository(
 
         private fun parseCategory(obj: JSONObject): CurseForgeCategory = CurseForgeCategory(
             id = obj.optInt("id"),
-            name = obj.optString("name", "Category"),
-            slug = obj.optString("slug").takeIf { it.isNotBlank() && it != "null" },
-            iconUrl = obj.optString("iconUrl").takeIf { it.isNotBlank() && it != "null" },
+            name = obj.optCleanString("name") ?: "Category",
+            slug = obj.optCleanString("slug"),
+            iconUrl = obj.optCleanString("iconUrl"),
             parentCategoryId = if (obj.isNull("parentCategoryId")) null else obj.optInt("parentCategoryId"),
             classId = if (obj.isNull("classId")) null else obj.optInt("classId")
         )
 
         private fun parseAsset(obj: JSONObject): CurseForgeAsset = CurseForgeAsset(
             id = obj.optLong("id"),
-            title = obj.optString("title").takeIf { it.isNotBlank() && it != "null" },
-            description = obj.optString("description").takeIf { it.isNotBlank() && it != "null" },
-            thumbnailUrl = obj.optString("thumbnailUrl").takeIf { it.isNotBlank() && it != "null" },
-            url = obj.optString("url").takeIf { it.isNotBlank() && it != "null" }
+            title = obj.optCleanString("title"),
+            description = obj.optCleanString("description"),
+            thumbnailUrl = obj.optCleanString("thumbnailUrl"),
+            url = obj.optCleanString("url")
         )
 
         private fun parsePagination(

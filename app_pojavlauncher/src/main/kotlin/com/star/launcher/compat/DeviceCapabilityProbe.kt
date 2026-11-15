@@ -3,7 +3,9 @@ package com.star.launcher.compat
 import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.display.DisplayManager
 import android.os.Build
+import android.view.Display
 import com.star.launcher.data.db.entity.DeviceInfoEntity
 import net.kdt.pojavlaunch.Architecture
 import net.kdt.pojavlaunch.Tools
@@ -34,7 +36,16 @@ data class DeviceCapabilitiesSnapshot(
     val vulkanVersion: String?,
     val hasAdrenoKgslNode: Boolean,
     val totalRamMb: Long,
-    val probedAt: Long
+    val probedAt: Long,
+    val cpuCoreCount: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1),
+    val cpuMaxFreqMhz: Int = 0,
+    val cpuHardwareModel: String = Build.HARDWARE ?: "unknown",
+    val availableRamMb: Long = 0L,
+    val screenWidthPx: Int = 0,
+    val screenHeightPx: Int = 0,
+    val supportedRefreshRatesHz: List<Int> = emptyList(),
+    val hasThermalSensor: Boolean = false,
+    val thermalCelsiusMax: Float? = null
 ) {
     fun toDeviceInfoEntity(): DeviceInfoEntity = DeviceInfoEntity(
         deviceFingerprint = deviceFingerprint,
@@ -91,7 +102,11 @@ class AndroidDeviceCapabilityProbe(
 
     private val appContext = context.applicationContext
 
+    @Volatile
+    private var cachedSnapshot: DeviceCapabilitiesSnapshot? = null
+
     override fun probe(): DeviceCapabilitiesSnapshot {
+        cachedSnapshot?.let { return it }
         val abis = Build.SUPPORTED_ABIS?.toList().orEmpty().ifEmpty { listOf("unknown") }
         val primaryAbi = abis.first()
         val is64Bit = Architecture.is64BitsDevice() || abis.any { it == "arm64-v8a" || it == "x86_64" }
@@ -115,7 +130,14 @@ class AndroidDeviceCapabilityProbe(
         }
 
         val hasKgsl = File("/sys/class/kgsl/kgsl-3d0/gpu_model").exists()
-        val totalRamMb = readTotalRamMb()
+        val memInfo = readMemoryInfo()
+        val totalRamMb = memInfo.first
+        val availableRamMb = memInfo.second
+        val cpuCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val cpuMaxFreqMhz = readCpuMaxFreqMhz(cpuCores)
+        val cpuModel = readCpuHardwareModel()
+        val (screenW, screenH, refreshRates) = readDisplayMetricsAndRates()
+        val (hasThermal, maxTempC) = readThermalInfo()
         val family = classifyGpuFamily(vendor, renderer)
         val fingerprint = computeDeviceFingerprint(primaryAbi, apiLevel, vendor, renderer, vulkanVersion)
 
@@ -134,15 +156,82 @@ class AndroidDeviceCapabilityProbe(
             vulkanVersion = vulkanVersion,
             hasAdrenoKgslNode = hasKgsl,
             totalRamMb = totalRamMb,
-            probedAt = clockMillis()
-        )
+            probedAt = clockMillis(),
+            cpuCoreCount = cpuCores,
+            cpuMaxFreqMhz = cpuMaxFreqMhz,
+            cpuHardwareModel = cpuModel,
+            availableRamMb = availableRamMb,
+            screenWidthPx = screenW,
+            screenHeightPx = screenH,
+            supportedRefreshRatesHz = refreshRates,
+            hasThermalSensor = hasThermal,
+            thermalCelsiusMax = maxTempC
+        ).also { cachedSnapshot = it }
     }
 
-    private fun readTotalRamMb(): Long {
-        val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return 0L
+    private fun readMemoryInfo(): Pair<Long, Long> {
+        val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return 0L to 0L
         val memInfo = ActivityManager.MemoryInfo()
         am.getMemoryInfo(memInfo)
-        return memInfo.totalMem / (1024L * 1024L)
+        return (memInfo.totalMem / (1024L * 1024L)) to (memInfo.availMem / (1024L * 1024L))
+    }
+
+    private fun readCpuMaxFreqMhz(coreCount: Int): Int {
+        var maxKhz = 0L
+        for (idx in 0 until coreCount.coerceAtMost(16)) {
+            val path = File("/sys/devices/system/cpu/cpu$idx/cpufreq/cpuinfo_max_freq")
+            if (path.isFile && path.canRead()) {
+                val khz = runCatching { path.readText().trim().toLongOrNull() }.getOrNull() ?: 0L
+                if (khz > maxKhz) maxKhz = khz
+            }
+        }
+        return (maxKhz / 1000L).toInt()
+    }
+
+    private fun readCpuHardwareModel(): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val soc = Build.SOC_MODEL
+            if (!soc.isNullOrBlank() && soc != Build.UNKNOWN) return soc
+        }
+        return Build.HARDWARE ?: "unknown"
+    }
+
+    private fun readDisplayMetricsAndRates(): Triple<Int, Int, List<Int>> {
+        return runCatching {
+            val dm = appContext.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
+            val metrics = appContext.resources.displayMetrics
+            val w = display?.mode?.physicalWidth ?: metrics.widthPixels
+            val h = display?.mode?.physicalHeight ?: metrics.heightPixels
+            val rates = if (display != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                buildList {
+                    add(display.mode.refreshRate.toInt())
+                    display.supportedModes.forEach { mode -> add(mode.refreshRate.toInt()) }
+                }.filter { it > 0 }.distinct().sorted()
+            } else {
+                listOf(60)
+            }
+            Triple(w, h, rates)
+        }.getOrElse {
+            val metrics = appContext.resources.displayMetrics
+            Triple(metrics.widthPixels, metrics.heightPixels, listOf(60))
+        }
+    }
+
+    private fun readThermalInfo(): Pair<Boolean, Float?> {
+        val dir = File("/sys/class/thermal")
+        val zones = dir.listFiles { f -> f.name.startsWith("thermal_zone") } ?: return false to null
+        var maxCelsius: Float? = null
+        for (zone in zones.take(12)) {
+            val tempFile = File(zone, "temp")
+            if (!tempFile.isFile || !tempFile.canRead()) continue
+            val raw = runCatching { tempFile.readText().trim().toFloatOrNull() }.getOrNull() ?: continue
+            val celsius = if (raw > 200f) raw / 1000f else raw
+            if (celsius in 10f..110f) {
+                maxCelsius = if (maxCelsius == null) celsius else maxOf(maxCelsius, celsius)
+            }
+        }
+        return true to maxCelsius
     }
 
     private fun formatVulkanVersion(packed: Int): String {

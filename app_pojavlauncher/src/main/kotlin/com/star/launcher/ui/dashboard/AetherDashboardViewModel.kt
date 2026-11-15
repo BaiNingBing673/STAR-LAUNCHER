@@ -56,7 +56,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
 import net.kdt.pojavlaunch.Architecture
 import net.kdt.pojavlaunch.NewJREUtil
 import net.kdt.pojavlaunch.Tools
@@ -117,37 +120,84 @@ data class AetherDashboardUiState(
     val editingInstanceContent: InstanceContentSummary? = null,
     val detailInstanceContent: InstanceContentSummary? = null,
     val lastExportedReportPath: String? = null,
-    val discordInviteUrl: String = "",
+    val discordInviteUrl: String = DiscordLinkHelper.DEFAULT_DISCORD_INVITE_URL,
     val reducedMotionEnabled: Boolean = false,
     val ramAllocationMb: Int = LauncherPreferences.PREF_RAM_ALLOCATION,
     val statusBanner: String? = null,
     val isBusy: Boolean = false
 ) {
-    val featuredInstance: GameInstanceEntity?
-        get() = instances.firstOrNull { it.instanceId == selectedInstanceId }
+    @delegate:Transient
+    val featuredInstance: GameInstanceEntity? by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        instances.firstOrNull { it.instanceId == selectedInstanceId }
             ?: instances.maxByOrNull { it.lastPlayedAt ?: it.createdAt }
+    }
 
-    val hasSessionHistory: Boolean
-        get() = recentSessions.isNotEmpty() || instances.any { it.lastPlayedAt != null }
+    @delegate:Transient
+    val hasSessionHistory: Boolean by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        recentSessions.isNotEmpty() || instances.any { it.lastPlayedAt != null }
+    }
 
-    val hasModdedVersions: Boolean
-        get() = versions.any { it.modLoaderType != ModLoaderType.VANILLA }
+    @delegate:Transient
+    val hasModdedVersions: Boolean by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        versions.any { it.modLoaderType != ModLoaderType.VANILLA }
+    }
+
+    @delegate:Transient
+    private val catalogSnapshot: MemoizedCatalogSnapshot by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        resolveCatalogSnapshot()
+    }
 
     val versionCatalogItems: List<VersionCatalogItem>
-        get() = buildVersionCatalogItems()
+        get() = catalogSnapshot.items
 
-    val selectedVersionItem: VersionCatalogItem?
-        get() {
-            val catalog = versionCatalogItems
-            return catalog.firstOrNull { it.versionId == selectedVersionId }
-                ?: featuredInstance?.versionId?.let { targetId ->
-                    catalog.firstOrNull { it.versionId == targetId }
-                }
-                ?: catalog.firstOrNull { it.isInstalled }
-                ?: catalog.firstOrNull()
+    @delegate:Transient
+    val selectedVersionItem: VersionCatalogItem? by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        val snap = catalogSnapshot
+        val catalog = snap.items
+        (selectedVersionId?.let { snap.byVersionId[it] })
+            ?: (featuredInstance?.versionId?.let { snap.byVersionId[it] })
+            ?: snap.firstInstalled
+            ?: catalog.firstOrNull()
+    }
+
+    private fun resolveCatalogSnapshot(): MemoizedCatalogSnapshot {
+        val isArm64 = deviceCapabilities?.is64Bit ?: true
+        val prev = lastCatalogSnapshot
+        if (prev != null &&
+            prev.versions === versions &&
+            prev.instances === instances &&
+            prev.recentSessions === recentSessions &&
+            prev.runtimes === runtimes &&
+            prev.versionInstallProgress === versionInstallProgress &&
+            prev.versionInstallMetadata === versionInstallMetadata &&
+            prev.isArm64 == isArm64
+        ) {
+            return prev
         }
+        val built = buildVersionCatalogItems(isArm64)
+        val byId = HashMap<String, VersionCatalogItem>(built.size * 2)
+        var firstInstalledItem: VersionCatalogItem? = null
+        for (item in built) {
+            byId[item.versionId] = item
+            if (firstInstalledItem == null && item.isInstalled) {
+                firstInstalledItem = item
+            }
+        }
+        return MemoizedCatalogSnapshot(
+            versions = versions,
+            instances = instances,
+            recentSessions = recentSessions,
+            runtimes = runtimes,
+            versionInstallProgress = versionInstallProgress,
+            versionInstallMetadata = versionInstallMetadata,
+            isArm64 = isArm64,
+            items = built,
+            byVersionId = byId,
+            firstInstalled = firstInstalledItem
+        ).also { lastCatalogSnapshot = it }
+    }
 
-    private fun buildVersionCatalogItems(): List<VersionCatalogItem> {
+    private fun buildVersionCatalogItems(isArm64: Boolean): List<VersionCatalogItem> {
         val lastPlayedByVersion = HashMap<String, Long>()
         for (inst in instances) {
             val verId = inst.versionId ?: continue
@@ -166,7 +216,6 @@ data class AetherDashboardUiState(
             }
         }
 
-        val isArm64 = deviceCapabilities?.is64Bit ?: true
         val installedJavaMajors = runtimes.filter { it.isVerified }.map { it.majorVersion }.toSet()
 
         return versions.map { entity ->
@@ -218,6 +267,24 @@ data class AetherDashboardUiState(
             )
         }
     }
+
+    private class MemoizedCatalogSnapshot(
+        val versions: List<GameVersionEntity>,
+        val instances: List<GameInstanceEntity>,
+        val recentSessions: List<GameSessionEntity>,
+        val runtimes: List<RuntimeRegistryEntity>,
+        val versionInstallProgress: Map<String, InstallationProgress>,
+        val versionInstallMetadata: Map<String, VersionInstallMetadata>,
+        val isArm64: Boolean,
+        val items: List<VersionCatalogItem>,
+        val byVersionId: Map<String, VersionCatalogItem>,
+        val firstInstalled: VersionCatalogItem?
+    )
+
+    companion object {
+        @Volatile
+        private var lastCatalogSnapshot: MemoizedCatalogSnapshot? = null
+    }
 }
 
 /**
@@ -249,24 +316,64 @@ class AetherDashboardController(
     val uiState: StateFlow<AetherDashboardUiState> = _uiState.asStateFlow()
 
     private var observeJob: Job? = null
+    private val launchDispatchMutex = Mutex()
+    private val latestLaunchRequestId = AtomicLong(0L)
+    private val envRefreshMutex = Mutex()
+    private val lastEnvRefreshAtMs = AtomicLong(0L)
 
     fun startObserving() {
         if (observeJob != null) return
         observeJob = scope.launch {
-            launch {
-                val savedVersionId = runCatching {
-                    withContext(ioDispatcher) {
-                        versionInstallCoordinator?.recoverInterruptedInstalls()
-                        settingsRepository?.getString(VersionInstallCoordinator.KEY_SELECTED_VERSION_ID, "")?.ifBlank { null }
-                    }
-                }.getOrNull()
-                if (savedVersionId != null) {
-                    _uiState.update { it.copy(selectedVersionId = savedVersionId) }
+            val (savedVersionId, savedInstanceId) = runCatching {
+                withContext(ioDispatcher) {
+                    versionInstallCoordinator?.recoverInterruptedInstalls()
+                    val vId = settingsRepository
+                        ?.getString(VersionInstallCoordinator.KEY_SELECTED_VERSION_ID, "")
+                        ?.ifBlank { null }
+                    val iId = settingsRepository
+                        ?.getString(KEY_SELECTED_INSTANCE_ID, "")
+                        ?.ifBlank { null }
+                    vId to iId
+                }
+            }.getOrDefault(null to null)
+
+            if (savedVersionId != null || savedInstanceId != null) {
+                _uiState.update { state ->
+                    state.copy(
+                        selectedVersionId = state.selectedVersionId ?: savedVersionId,
+                        selectedInstanceId = state.selectedInstanceId ?: savedInstanceId
+                    )
                 }
             }
+
             launch {
                 instanceManager.observeInstances().collectLatest { list ->
-                    _uiState.update { it.copy(instances = list) }
+                    var selectionChangedTo: String? = null
+                    var selectionUpdated = false
+                    _uiState.update { state ->
+                        val currentId = state.selectedInstanceId
+                        val currentValid = currentId != null && list.any { it.instanceId == currentId }
+                        val nextSelectedId = if (currentValid) {
+                            currentId
+                        } else {
+                            list.maxByOrNull { it.lastPlayedAt ?: it.createdAt }?.instanceId
+                        }
+                        if (nextSelectedId != currentId) {
+                            selectionUpdated = true
+                            selectionChangedTo = nextSelectedId
+                        }
+                        val nextEditing = state.editingInstance?.let { editing ->
+                            list.firstOrNull { it.instanceId == editing.instanceId }
+                        }
+                        state.copy(
+                            instances = list,
+                            selectedInstanceId = nextSelectedId,
+                            editingInstance = nextEditing
+                        )
+                    }
+                    if (selectionUpdated) {
+                        persistSelectedInstanceId(selectionChangedTo)
+                    }
                 }
             }
             launch {
@@ -543,6 +650,7 @@ class AetherDashboardController(
             return
         }
         selectVersion(versionId)
+        val requestToken = latestLaunchRequestId.incrementAndGet()
         scope.launch(ioDispatcher) {
             val coordinator = versionInstallCoordinator
             if (coordinator != null) {
@@ -555,14 +663,23 @@ class AetherDashboardController(
                 }
             }
 
-            val existingInstance = _uiState.value.instances.firstOrNull { it.versionId == versionId }
+            if (requestToken != latestLaunchRequestId.get()) {
+                return@launch
+            }
+
+            val currentSelectedId = _uiState.value.selectedInstanceId
+            val currentSelectedDb = currentSelectedId?.let { instanceManager.getInstance(it) }
+            val existingInstance = currentSelectedDb?.takeIf { it.versionId == versionId }
+                ?: instanceManager.getAllInstances().firstOrNull { it.versionId == versionId }
             val instance = existingInstance ?: instanceManager.createInstance(
                 name = "Minecraft $versionId",
                 versionId = versionId,
                 runtimeId = null,
                 rendererProfileId = null
             )
-            prepareInstanceLaunch(instance.instanceId, onReady)
+            _uiState.update { it.copy(selectedInstanceId = instance.instanceId) }
+            persistSelectedInstanceId(instance.instanceId)
+            prepareInstanceLaunchInternal(instance.instanceId, requestToken, onReady)
         }
     }
 
@@ -614,89 +731,122 @@ class AetherDashboardController(
         }
     }
 
-    fun refreshEnvironmentAndSpools() {
+    fun refreshEnvironmentAndSpools(forceRefresh: Boolean = false) {
         scope.launch(ioDispatcher) {
-            _uiState.update { it.copy(isBusy = true) }
-            val runtimes = runCatching { runtimeFacade?.listInstalledRuntimes().orEmpty() }.getOrDefault(emptyList())
-            val renderers = runCatching { rendererFacade?.listSupportedRenderers().orEmpty() }.getOrDefault(emptyList())
-            runCatching { instanceManager.syncRuntimesAndRenderers(runtimes, renderers) }
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            val prevMs = lastEnvRefreshAtMs.get()
+            if (!forceRefresh && prevMs > 0L && (nowMs - prevMs) < 1_800L && _uiState.value.deviceCapabilities != null) {
+                return@launch
+            }
+            if (!forceRefresh && prevMs > 0L && (nowMs - prevMs) < 8_000L && _uiState.value.deviceCapabilities != null) {
+                // Lightweight spool + account refresh only during rapid resume transitions.
+                val ingested = spoolBridge.ingestPendingSpools()
+                val accounts = runCatching { accountRepository?.listAccounts().orEmpty() }.getOrDefault(emptyList())
+                _uiState.update {
+                    it.copy(
+                        lastSpoolIngestedCount = ingested,
+                        accounts = accounts,
+                        ramAllocationMb = LauncherPreferences.PREF_RAM_ALLOCATION.coerceAtLeast(256)
+                    )
+                }
+                return@launch
+            }
+            if (!envRefreshMutex.tryLock()) return@launch
+            val stageStart = com.star.launcher.diagnostics.StartupProfiler.beginStage()
+            val wallStartMs = android.os.SystemClock.elapsedRealtime()
+            try {
+                _uiState.update { it.copy(isBusy = true) }
+                val runtimes = runCatching { runtimeFacade?.listInstalledRuntimes().orEmpty() }.getOrDefault(emptyList())
+                val renderers = runCatching { rendererFacade?.listSupportedRenderers().orEmpty() }.getOrDefault(emptyList())
+                runCatching { instanceManager.syncRuntimesAndRenderers(runtimes, renderers) }
 
-            val capabilities = capabilityProbe.probe()
-            val missingLibs = nativeEngineAdapter.verifyEngineLibrariesPresent()
-            val ingested = spoolBridge.ingestPendingSpools()
-            val versions = versionManager.scanInstalledVersions()
-            versionInstallCoordinator?.let { coordinator ->
-                for (installed in versions.filter { it.isInstalled }) {
-                    val existingMeta = coordinator.getMetadata(installed.versionId)
-                    if (existingMeta?.installedAt == null || existingMeta.diskSizeBytes == null) {
-                        val verif = versionManager.verifyInstallation(
-                            versionId = installed.versionId,
-                            requireAssetIndex = false,
-                            requireDeclaredLibraries = false
-                        )
-                        if (verif.isValid) {
-                            coordinator.recordVerifiedMetadata(verif)
+                val capabilities = capabilityProbe.probe()
+                val missingLibs = nativeEngineAdapter.verifyEngineLibrariesPresent()
+                val ingested = spoolBridge.ingestPendingSpools()
+                val versions = versionManager.scanInstalledVersions()
+                versionInstallCoordinator?.let { coordinator ->
+                    for (installed in versions.filter { it.isInstalled }) {
+                        val existingMeta = coordinator.getMetadata(installed.versionId)
+                        if (existingMeta?.installedAt == null || existingMeta.diskSizeBytes == null) {
+                            val verif = versionManager.verifyInstallation(
+                                versionId = installed.versionId,
+                                requireAssetIndex = false,
+                                requireDeclaredLibraries = false
+                            )
+                            if (verif.isValid) {
+                                coordinator.recordVerifiedMetadata(verif)
+                            }
                         }
                     }
                 }
-            }
-            val accounts = runCatching { accountRepository?.listAccounts().orEmpty() }.getOrDefault(emptyList())
-            val runtimeReports = runCatching {
-                MultiRTUtils.getInstalledRuntimes().map { rt ->
-                    val report = MultiRTUtils.inspectRuntime(rt.name, 0, true)
-                    RuntimeInspectionItem(
-                        name = rt.name,
-                        javaVersion = rt.javaVersion,
-                        arch = rt.arch ?: "unknown",
-                        status = report.status,
-                        reason = report.reason
+                val accounts = runCatching { accountRepository?.listAccounts().orEmpty() }.getOrDefault(emptyList())
+                val runtimeReports = runCatching {
+                    MultiRTUtils.getInstalledRuntimes().map { rt ->
+                        val report = MultiRTUtils.inspectRuntime(rt.name, 0, forceRefresh)
+                        RuntimeInspectionItem(
+                            name = rt.name,
+                            javaVersion = rt.javaVersion,
+                            arch = rt.arch ?: "unknown",
+                            status = report.status,
+                            reason = report.reason
+                        )
+                    }
+                }.getOrDefault(emptyList())
+                val deviceArch = Architecture.getDeviceArchitecture()
+                val downloadable = NewJREUtil.ExternalRuntime.values().map { ext ->
+                    DownloadableRuntimeOption(
+                        name = ext.name,
+                        majorVersion = ext.majorVersion,
+                        isInstalled = MultiRTUtils.getExactJreName(ext.majorVersion) != null,
+                        isSupportedOnDevice = !(deviceArch == Architecture.ARCH_X86 && ext.majorVersion >= 21)
                     )
                 }
-            }.getOrDefault(emptyList())
-            val deviceArch = Architecture.getDeviceArchitecture()
-            val downloadable = NewJREUtil.ExternalRuntime.values().map { ext ->
-                DownloadableRuntimeOption(
-                    name = ext.name,
-                    majorVersion = ext.majorVersion,
-                    isInstalled = MultiRTUtils.getExactJreName(ext.majorVersion) != null,
-                    isSupportedOnDevice = !(deviceArch == Architecture.ARCH_X86 && ext.majorVersion >= 21)
-                )
-            }
-            val discordUrl = runCatching {
-                settingsRepository?.getString(KEY_DISCORD_INVITE_URL, "").orEmpty()
-            }.getOrDefault("")
-            val reducedMotion = runCatching {
-                settingsRepository?.getBoolean(KEY_REDUCED_MOTION, false) ?: false
-            }.getOrDefault(false)
-            val savedRam = LauncherPreferences.PREF_RAM_ALLOCATION.coerceAtLeast(256)
+                val discordUrl = runCatching {
+                    settingsRepository?.getString(
+                        KEY_DISCORD_INVITE_URL,
+                        DiscordLinkHelper.DEFAULT_DISCORD_INVITE_URL
+                    ).orEmpty()
+                }.getOrDefault(DiscordLinkHelper.DEFAULT_DISCORD_INVITE_URL)
+                val reducedMotion = runCatching {
+                    settingsRepository?.getBoolean(KEY_REDUCED_MOTION, false) ?: false
+                }.getOrDefault(false)
+                val savedRam = LauncherPreferences.PREF_RAM_ALLOCATION.coerceAtLeast(256)
 
-            val defaultTarget = versions.firstOrNull()
-            val report = compatibilityEvaluator.evaluate(
-                capabilities = capabilities,
-                target = CompatibilityTarget(
-                    instanceId = null,
-                    versionId = defaultTarget?.versionId ?: "1.21.4",
-                    requiredJavaMajor = defaultTarget?.requiredJavaMajor ?: 21,
-                    rendererId = renderers.firstOrNull()?.rendererId ?: "opengles_mobileglues",
-                    modLoaderType = defaultTarget?.modLoaderType ?: ModLoaderType.VANILLA,
-                    selectedRuntimeId = runtimes.firstOrNull()?.runtimeId,
-                    selectedRuntimeJavaMajor = runtimes.firstOrNull()?.majorJavaVersion
+                val defaultTarget = versions.firstOrNull()
+                val report = compatibilityEvaluator.evaluate(
+                    capabilities = capabilities,
+                    target = CompatibilityTarget(
+                        instanceId = null,
+                        versionId = defaultTarget?.versionId ?: "1.21.4",
+                        requiredJavaMajor = defaultTarget?.requiredJavaMajor ?: 21,
+                        rendererId = renderers.firstOrNull()?.rendererId ?: "opengles_mobileglues",
+                        modLoaderType = defaultTarget?.modLoaderType ?: ModLoaderType.VANILLA,
+                        selectedRuntimeId = runtimes.firstOrNull()?.runtimeId,
+                        selectedRuntimeJavaMajor = runtimes.firstOrNull()?.majorJavaVersion
+                    )
                 )
-            )
-            _uiState.update {
-                it.copy(
-                    deviceCapabilities = capabilities,
-                    selectedCompatibilityReport = report,
-                    missingNativeLibraries = missingLibs,
-                    lastSpoolIngestedCount = ingested,
-                    accounts = accounts,
-                    runtimeInspections = runtimeReports,
-                    downloadableRuntimes = downloadable,
-                    discordInviteUrl = discordUrl,
-                    reducedMotionEnabled = reducedMotion,
-                    ramAllocationMb = savedRam,
-                    isBusy = false
-                )
+                lastEnvRefreshAtMs.set(android.os.SystemClock.elapsedRealtime())
+                _uiState.update {
+                    it.copy(
+                        deviceCapabilities = capabilities,
+                        selectedCompatibilityReport = report,
+                        missingNativeLibraries = missingLibs,
+                        lastSpoolIngestedCount = ingested,
+                        accounts = accounts,
+                        runtimeInspections = runtimeReports,
+                        downloadableRuntimes = downloadable,
+                        discordInviteUrl = discordUrl,
+                        reducedMotionEnabled = reducedMotion,
+                        ramAllocationMb = savedRam,
+                        isBusy = false
+                    )
+                }
+            } finally {
+                val elapsedMs = android.os.SystemClock.elapsedRealtime() - wallStartMs
+                com.star.launcher.diagnostics.StartupProfiler.endStage("environment_refresh", stageStart)
+                com.star.launcher.diagnostics.PerformanceTelemetryTracker.markStartupCompleted()
+                com.star.launcher.diagnostics.PerformanceTelemetryTracker.recordBackgroundTask("env_refresh", elapsedMs)
+                envRefreshMutex.unlock()
             }
         }
     }
@@ -719,9 +869,11 @@ class AetherDashboardController(
                 allocatedRamMb = allocatedRamMb,
                 customJvmArgs = customJvmArgs
             )
+            persistSelectedInstanceId(created.instanceId)
             _uiState.update {
                 it.copy(
                     isBusy = false,
+                    selectedInstanceId = created.instanceId,
                     statusBanner = "Created isolated instance '${created.name}'"
                 )
             }
@@ -740,21 +892,33 @@ class AetherDashboardController(
     ) {
         scope.launch(ioDispatcher) {
             _uiState.update { it.copy(isBusy = true, editingInstance = null) }
-            val updated = instanceManager.updateInstanceConfig(
-                instanceId = instanceId,
-                name = name,
-                versionId = versionId,
-                runtimeId = runtimeId,
-                rendererProfileId = rendererProfileId,
-                allocatedRamMb = allocatedRamMb,
-                customJvmArgs = customJvmArgs,
-                controlMapPath = controlMapPath
-            )
-            _uiState.update {
-                it.copy(
-                    isBusy = false,
-                    statusBanner = "Saved settings for '${updated.name}'"
+            val result = runCatching {
+                instanceManager.updateInstanceConfig(
+                    instanceId = instanceId,
+                    name = name,
+                    versionId = versionId,
+                    runtimeId = runtimeId,
+                    rendererProfileId = rendererProfileId,
+                    allocatedRamMb = allocatedRamMb,
+                    customJvmArgs = customJvmArgs,
+                    controlMapPath = controlMapPath
                 )
+            }
+            result.onSuccess { updated ->
+                _uiState.update { state ->
+                    state.copy(
+                        isBusy = false,
+                        selectedInstanceId = state.selectedInstanceId ?: updated.instanceId,
+                        statusBanner = "Saved settings for '${updated.name}'"
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        statusBanner = "Unable to update profile settings: ${err.message}"
+                    )
+                }
             }
         }
     }
@@ -762,10 +926,33 @@ class AetherDashboardController(
     fun deleteInstance(instanceId: String, deleteAetherOwnedFiles: Boolean = true) {
         scope.launch(ioDispatcher) {
             _uiState.update { it.copy(isBusy = true, editingInstance = null) }
-            instanceManager.deleteInstance(instanceId, deleteAetherOwnedFiles = deleteAetherOwnedFiles)
+            val deleted = instanceManager.deleteInstance(instanceId, deleteAetherOwnedFiles = deleteAetherOwnedFiles)
+            if (!deleted) {
+                val blockedByLaunch = instanceManager.isLaunchPreparationActive(instanceId)
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        statusBanner = if (blockedByLaunch) {
+                            "Cannot delete profile while a launch is being prepared."
+                        } else {
+                            "Profile '$instanceId' could not be deleted because it no longer exists."
+                        }
+                    )
+                }
+                return@launch
+            }
+            val nextSelected = if (_uiState.value.selectedInstanceId == instanceId) {
+                instanceManager.findFallbackInstance(excludedInstanceId = instanceId)?.instanceId
+            } else {
+                _uiState.value.selectedInstanceId
+            }
+            if (nextSelected != _uiState.value.selectedInstanceId) {
+                persistSelectedInstanceId(nextSelected)
+            }
             _uiState.update {
                 it.copy(
                     isBusy = false,
+                    selectedInstanceId = nextSelected,
                     statusBanner = "Removed instance '$instanceId'"
                 )
             }
@@ -941,10 +1128,28 @@ class AetherDashboardController(
         instanceId: String,
         onReady: (LaunchPreparationResult.Ready, AetherLaunchPayload) -> Unit = { _, _ -> }
     ) {
+        val requestToken = latestLaunchRequestId.incrementAndGet()
         scope.launch(ioDispatcher) {
+            prepareInstanceLaunchInternal(instanceId, requestToken, onReady)
+        }
+    }
+
+    private suspend fun prepareInstanceLaunchInternal(
+        instanceId: String,
+        requestToken: Long,
+        onReady: (LaunchPreparationResult.Ready, AetherLaunchPayload) -> Unit
+    ) {
+        launchDispatchMutex.withLock {
+            if (requestToken != latestLaunchRequestId.get()) {
+                return
+            }
             val activeAccount = accountRepository?.resolveSelectedAccountName()
-            when (val res = instanceManager.prepareLaunch(instanceId)) {
+            when (val res = instanceManager.prepareLaunch(instanceId, allowWarningsOrExperimental = true, fallbackIfMissing = true)) {
                 is LaunchPreparationResult.Ready -> {
+                    if (requestToken != latestLaunchRequestId.get()) {
+                        return
+                    }
+                    persistSelectedInstanceId(res.spec.instanceId)
                     val payload = PojavLaunchBridge.fromSpec(
                         spec = res.spec,
                         sessionId = res.sessionId,
@@ -954,19 +1159,32 @@ class AetherDashboardController(
                     )
                     _uiState.update {
                         it.copy(
+                            selectedInstanceId = res.spec.instanceId,
                             selectedCompatibilityReport = res.compatibility,
-                            statusBanner = "Launching '${res.instanceName}' (${res.spec.versionId})..."
+                            statusBanner = if (res.recoveredFromMissingProfile) {
+                                "Previous profile no longer existed; switched to '${res.instanceName}' (${res.spec.versionId})..."
+                            } else {
+                                "Launching '${res.instanceName}' (${res.spec.versionId})..."
+                            }
                         )
                     }
                     withContext(mainDispatcher) {
-                        onReady(res, payload)
+                        if (requestToken == latestLaunchRequestId.get()) {
+                            onReady(res, payload)
+                        }
                     }
                 }
                 is LaunchPreparationResult.Blocked -> {
+                    val hasAnyProfile = instanceManager.getAllInstances().isNotEmpty()
+                    val reasonText = if (!hasAnyProfile) {
+                        "No profile exists. Please create or select a profile before launching."
+                    } else {
+                        "Launch blocked: ${res.reasons.joinToString("; ")}"
+                    }
                     _uiState.update {
                         it.copy(
                             selectedCompatibilityReport = res.compatibility ?: it.selectedCompatibilityReport,
-                            statusBanner = "Launch blocked: ${res.reasons.joinToString("; ")}"
+                            statusBanner = reasonText
                         )
                     }
                 }
@@ -975,7 +1193,36 @@ class AetherDashboardController(
     }
 
     fun selectFeaturedInstance(instanceId: String) {
-        _uiState.update { it.copy(selectedInstanceId = instanceId) }
+        if (instanceId.isBlank()) return
+        if (_uiState.value.instances.any { it.instanceId == instanceId }) {
+            _uiState.update { it.copy(selectedInstanceId = instanceId) }
+        }
+        scope.launch(ioDispatcher) {
+            val existing = instanceManager.getInstance(instanceId)
+            if (existing != null) {
+                persistSelectedInstanceId(existing.instanceId)
+                _uiState.update { it.copy(selectedInstanceId = existing.instanceId) }
+            } else {
+                val fallback = instanceManager.findFallbackInstance(excludedInstanceId = instanceId)
+                persistSelectedInstanceId(fallback?.instanceId)
+                _uiState.update {
+                    it.copy(
+                        selectedInstanceId = fallback?.instanceId,
+                        statusBanner = if (fallback != null) {
+                            "Selected profile no longer existed; switched to '${fallback.name}'."
+                        } else {
+                            "No profile exists. Please create or select a profile."
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun persistSelectedInstanceId(instanceId: String?) {
+        runCatching {
+            settingsRepository?.setString(KEY_SELECTED_INSTANCE_ID, instanceId.orEmpty())
+        }
     }
 
     fun dismissStatusBanner() {
@@ -1090,6 +1337,7 @@ class AetherDashboardController(
     companion object {
         const val KEY_DISCORD_INVITE_URL = "community_discord_invite_url"
         const val KEY_REDUCED_MOTION = "ui_reduced_motion"
+        const val KEY_SELECTED_INSTANCE_ID = "selected_instance_id_v1"
     }
 }
 

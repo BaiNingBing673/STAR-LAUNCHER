@@ -155,10 +155,24 @@ class VersionCatalogService(
         }
 
         val rawJson = stagedJson.readText()
+        val rootObj = runCatching { org.json.JSONObject(rawJson) }.getOrElse { err ->
+            stagedJson.delete()
+            error("Invalid $modLoaderType profile JSON: ${err.message}")
+        }
+        val libs = rootObj.optJSONArray("libraries")
+        val mainClass = rootObj.optString("mainClass", "").trim()
+        check(mainClass.isNotBlank() && libs != null && libs.length() > 0) {
+            "Incomplete $modLoaderType profile JSON: missing mainClass or libraries"
+        }
         val parsed = VersionManager.parseManifestJson(rawJson, "$modLoaderType-$loaderVersion-$gameVersion")
         val targetJsonFile = File(storageManager.versionsRoot(), "${parsed.versionId}/${parsed.versionId}.json")
         targetJsonFile.parentFile?.mkdirs()
-        targetJsonFile.writeText(rawJson)
+        val partFile = File(targetJsonFile.parentFile, "${targetJsonFile.name}.part")
+        partFile.writeText(rawJson)
+        if (!partFile.renameTo(targetJsonFile)) {
+            targetJsonFile.writeText(rawJson)
+            partFile.delete()
+        }
         stagedJson.delete()
 
         val scanned = versionManager.scanInstalledVersions()

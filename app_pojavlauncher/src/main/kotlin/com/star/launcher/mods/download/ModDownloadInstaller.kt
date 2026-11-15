@@ -18,6 +18,7 @@ import com.star.launcher.mods.api.CurseForgeRepository
 import com.star.launcher.mods.compat.InstanceEnvironment
 import com.star.launcher.mods.deps.ModInstallPlan
 import com.star.launcher.mods.deps.PlannedModInstallItem
+import com.star.launcher.mods.inventory.JarModMetadataParser
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -150,21 +151,27 @@ class ModDownloadInstaller(
             )
         }
 
-        val installedResults = mutableListOf<InstalledModEntity>()
+        val stagedItems = mutableListOf<StagedModArtifact>()
         for (item in items) {
-            when (val outcome = installSingleItem(item, environment, modsDir, stagingDir, allowOverwrite)) {
-                is SingleOutcome.Installed -> installedResults += outcome.entity
-                is SingleOutcome.Restricted -> {
+            when (val outcome = stageAndVerifyItem(item, environment, modsDir, stagingDir, allowOverwrite)) {
+                is StageOutcome.Ready -> stagedItems += outcome.artifact
+                is StageOutcome.Restricted -> {
                     return@withContext ModInstallOutcome.Restricted(
                         modName = item.mod?.name ?: item.file.displayName,
                         reason = outcome.reason,
                         websiteUrl = outcome.websiteUrl
                     )
                 }
-                is SingleOutcome.Cancelled -> return@withContext ModInstallOutcome.Cancelled(item.file.fileName)
-                is SingleOutcome.Failed -> return@withContext ModInstallOutcome.Failed(outcome.message, outcome.retryable)
+                is StageOutcome.Cancelled -> return@withContext ModInstallOutcome.Cancelled(item.file.fileName)
+                is StageOutcome.Failed -> return@withContext ModInstallOutcome.Failed(outcome.message, outcome.retryable)
             }
         }
+
+        val installedResults = commitStagedBatch(stagedItems, allowOverwrite)
+            ?: return@withContext ModInstallOutcome.Failed(
+                "Atomic mod installation failed while committing files into ${modsDir.absolutePath}; changes rolled back.",
+                retryable = true
+            )
         ModInstallOutcome.Success(installedResults)
     }
 
@@ -195,32 +202,144 @@ class ModDownloadInstaller(
             return@withContext ModInstallOutcome.Failed(item.compatibility.summary, retryable = false)
         }
 
-        when (val outcome = installSingleItem(item, environment, modsDir, stagingDir, allowOverwrite)) {
-            is SingleOutcome.Installed -> ModInstallOutcome.Success(listOf(outcome.entity))
-            is SingleOutcome.Restricted -> ModInstallOutcome.Restricted(
+        when (val outcome = stageAndVerifyItem(item, environment, modsDir, stagingDir, allowOverwrite)) {
+            is StageOutcome.Ready -> {
+                val committed = commitStagedBatch(listOf(outcome.artifact), allowOverwrite)
+                    ?: return@withContext ModInstallOutcome.Failed(
+                        "Failed to install verified mod into ${modsDir.absolutePath}",
+                        retryable = true
+                    )
+                ModInstallOutcome.Success(committed)
+            }
+            is StageOutcome.Restricted -> ModInstallOutcome.Restricted(
                 modName = mod.name,
                 reason = outcome.reason,
                 websiteUrl = outcome.websiteUrl
             )
-            is SingleOutcome.Cancelled -> ModInstallOutcome.Cancelled(file.fileName)
-            is SingleOutcome.Failed -> ModInstallOutcome.Failed(outcome.message, outcome.retryable)
+            is StageOutcome.Cancelled -> ModInstallOutcome.Cancelled(file.fileName)
+            is StageOutcome.Failed -> ModInstallOutcome.Failed(outcome.message, outcome.retryable)
         }
     }
 
-    private sealed interface SingleOutcome {
-        data class Installed(val entity: InstalledModEntity) : SingleOutcome
-        data class Restricted(val reason: String, val websiteUrl: String?) : SingleOutcome
-        data object Cancelled : SingleOutcome
-        data class Failed(val message: String, val retryable: Boolean) : SingleOutcome
+    private data class StagedModArtifact(
+        val item: PlannedModInstallItem,
+        val safeFileName: String,
+        val partFile: File,
+        val targetFile: File,
+        val disabledTarget: File,
+        val initialEntity: DownloadTaskEntity,
+        val entity: InstalledModEntity
+    )
+
+    private sealed interface StageOutcome {
+        data class Ready(val artifact: StagedModArtifact) : StageOutcome
+        data class Restricted(val reason: String, val websiteUrl: String?) : StageOutcome
+        data object Cancelled : StageOutcome
+        data class Failed(val message: String, val retryable: Boolean) : StageOutcome
     }
 
-    private suspend fun installSingleItem(
+    private suspend fun commitStagedBatch(
+        artifacts: List<StagedModArtifact>,
+        allowOverwrite: Boolean
+    ): List<InstalledModEntity>? {
+        val promoted = mutableListOf<Pair<StagedModArtifact, File?>>()
+        try {
+            val installed = mutableListOf<InstalledModEntity>()
+            for (artifact in artifacts) {
+                val file = artifact.item.file
+                val mod = artifact.item.mod
+                updateProgress(
+                    ModDownloadProgressItem(
+                        modId = file.modId,
+                        fileId = file.id,
+                        fileName = artifact.safeFileName,
+                        displayName = mod?.name ?: file.displayName,
+                        instanceId = artifact.entity.instanceId,
+                        phase = ModDownloadPhase.INSTALLING,
+                        downloadedBytes = artifact.partFile.length(),
+                        totalBytes = artifact.partFile.length(),
+                        taskId = artifact.initialEntity.taskId
+                    )
+                )
+
+                var backupFile: File? = null
+                if (allowOverwrite) {
+                    if (artifact.targetFile.exists()) {
+                        backupFile = File(artifact.partFile.parentFile, "${artifact.partFile.name}.bak").apply {
+                            delete()
+                        }
+                        if (!artifact.targetFile.renameTo(backupFile)) {
+                            artifact.targetFile.delete()
+                            backupFile = null
+                        }
+                    }
+                    if (artifact.disabledTarget.exists()) {
+                        artifact.disabledTarget.delete()
+                    }
+                } else if (artifact.targetFile.exists() || artifact.disabledTarget.exists()) {
+                    throw IOException("Target file '${artifact.safeFileName}' already exists in mods directory.")
+                }
+
+                val moved = artifact.partFile.renameTo(artifact.targetFile) || run {
+                    artifact.partFile.copyTo(artifact.targetFile, overwrite = allowOverwrite)
+                    artifact.partFile.delete()
+                    artifact.targetFile.isFile
+                }
+                if (!moved) {
+                    backupFile?.renameTo(artifact.targetFile)
+                    throw IOException("Failed to move verified mod into ${artifact.targetFile.absolutePath}")
+                }
+                promoted += artifact to backupFile
+
+                val finalSize = artifact.targetFile.length()
+                val finalizedEntity = artifact.entity.copy(fileSizeBytes = finalSize)
+                installedModDao.upsert(finalizedEntity)
+                downloadTaskDao.upsert(
+                    artifact.initialEntity.copy(
+                        downloadedBytes = finalSize,
+                        totalBytes = finalSize,
+                        status = DownloadStatus.COMPLETED,
+                        errorMessage = null,
+                        updatedAt = clockMillis()
+                    )
+                )
+                updateProgress(
+                    ModDownloadProgressItem(
+                        modId = file.modId,
+                        fileId = file.id,
+                        fileName = artifact.safeFileName,
+                        displayName = mod?.name ?: file.displayName,
+                        instanceId = finalizedEntity.instanceId,
+                        phase = ModDownloadPhase.COMPLETED,
+                        downloadedBytes = finalSize,
+                        totalBytes = finalSize,
+                        taskId = artifact.initialEntity.taskId
+                    )
+                )
+                installed += finalizedEntity
+            }
+            promoted.forEach { (_, backup) -> backup?.delete() }
+            return installed
+        } catch (t: Throwable) {
+            for ((artifact, backup) in promoted.asReversed()) {
+                artifact.targetFile.delete()
+                backup?.renameTo(artifact.targetFile)
+                runCatching {
+                    installedModDao.deleteByFileName(artifact.entity.instanceId, artifact.safeFileName)
+                }
+            }
+            artifacts.forEach { it.partFile.delete() }
+            return null
+        }
+    }
+
+    private suspend fun stageAndVerifyItem(
         item: PlannedModInstallItem,
         environment: InstanceEnvironment,
         modsDir: File,
         stagingDir: File,
         allowOverwrite: Boolean
-    ): SingleOutcome {
+    ): StageOutcome {
         val file = item.file
         val mod = item.mod
         val safeFileName = sanitizeModFileName(file.fileName)
@@ -231,11 +350,11 @@ class ModDownloadInstaller(
         val canonicalModsDir = modsDir.canonicalPath
         val canonicalTarget = targetFile.canonicalPath
         if (!canonicalTarget.startsWith(canonicalModsDir + File.separator)) {
-            return SingleOutcome.Failed("Invalid mod target path for '${file.fileName}'.", retryable = false)
+            return StageOutcome.Failed("Invalid mod target path for '${file.fileName}'.", retryable = false)
         }
 
         if (!allowOverwrite && (targetFile.exists() || disabledTarget.exists())) {
-            return SingleOutcome.Failed(
+            return StageOutcome.Failed(
                 "File '$safeFileName' already exists in '${environment.instanceName}'. Confirm replace or update to overwrite.",
                 retryable = false
             )
@@ -269,7 +388,7 @@ class ModDownloadInstaller(
                     errorMessage = err.message ?: "Failed to resolve download URL"
                 )
             )
-            return SingleOutcome.Failed(err.message ?: "Failed to resolve download URL", retryable = true)
+            return StageOutcome.Failed(err.message ?: "Failed to resolve download URL", retryable = true)
         }) {
             is CurseForgeDownloadUrlResult.Available -> urlResult.url
             is CurseForgeDownloadUrlResult.Restricted -> {
@@ -285,12 +404,16 @@ class ModDownloadInstaller(
                         restrictedWebsiteUrl = urlResult.websiteUrl
                     )
                 )
-                return SingleOutcome.Restricted(urlResult.reason, urlResult.websiteUrl)
+                return StageOutcome.Restricted(urlResult.reason, urlResult.websiteUrl)
             }
         }
 
         val taskId = idGenerator()
-        val partFile = File(stagingDir, "mod_${file.id}_$taskId.part")
+        // Deterministic .part filename enables HTTP Range resume on retry.
+        val partFile = File(stagingDir, "mod_${file.id}.part")
+        if (file.fileLengthBytes > 0L && partFile.isFile && partFile.length() > file.fileLengthBytes) {
+            partFile.delete()
+        }
         val initialEntity = DownloadTaskEntity(
             taskId = taskId,
             instanceId = environment.instanceId,
@@ -372,56 +495,29 @@ class ModDownloadInstaller(
                 )
             )
 
-            // Integrity checks: non-empty + exact fileLength + SHA-1 + MD5
+            // Integrity checks: non-empty + exact fileLength + SHA-1 + MD5 + valid JAR/ZIP container
             if (!partFile.isFile || partFile.length() <= 0L) {
-                throw IOException("Downloaded mod file is empty.")
+                throw CorruptArtifactException("Downloaded mod file is empty.")
             }
             if (file.fileLengthBytes > 0L && partFile.length() != file.fileLengthBytes) {
-                throw IOException(
+                throw CorruptArtifactException(
                     "File size mismatch: expected ${file.fileLengthBytes} bytes, got ${partFile.length()} bytes."
                 )
             }
             file.sha1?.let { expectedSha1 ->
                 val actualSha1 = computeDigestHex(partFile, "SHA-1")
                 if (!actualSha1.equals(expectedSha1, ignoreCase = true)) {
-                    throw IOException("SHA-1 verification failed for '$safeFileName'.")
+                    throw CorruptArtifactException("SHA-1 verification failed for '$safeFileName'.")
                 }
             }
             file.md5?.let { expectedMd5 ->
                 val actualMd5 = computeDigestHex(partFile, "MD5")
                 if (!actualMd5.equals(expectedMd5, ignoreCase = true)) {
-                    throw IOException("MD5 verification failed for '$safeFileName'.")
+                    throw CorruptArtifactException("MD5 verification failed for '$safeFileName'.")
                 }
             }
-
-            updateProgress(
-                ModDownloadProgressItem(
-                    modId = file.modId,
-                    fileId = file.id,
-                    fileName = safeFileName,
-                    displayName = mod?.name ?: file.displayName,
-                    instanceId = environment.instanceId,
-                    phase = ModDownloadPhase.INSTALLING,
-                    downloadedBytes = partFile.length(),
-                    totalBytes = partFile.length(),
-                    taskId = taskId
-                )
-            )
-
-            if (allowOverwrite) {
-                if (targetFile.exists()) targetFile.delete()
-                if (disabledTarget.exists()) disabledTarget.delete()
-            } else if (targetFile.exists() || disabledTarget.exists()) {
-                throw IOException("Target file '$safeFileName' already exists in mods directory.")
-            }
-
-            val moved = partFile.renameTo(targetFile) || run {
-                partFile.copyTo(targetFile, overwrite = allowOverwrite)
-                partFile.delete()
-                targetFile.isFile
-            }
-            if (!moved) {
-                throw IOException("Failed to move verified mod into ${targetFile.absolutePath}")
+            if (!JarModMetadataParser.isValidZipArchive(partFile)) {
+                throw CorruptArtifactException("Downloaded file '$safeFileName' is not a valid JAR/ZIP archive.")
             }
 
             val entity = InstalledModEntity(
@@ -434,37 +530,24 @@ class ModDownloadInstaller(
                 installedVersionLabel = file.displayName,
                 mcVersionHint = file.declaredMinecraftVersions.firstOrNull() ?: environment.baseMinecraftVersion,
                 loaderType = mapLoaderToStar(file.declaredLoaders, environment.loaderType),
-                sha1 = file.sha1 ?: computeDigestHex(targetFile, "SHA-1"),
-                fileSizeBytes = targetFile.length(),
+                sha1 = file.sha1 ?: computeDigestHex(partFile, "SHA-1"),
+                fileSizeBytes = partFile.length(),
                 allowModDistribution = mod?.allowModDistribution,
                 websiteUrl = mod?.links?.websiteUrl,
                 iconUrl = mod?.logo?.thumbnailUrl ?: mod?.logo?.url,
                 installedAt = clockMillis()
             )
-            installedModDao.upsert(entity)
-            downloadTaskDao.upsert(
-                initialEntity.copy(
-                    downloadedBytes = targetFile.length(),
-                    totalBytes = targetFile.length(),
-                    status = DownloadStatus.COMPLETED,
-                    errorMessage = null,
-                    updatedAt = clockMillis()
+            StageOutcome.Ready(
+                StagedModArtifact(
+                    item = item,
+                    safeFileName = safeFileName,
+                    partFile = partFile,
+                    targetFile = targetFile,
+                    disabledTarget = disabledTarget,
+                    initialEntity = initialEntity,
+                    entity = entity
                 )
             )
-            updateProgress(
-                ModDownloadProgressItem(
-                    modId = file.modId,
-                    fileId = file.id,
-                    fileName = safeFileName,
-                    displayName = mod?.name ?: file.displayName,
-                    instanceId = environment.instanceId,
-                    phase = ModDownloadPhase.COMPLETED,
-                    downloadedBytes = targetFile.length(),
-                    totalBytes = targetFile.length(),
-                    taskId = taskId
-                )
-            )
-            SingleOutcome.Installed(entity)
         } catch (ce: CancellationException) {
             partFile.delete()
             downloadTaskDao.upsert(
@@ -486,12 +569,15 @@ class ModDownloadInstaller(
                     taskId = taskId
                 )
             )
-            SingleOutcome.Cancelled
+            StageOutcome.Cancelled
         } catch (t: Throwable) {
-            partFile.delete()
+            if (t is CorruptArtifactException) {
+                partFile.delete()
+            }
             val message = t.message ?: t::class.java.simpleName
             downloadTaskDao.upsert(
                 initialEntity.copy(
+                    downloadedBytes = partFile.takeIf { it.isFile }?.length() ?: 0L,
                     status = DownloadStatus.FAILED,
                     retryCount = initialEntity.retryCount + 1,
                     errorMessage = message,
@@ -506,13 +592,17 @@ class ModDownloadInstaller(
                     displayName = mod?.name ?: file.displayName,
                     instanceId = environment.instanceId,
                     phase = ModDownloadPhase.FAILED,
+                    downloadedBytes = partFile.takeIf { it.isFile }?.length() ?: 0L,
+                    totalBytes = file.fileLengthBytes.coerceAtLeast(0L),
                     errorMessage = message,
                     taskId = taskId
                 )
             )
-            SingleOutcome.Failed(message, retryable = true)
+            StageOutcome.Failed(message, retryable = true)
         }
     }
+
+    private class CorruptArtifactException(message: String) : IOException(message)
 
     private fun isFileCancelled(fileId: Long): Boolean =
         synchronized(cancelledFileIds) { fileId in cancelledFileIds }

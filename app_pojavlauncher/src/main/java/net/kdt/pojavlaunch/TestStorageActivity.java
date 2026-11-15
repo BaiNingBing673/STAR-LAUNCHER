@@ -14,13 +14,16 @@ import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.star.launcher.diagnostics.StartupProfiler;
 import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 import net.kdt.pojavlaunch.tasks.AsyncAssetManager;
 
 public class TestStorageActivity extends Activity {
     private final int REQUEST_STORAGE_REQUEST_CODE = 1;
+    private boolean mRequestedOnce = false;
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
+        StartupProfiler.markAppStart();
         super.onCreate(savedInstanceState);
         if(Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT < 29 && !isStorageAllowed(this)) requestStoragePermission();
         else exit();
@@ -34,7 +37,14 @@ public class TestStorageActivity extends Activity {
                 exit();
             } else {
                 Toast.makeText(this, R.string.toast_permission_denied, Toast.LENGTH_LONG).show();
-                requestStoragePermission();
+                boolean canAskAgain = ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.WRITE_EXTERNAL_STORAGE);
+                if (canAskAgain && !mRequestedOnce) {
+                    mRequestedOnce = true;
+                    requestStoragePermission();
+                } else {
+                    startActivity(new Intent(this, MissingStorageActivity.class));
+                    finish();
+                }
             }
         }
     }
@@ -57,14 +67,17 @@ public class TestStorageActivity extends Activity {
     }
 
     private void exit() {
+        final long gateStart = StartupProfiler.beginStage();
         if(!Tools.checkStorageRoot(this)) {
             startActivity(new Intent(this, MissingStorageActivity.class));
+            finish();
             return;
         }
         //Initialize constants (implicitly) and preferences after we confirm that we have storage.
         LauncherPreferences.loadPreferences(this);
         AsyncAssetManager.unpackComponents(this);
         AsyncAssetManager.unpackSingleFiles(this);
+        StartupProfiler.endStage("test_storage_gate", gateStart);
 
         Intent intent = com.star.launcher.ui.dashboard.AetherDashboardActivity.createIntent(this);
         startActivity(intent);

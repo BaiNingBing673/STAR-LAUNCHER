@@ -44,18 +44,36 @@ public class FabriclikeDownloadTask implements Runnable, Tools.DownloaderFeedbac
 
     private boolean runCatching() throws IOException{
         String fabricJson = DownloadUtils.downloadString(mUtils.createJsonDownloadUrl(mGameVersion, mLoaderVersion));
+        if (fabricJson == null || fabricJson.trim().isEmpty()) {
+            return false;
+        }
         String versionId;
         try {
             JSONObject fabricJsonObject = new JSONObject(fabricJson);
-            versionId = fabricJsonObject.getString("id");
+            versionId = fabricJsonObject.getString("id").trim();
+            if (versionId.isEmpty() || versionId.contains("/") || versionId.contains("\\") || versionId.contains("..")) {
+                return false;
+            }
+            if (fabricJsonObject.optString("mainClass", "").isEmpty() || !fabricJsonObject.has("libraries")) {
+                return false;
+            }
         }catch (JSONException e) {
             e.printStackTrace();
             return false;
         }
         File versionJsonDir = new File(Tools.DIR_HOME_VERSION, versionId);
         File versionJsonFile = new File(versionJsonDir, versionId+".json");
+        File stagingFile = new File(versionJsonDir, versionId+".json.part");
         FileUtils.ensureDirectory(versionJsonDir);
-        Tools.write(versionJsonFile.getAbsolutePath(), fabricJson);
+        Tools.write(stagingFile.getAbsolutePath(), fabricJson);
+        if (versionJsonFile.exists() && !versionJsonFile.delete()) {
+            stagingFile.delete();
+            throw new IOException("Unable to overwrite version manifest: " + versionJsonFile.getAbsolutePath());
+        }
+        if (!stagingFile.renameTo(versionJsonFile)) {
+            Tools.write(versionJsonFile.getAbsolutePath(), fabricJson);
+            stagingFile.delete();
+        }
         if(mCreateProfile) {
             LauncherProfiles.load();
             MinecraftProfile fabricProfile = new MinecraftProfile();

@@ -28,8 +28,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class MultiRTUtils {
 
@@ -67,7 +67,7 @@ public class MultiRTUtils {
         }
     }
 
-    private static final HashMap<String,Runtime> sCache = new HashMap<>();
+    private static final ConcurrentHashMap<String, Runtime> sCache = new ConcurrentHashMap<>();
 
     private static final String JAVA_VERSION_STR = "JAVA_VERSION=\"";
     private static final String OS_ARCH_STR = "OS_ARCH=\"";
@@ -105,7 +105,7 @@ public class MultiRTUtils {
     public static List<Runtime> getInstalledCompatibleRuntimes() {
         ArrayList<Runtime> compatible = new ArrayList<>();
         for (Runtime runtime : getInstalledRuntimes()) {
-            RuntimeValidationReport report = inspectRuntime(runtime.name, 0, true);
+            RuntimeValidationReport report = inspectRuntime(runtime.name, 0, false);
             if (report.status == RuntimeValidationStatus.VALID) {
                 compatible.add(report.runtime);
             }

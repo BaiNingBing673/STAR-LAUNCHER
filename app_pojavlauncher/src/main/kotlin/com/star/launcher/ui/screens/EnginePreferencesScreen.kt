@@ -32,6 +32,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import com.star.launcher.compat.AdaptiveGraphicsManager
+import com.star.launcher.compat.AndroidDeviceCapabilityProbe
+import com.star.launcher.compat.GraphicsPreset
 import com.star.launcher.engine.adapter.EnginePreferencesAdapter
 import com.star.launcher.engine.adapter.EnginePreferencesSnapshot
 import com.star.launcher.ui.components.AetherAccentCard
@@ -56,6 +59,7 @@ fun EnginePreferencesScreen(
     onOpenGamepadMapper: () -> Unit,
     onStatusMessage: (String) -> Unit,
     onPreferencesUpdated: () -> Unit,
+    onOpenHudCustomization: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -147,6 +151,71 @@ fun EnginePreferencesScreen(
 
         if (showCategory(PreferenceCategory.VIDEO)) {
             item {
+                val deviceCaps = remember { AndroidDeviceCapabilityProbe(context).probe() }
+                val recommendation = remember(deviceCaps) { AdaptiveGraphicsManager.recommend(deviceCaps) }
+                var activePreset by remember { mutableStateOf(AdaptiveGraphicsManager.getCurrentPreset(context)) }
+                var lowEndMode by remember { mutableStateOf(AdaptiveGraphicsManager.isLowEndModeEnabled(context)) }
+                AetherAccentCard(accentColor = AetherColors.TertiaryDark) {
+                    Text(
+                        text = "Adaptive Graphics & Low-End Mode",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = AetherColors.OnBackgroundDark
+                    )
+                    Text(
+                        text = "Detected: ${deviceCaps.cpuCoreCount} cores · ${deviceCaps.gpuRenderer} · ${deviceCaps.totalRamMb} MB RAM · Recommended: ${recommendation.preset.label}",
+                        style = AetherMonoStyle.copy(color = AetherColors.TertiaryDark)
+                    )
+                    Text(
+                        text = activePreset.summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AetherColors.OnSurfaceVariantDark
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
+                        verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+                    ) {
+                        listOf(
+                            GraphicsPreset.ULTRA_LOW,
+                            GraphicsPreset.PERFORMANCE,
+                            GraphicsPreset.BALANCED,
+                            GraphicsPreset.QUALITY
+                        ).forEach { preset ->
+                            FilterChip(
+                                selected = activePreset == preset,
+                                onClick = {
+                                    AdaptiveGraphicsManager.applyPreset(context, preset, deviceCaps)
+                                    activePreset = preset
+                                    lowEndMode = AdaptiveGraphicsManager.isLowEndModeEnabled(context)
+                                    prefs = EnginePreferencesAdapter.readSnapshot(context)
+                                    onPreferencesUpdated()
+                                    onStatusMessage("Applied ${preset.label} preset to Minecraft & launcher settings")
+                                },
+                                label = {
+                                    val recSuffix = if (preset == recommendation.preset) " (Rec)" else ""
+                                    Text("${preset.label}$recSuffix")
+                                }
+                            )
+                        }
+                    }
+                    SwitchPreferenceRow(
+                        title = "Low-End Compatibility Mode",
+                        subtitle = "Caps JVM heap conservatively, trims GLSL cache, and lowers visual load",
+                        checked = lowEndMode,
+                        onCheckedChange = { enabled ->
+                            AdaptiveGraphicsManager.setLowEndMode(context, enabled)
+                            lowEndMode = enabled
+                            prefs = EnginePreferencesAdapter.readSnapshot(context)
+                            onPreferencesUpdated()
+                            onStatusMessage(
+                                if (enabled) "Low-End Compatibility Mode enabled"
+                                else "Low-End Compatibility Mode disabled"
+                            )
+                        }
+                    )
+                }
+            }
+
+            item {
                 AetherAccentCard(accentColor = AetherColors.AccentCyan) {
                     Text(
                         text = "Video & Renderer",
@@ -176,8 +245,71 @@ fun EnginePreferencesScreen(
                         value = prefs.resolutionRatioPercent,
                         unit = "%",
                         range = 25f..150f,
-                        onCommit = { updateInt("resolutionRatio", it) }
+                        onCommit = {
+                            AdaptiveGraphicsManager.markCustomOverride(context)
+                            updateInt("resolutionRatio", it)
+                        }
                     )
+
+                    Text(
+                        text = "Target Frame Rate (FPS Limit)",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = AetherColors.OnSurfaceDark
+                    )
+                    val presetFpsOptions = remember { listOf(0, 30, 60, 90, 120) }
+                    val isCustomFps = prefs.fpsLimit > 0 && prefs.fpsLimit !in presetFpsOptions
+                    var customFpsText by remember(prefs.fpsLimit) {
+                        mutableStateOf(if (prefs.fpsLimit > 0) prefs.fpsLimit.toString() else "75")
+                    }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
+                        verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+                    ) {
+                        presetFpsOptions.forEach { target ->
+                            FilterChip(
+                                selected = prefs.fpsLimit == target,
+                                onClick = {
+                                    AdaptiveGraphicsManager.markCustomOverride(context)
+                                    updateInt("fpsLimit", target)
+                                },
+                                label = { Text(if (target == 0) "Unlimited" else "${target} FPS") }
+                            )
+                        }
+                        FilterChip(
+                            selected = isCustomFps,
+                            onClick = {
+                                val parsed = customFpsText.toIntOrNull()?.coerceIn(10, 260) ?: 75
+                                updateInt("fpsLimit", parsed)
+                            },
+                            label = { Text("Custom") }
+                        )
+                    }
+                    if (isCustomFps) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = customFpsText,
+                                onValueChange = { raw ->
+                                    customFpsText = raw.filter { it.isDigit() }.take(3)
+                                },
+                                label = { Text("Custom FPS (10-260)") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            AetherTonalButton(
+                                text = "Apply",
+                                onClick = {
+                                    val parsed = (customFpsText.toIntOrNull() ?: 60).coerceIn(10, 260)
+                                    customFpsText = parsed.toString()
+                                    updateInt("fpsLimit", parsed)
+                                    onStatusMessage("FPS limit set to $parsed")
+                                }
+                            )
+                        }
+                    }
 
                     if (prefs.notchAvailable) {
                         SwitchPreferenceRow(
@@ -199,14 +331,12 @@ fun EnginePreferencesScreen(
                         checked = prefs.alternateSurface,
                         onCheckedChange = { updateBool("alternate_surface", it) }
                     )
-                    if (prefs.alternateSurface) {
-                        SwitchPreferenceRow(
-                            title = "Force VSync",
-                            subtitle = "Synchronize frame presentation with display refresh",
-                            checked = prefs.forceVsync,
-                            onCheckedChange = { updateBool("force_vsync", it) }
-                        )
-                    }
+                    SwitchPreferenceRow(
+                        title = "Force VSync",
+                        subtitle = "Synchronize swap interval with display refresh (disable for unlocked FPS)",
+                        checked = prefs.forceVsync,
+                        onCheckedChange = { updateBool("force_vsync", it) }
+                    )
                     SwitchPreferenceRow(
                         title = "VSync in Zink",
                         subtitle = "Enable FIFO/VSync when using Vulkan Zink renderer",
@@ -320,6 +450,13 @@ fun EnginePreferencesScreen(
                         style = MaterialTheme.typography.titleLarge,
                         color = AetherColors.OnSurfaceDark
                     )
+                    AetherTonalButton(
+                        text = "STAR Touch HUD Studio",
+                        icon = AetherIcons.Controls,
+                        onClick = onOpenHudCustomization,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(AetherSpacing.Xs))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)

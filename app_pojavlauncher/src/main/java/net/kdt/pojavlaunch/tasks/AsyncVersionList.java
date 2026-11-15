@@ -49,10 +49,10 @@ public class AsyncVersionList {
 
     @Nullable
     private JMinecraftVersionList loadVersionListSync(boolean secondPass) {
-        File versionFile = new File(Tools.DIR_CACHE + "/version_list.json");
+        File versionFile = Tools.DIR_CACHE != null ? new File(Tools.DIR_CACHE, "version_list.json") : null;
         JMinecraftVersionList versionList = null;
         try {
-            if (!versionFile.exists() || (System.currentTimeMillis() > versionFile.lastModified() + 86400000)) {
+            if (versionFile == null || !versionFile.exists() || (System.currentTimeMillis() > versionFile.lastModified() + 86400000)) {
                 versionList = downloadVersionList(LauncherPreferences.PREF_VERSION_REPOS);
             }
         } catch (Exception e) {
@@ -61,7 +61,7 @@ public class AsyncVersionList {
         }
 
         // Fallback when no network or not needed
-        if (versionList == null && versionFile.exists()) {
+        if (versionList == null && versionFile != null && versionFile.exists()) {
             try {
                 versionList = Tools.GLOBAL_GSON.fromJson(new JsonReader(new FileReader(versionFile)), JMinecraftVersionList.class);
             } catch (FileNotFoundException e) {
@@ -89,11 +89,20 @@ public class AsyncVersionList {
             Log.i("ExtVL","Downloaded the version list, len=" + list.versions.length);
 
             // Then save the version list
-            File versionFile = new File(Tools.DIR_CACHE + "/version_list.json");
-            if (versionFile.getParentFile() != null) versionFile.getParentFile().mkdirs();
-            FileOutputStream fos = new FileOutputStream(versionFile);
-            fos.write(jsonString.getBytes());
-            fos.close();
+            if (Tools.DIR_CACHE != null) {
+                File versionFile = new File(Tools.DIR_CACHE, "version_list.json");
+                if (versionFile.getParentFile() != null) versionFile.getParentFile().mkdirs();
+                File tmpFile = new File(Tools.DIR_CACHE, "version_list.json.part");
+                try (FileOutputStream fos = new FileOutputStream(tmpFile)) {
+                    fos.write(jsonString.getBytes());
+                }
+                if (!tmpFile.renameTo(versionFile)) {
+                    try (FileOutputStream fos = new FileOutputStream(versionFile)) {
+                        fos.write(jsonString.getBytes());
+                    }
+                    tmpFile.delete();
+                }
+            }
 
 
 

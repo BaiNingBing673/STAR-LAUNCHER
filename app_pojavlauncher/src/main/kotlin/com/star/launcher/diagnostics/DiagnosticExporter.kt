@@ -53,6 +53,9 @@ class DiagnosticExporter(
             sb.appendLine("${entry.timestampMs} [${entry.level}/${entry.sourceTag}] ${SensitiveLogRedactor.redact(entry.messageRedacted)}")
         }
         sb.appendLine()
+        sb.appendLine("[Startup & Launch Timing Profile]")
+        sb.appendLine(StartupProfiler.formatSummaryReport())
+        sb.appendLine()
         sb.appendLine("[latestlog.txt Tail (Redacted)]")
         if (latestLogFile.isFile) {
             val tail = latestLogFile.readLines().takeLast(maxLogLines)

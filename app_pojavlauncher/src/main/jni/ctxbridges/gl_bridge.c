@@ -57,16 +57,37 @@ static void gl4esi_get_display_dimensions(int* width, int* height) {
 
 gl_render_window_t* gl_init_context(gl_render_window_t *share) {
     gl_render_window_t* bundle = malloc(sizeof(gl_render_window_t));
+    if (bundle == NULL) return NULL;
     memset(bundle, 0, sizeof(gl_render_window_t));
-    // Should fix old Angelica wanting no ES bit. It'll still get it in opengles_nothing :p
-    int glBit = strncmp(getenv("AMETHYST_RENDERER"), "opengles3_desktopgl", 19) ?  EGL_OPENGL_ES3_BIT : EGL_OPENGL_BIT;
-    EGLint egl_attributes[] = { EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 24, EGL_SURFACE_TYPE, EGL_WINDOW_BIT|EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
+    const char *renderer = getenv("AMETHYST_RENDERER");
+    const char *env_libgl_es = getenv("LIBGL_ES");
+    int libgl_es = env_libgl_es != NULL ? (int) strtol(env_libgl_es, NULL, 0) : 2;
+    if (libgl_es < 0 || libgl_es > INT16_MAX) libgl_es = 2;
+
+    int glBit = (renderer != NULL && strncmp(renderer, "opengles3_desktopgl", 19) == 0)
+            ? EGL_OPENGL_BIT
+            : (libgl_es >= 3 ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT);
+    EGLint egl_attributes[] = {
+            EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_ALPHA_SIZE, 8,
+            EGL_DEPTH_SIZE, 24, EGL_SURFACE_TYPE, EGL_WINDOW_BIT|EGL_PBUFFER_BIT,
+            EGL_RENDERABLE_TYPE, glBit, EGL_NONE
+    };
     EGLint num_configs = 0;
 
-    if (eglChooseConfig_p(g_EglDisplay, egl_attributes, NULL, 0, &num_configs) != EGL_TRUE) {
-        LOGE("eglChooseConfig_p() failed: %04x", eglGetError_p());
-        free(bundle);
-        return NULL;
+    if (eglChooseConfig_p(g_EglDisplay, egl_attributes, NULL, 0, &num_configs) != EGL_TRUE || num_configs == 0) {
+        if (glBit != EGL_OPENGL_ES2_BIT) {
+            egl_attributes[13] = EGL_OPENGL_ES2_BIT;
+            num_configs = 0;
+            if (eglChooseConfig_p(g_EglDisplay, egl_attributes, NULL, 0, &num_configs) != EGL_TRUE) {
+                LOGE("eglChooseConfig_p() failed: %04x", eglGetError_p());
+                free(bundle);
+                return NULL;
+            }
+        } else {
+            LOGE("eglChooseConfig_p() failed: %04x", eglGetError_p());
+            free(bundle);
+            return NULL;
+        }
     }
     if (num_configs == 0) {
         LOGE("%s", "eglChooseConfig_p() found no matching config");
@@ -80,7 +101,7 @@ gl_render_window_t* gl_init_context(gl_render_window_t *share) {
 
     {
         EGLBoolean bindResult;
-        if (strncmp(getenv("AMETHYST_RENDERER"), "opengles3_desktopgl", 19) == 0) {
+        if (renderer != NULL && strncmp(renderer, "opengles3_desktopgl", 19) == 0) {
             printf("EGLBridge: Binding to desktop OpenGL\n");
             bindResult = eglBindAPI_p(EGL_OPENGL_API);
         } else {
@@ -90,8 +111,6 @@ gl_render_window_t* gl_init_context(gl_render_window_t *share) {
         if (!bindResult) printf("EGLBridge: bind failed: %p\n", eglGetError_p());
     }
 
-    int libgl_es = strtol(getenv("LIBGL_ES"), NULL, 0);
-    if(libgl_es < 0 || libgl_es > INT16_MAX) libgl_es = 2;
     const EGLint egl_context_attributes[] = { EGL_CONTEXT_CLIENT_VERSION, libgl_es, EGL_NONE };
     bundle->context = eglCreateContext_p(g_EglDisplay, bundle->config, share == NULL ? EGL_NO_CONTEXT : share->context, egl_context_attributes);
 
@@ -104,22 +123,17 @@ gl_render_window_t* gl_init_context(gl_render_window_t *share) {
 }
 
 void gl_swap_surface(gl_render_window_t* bundle) {
-    /*
-     * In some cases (see MinecraftGLSurface.start(), android kills the surface automatically for
-     * us, if we try to release/destroy it, we SIGSEGV. Check if we are -19x-19 or some other
-     * invalid value and skip the release because Android decided to handle releasing it for us.
-     * This goes against every piece of documentation I have ever seen but who actually reads those?
-     *
-     * Some drivers take forever to properly destroy the surface, they do it part at a time or
-     * some other garbage while SIGSEGVing us if we try releasing while they're in the middle of
-     * turning the surface dead. This makes the width and height make it look valid when it actually
-     * isn't so we wait for them and hope there is no race condition of both us and Android trying
-     * to release the surface. This seems driver dependent as AVD and Waydroid do not need 0.75s
-     * to set the bloody height and width to their proper values. They just do it, instantly.
-     */
-    usleep(750000); // An overkill amount of time to wait for a surface to finish dying
-    int32_t nativeWindowWidth = ANativeWindow_getWidth(pojav_environ->pojavWindow);
-    int32_t nativeWindowHeight = ANativeWindow_getHeight(pojav_environ->pojavWindow);
+    if (bundle->nativeSurface != NULL && pojav_environ->pojavWindow != NULL) {
+        int32_t w = ANativeWindow_getWidth(pojav_environ->pojavWindow);
+        int32_t h = ANativeWindow_getHeight(pojav_environ->pojavWindow);
+        for (int attempt = 0; attempt < 5 && (w <= 0 || h <= 0); attempt++) {
+            usleep(10000);
+            w = ANativeWindow_getWidth(pojav_environ->pojavWindow);
+            h = ANativeWindow_getHeight(pojav_environ->pojavWindow);
+        }
+    }
+    int32_t nativeWindowWidth = pojav_environ->pojavWindow != NULL ? ANativeWindow_getWidth(pojav_environ->pojavWindow) : 0;
+    int32_t nativeWindowHeight = pojav_environ->pojavWindow != NULL ? ANativeWindow_getHeight(pojav_environ->pojavWindow) : 0;
     if ((nativeWindowWidth > 0) || (nativeWindowHeight > 0)) {
         LOGI("Native surface dimensions (%d x %d)\n",
              nativeWindowWidth, nativeWindowHeight);

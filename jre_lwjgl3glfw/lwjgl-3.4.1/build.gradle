@@ -32,7 +32,9 @@ jar {
             "lwjgl-spvc.jar",
             "lwjgl-vma.jar",
             "lwjgl-vulkan.jar",
-            "lwjgl-sdl.jar",
+            // Merged into lwjgl-3.4.1-merged-modules.jar because src/main/java/org/lwjgl/sdl patches SDLInit/SDLMouse;
+            // keeping lwjgl-sdl.jar separate causes a JPMS split-package ResolutionException under Forge 26.3.
+            //"lwjgl-sdl.jar",
             "lwjgl-spng.jar"
     ]
 

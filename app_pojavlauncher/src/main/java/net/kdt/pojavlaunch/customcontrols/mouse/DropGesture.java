@@ -1,8 +1,8 @@
 package net.kdt.pojavlaunch.customcontrols.mouse;
 
-import static org.lwjgl.glfw.CallbackBridge.sendKeyPress;
-
 import android.os.Handler;
+
+import com.star.launcher.hud.StarHudInputManager;
 
 import net.kdt.pojavlaunch.LwjglGlfwKeycode;
 import net.kdt.pojavlaunch.prefs.LauncherPreferences;
@@ -30,7 +30,13 @@ public class DropGesture implements Runnable{
     @Override
     public void run() {
         if(!mActive) return;
-        sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_Q);
+        StarHudInputManager.getInstance().tapKey(
+                "hotbar_drop_gesture",
+                -1,
+                "DROP_ITEM",
+                LwjglGlfwKeycode.GLFW_KEY_Q,
+                false
+        );
         mHandler.postDelayed(this, 250);
     }
 }

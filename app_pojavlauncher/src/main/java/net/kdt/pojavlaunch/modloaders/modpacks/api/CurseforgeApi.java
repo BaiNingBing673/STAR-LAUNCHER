@@ -74,20 +74,28 @@ public class CurseforgeApi implements ModpackApi{
         JsonObject paginationInfo = response.getAsJsonObject("pagination");
         ArrayList<ModItem> modItemList = new ArrayList<>(dataArray.size());
         for(int i = 0; i < dataArray.size(); i++) {
-            JsonObject dataElement = dataArray.get(i).getAsJsonObject();
+            JsonElement rawElement = dataArray.get(i);
+            if(rawElement == null || !rawElement.isJsonObject()) continue;
+            JsonObject dataElement = rawElement.getAsJsonObject();
             JsonElement allowModDistribution = dataElement.get("allowModDistribution");
+            String modName = GsonJsonUtils.getStringSafe(dataElement, "name");
             // Gson automatically casts null to false, which leans to issues
             // So, only check the distribution flag if it is non-null
-            if(!allowModDistribution.isJsonNull() && !allowModDistribution.getAsBoolean()) {
-                Log.i("CurseforgeApi", "Skipping modpack "+dataElement.get("name").getAsString() + " because curseforge sucks");
+            if(allowModDistribution != null && !allowModDistribution.isJsonNull() && !allowModDistribution.getAsBoolean()) {
+                Log.i("CurseforgeApi", "Skipping modpack "+ modName + " because curseforge sucks");
                 continue;
             }
+            JsonObject logoObj = GsonJsonUtils.getJsonObjectSafe(dataElement, "logo");
+            String thumbnailUrl = logoObj != null ? GsonJsonUtils.getStringSafe(logoObj, "thumbnailUrl") : null;
+            String modId = GsonJsonUtils.getStringSafe(dataElement, "id");
+            String summary = GsonJsonUtils.getStringSafe(dataElement, "summary");
+            if(modId == null) continue;
             ModItem modItem = new ModItem(Constants.SOURCE_CURSEFORGE,
                     searchFilters.isModpack,
-                    dataElement.get("id").getAsString(),
-                    dataElement.get("name").getAsString(),
-                    dataElement.get("summary").getAsString(),
-                    dataElement.getAsJsonObject("logo").get("thumbnailUrl").getAsString());
+                    modId,
+                    modName != null ? modName : "Unnamed",
+                    summary != null ? summary : "",
+                    thumbnailUrl);
             modItemList.add(modItem);
         }
         if(curseforgeSearchResult == null) curseforgeSearchResult = new CurseforgeSearchResult();
@@ -117,12 +125,23 @@ public class CurseforgeApi implements ModpackApi{
         ModDetail.Dependencies[][] dependencies = new ModDetail.Dependencies[length][];
         for(int i = 0; i < allModDetails.size(); i++) {
             JsonObject modDetail = allModDetails.get(i);
-            versionNames[i] = modDetail.get("displayName").getAsString();
-            versionIds[i] = modDetail.get("id").getAsString();
-            JsonElement downloadUrl = modDetail.get("downloadUrl");
-            versionUrls[i] = downloadUrl.getAsString();
+            String displayName = GsonJsonUtils.getStringSafe(modDetail, "displayName");
+            String fileIdStr = GsonJsonUtils.getStringSafe(modDetail, "id");
+            String dlUrl = GsonJsonUtils.getStringSafe(modDetail, "downloadUrl");
+            if (dlUrl == null && fileIdStr != null) {
+                try {
+                    long parsedId = Long.parseLong(fileIdStr);
+                    String fileName = GsonJsonUtils.getStringSafe(modDetail, "fileName");
+                    if (fileName != null) {
+                        dlUrl = String.format("https://edge.forgecdn.net/files/%s/%s/%s", parsedId / 1000, parsedId % 1000, fileName);
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
+            versionNames[i] = displayName != null ? displayName : fileIdStr;
+            versionIds[i] = fileIdStr;
+            versionUrls[i] = dlUrl;
 
-            JsonArray gameVersions = modDetail.getAsJsonArray("gameVersions");
+            JsonArray gameVersions = GsonJsonUtils.getJsonArraySafe(modDetail, "gameVersions");
             try {
                 JsonArray dependenciesJsonArray = modDetail.getAsJsonArray("dependencies");
                 dependencies[i] = new ModDetail.Dependencies[dependenciesJsonArray.size()];
@@ -136,13 +155,16 @@ public class CurseforgeApi implements ModpackApi{
                     );
                 }
             } catch (Exception ignored) {}
-            for(JsonElement jsonElement : gameVersions) {
-                String gameVersion = jsonElement.getAsString();
-                if(!sMcVersionPattern.matcher(gameVersion).matches()) {
-                    continue;
+            if (gameVersions != null) {
+                for(JsonElement jsonElement : gameVersions) {
+                    if (jsonElement == null || jsonElement.isJsonNull()) continue;
+                    String gameVersion = jsonElement.getAsString();
+                    if(!sMcVersionPattern.matcher(gameVersion).matches()) {
+                        continue;
+                    }
+                    mcVersionNames[i] = gameVersion;
+                    break;
                 }
-                mcVersionNames[i] = gameVersion;
-                break;
             }
 
             hashes[i] = getSha1FromModData(modDetail);
@@ -156,16 +178,16 @@ public class CurseforgeApi implements ModpackApi{
         JsonObject data = GsonJsonUtils.getJsonObjectSafe(response, "data");
         if (data == null) return;
         if (item.title == null) {
-            JsonElement title = data.get("name");
-            item.title = title != null ? title.getAsString() : "";
+            item.title = GsonJsonUtils.getStringSafe(data, "name");
+            if (item.title == null) item.title = "";
         }
         if (item.description == null) {
-            JsonElement description = data.get("summary");
-            item.description = description != null ? description.getAsString() : "";
+            item.description = GsonJsonUtils.getStringSafe(data, "summary");
+            if (item.description == null) item.description = "";
         }
         if (item.imageUrl == null) {
-            JsonElement imageUrl = data.getAsJsonObject("logo").get("thumbnailUrl");
-            item.imageUrl = imageUrl != null ? imageUrl.getAsString() : null;
+            JsonObject logoObj = GsonJsonUtils.getJsonObjectSafe(data, "logo");
+            item.imageUrl = logoObj != null ? GsonJsonUtils.getStringSafe(logoObj, "thumbnailUrl") : null;
         }
     }
 
@@ -242,7 +264,8 @@ public class CurseforgeApi implements ModpackApi{
         }
         if(primaryModLoader == null) primaryModLoader = minecraft.modLoaders[0];
         String modLoaderId = primaryModLoader.id;
-        int dashIndex = modLoaderId.indexOf('-');
+        int dashIndex = modLoaderId != null ? modLoaderId.indexOf('-') : -1;
+        if(dashIndex <= 0 || dashIndex >= modLoaderId.length() - 1) return null;
         String modLoaderName = modLoaderId.substring(0, dashIndex);
         String modLoaderVersion = modLoaderId.substring(dashIndex+1);
         Log.i("CurseforgeApi", modLoaderId + " " + modLoaderName + " "+modLoaderVersion);

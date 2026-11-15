@@ -112,11 +112,17 @@ class AetherContainer(context: Context) {
     val curseForgeCredentialProvider: CurseForgeCredentialProvider by lazy {
         CurseForgeCredentialProvider(
             tokenVault = tokenVault,
-            settingsRepository = settingsRepository
+            settingsRepository = settingsRepository,
+            bundledApiKeyProvider = {
+                runCatching { appContext.getString(net.kdt.pojavlaunch.R.string.curseforge_api_key) }.getOrNull()
+            }
         )
     }
     val curseForgeRepository: CurseForgeRepository by lazy {
-        CurseForgeRepository(credentialProvider = curseForgeCredentialProvider)
+        CurseForgeRepository(
+            credentialProvider = curseForgeCredentialProvider,
+            enablePublicFallback = true
+        )
     }
     val instanceEnvironmentResolver: InstanceEnvironmentResolver by lazy {
         InstanceEnvironmentResolver(

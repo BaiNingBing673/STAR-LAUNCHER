@@ -141,6 +141,34 @@ class ModsNavigationAndUiTest {
             assertEquals("1.20.1", synced.instanceEnvironment?.baseMinecraftVersion)
             assertEquals(CurseForgeModLoader.FABRIC, synced.filterLoader)
             assertTrue(synced.availableInstances.size == 1)
+
+            // Non-distribution 403 maps to UNAUTHORIZED with actionable message so user sees Configure API
+            val rejectedRepo = CurseForgeRepository(cred, object : CurseForgeTransport {
+                override suspend fun get(url: String, headers: Map<String, String>): CurseForgeHttpResponse =
+                    CurseForgeHttpResponse(403, "Forbidden: API Key missing or invalid")
+            })
+            val rejectedController = ModsController(
+                credentialProvider = cred,
+                repository = rejectedRepo,
+                environmentResolver = InstanceEnvironmentResolver(db.gameVersionDao(), storage),
+                compatibilityEngine = compat,
+                dependencyResolver = ModDependencyResolver(rejectedRepo, compat),
+                downloadInstaller = ModDownloadInstaller(rejectedRepo, db.downloadTaskDao(), db.installedModDao(), storage),
+                installedModManager = InstalledModManager(db.installedModDao(), rejectedRepo, compat),
+                ioDispatcher = Dispatchers.Unconfined,
+                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Unconfined)
+            )
+            try {
+                cred.saveDeveloperApiKey("bad-key-12345678")
+                rejectedController.startObserving()
+                val errState = withTimeout(3_000) {
+                    rejectedController.uiState.first { it.discoverError != null }
+                }
+                assertEquals(com.star.launcher.mods.ui.ModsErrorKind.UNAUTHORIZED, errState.discoverError?.kind)
+                assertTrue(errState.discoverError?.message.orEmpty().contains("API Key missing or invalid"))
+            } finally {
+                rejectedController.close()
+            }
         } finally {
             modsController.close()
             db.close()
