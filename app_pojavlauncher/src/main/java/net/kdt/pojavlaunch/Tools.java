@@ -114,7 +114,7 @@ import java.util.Map;
 public final class Tools {
     public  static final float BYTE_TO_MB = 1024 * 1024;
     public static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
-    public static String APP_NAME = "Amethyst";
+    public static String APP_NAME = "STARLauncher";
 
     public static final Gson GLOBAL_GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -171,7 +171,7 @@ public final class Tools {
     public static boolean checkStorageRoot(Context context) {
         File externalFilesDir = DIR_GAME_HOME  == null ? Tools.getPojavStorageRoot(context) : new File(DIR_GAME_HOME);
         //externalFilesDir == null when the storage is not mounted if it was obtained with the context call
-        return externalFilesDir != null && Environment.getExternalStorageState(externalFilesDir).equals(Environment.MEDIA_MOUNTED);
+        return externalFilesDir != null && Environment.MEDIA_MOUNTED.equals(Environment.getExternalStorageState(externalFilesDir));
     }
 
     /**
@@ -638,14 +638,14 @@ public final class Tools {
             Log.i(TAG, "Legacy4J detected!");
             oldL4JMitigationLogListener = loggedLine -> {
                 if (loggedLine.contains("literal{SDL3 (isXander's libsdl4j)} isn't supported in this system. GLFW will be used instead.")) {
-                    Logger.appendToLog("Amethyst-Android: Broken version of Legacy4J (below 1.8.51.8.5.2537.1) detected! Force enabling SDL");
+                    Logger.appendToLog("STAR Launcher: Broken version of Legacy4J (below 1.8.51.8.5.2537.1) detected! Force enabling SDL");
                     Tools.SDL.initializeControllerSubsystems();
                     Tools.runOnUiThread(() -> {
                         Tools.dialog(activity, activity.getString(R.string.global_warning), activity.getString(R.string.oldL4JFound));
                     });
                     Logger.removeLogListener(oldL4JMitigationLogListener);
                 } else if (loggedLine.contains("Added SDL Controller Mappings")) {
-                    Logger.appendToLog("Amethyst-Android: Fixed version of Legacy4J (1.8.5.2537.1 or higher) detected! Have fun!");
+                    Logger.appendToLog("STAR Launcher: Fixed version of Legacy4J (1.8.5.2537.1 or higher) detected! Have fun!");
                     Logger.removeLogListener(oldL4JMitigationLogListener);
                 }
             };
@@ -657,6 +657,8 @@ public final class Tools {
         if(minecraftProfile.gameDir != null){
             if(minecraftProfile.gameDir.startsWith(Tools.LAUNCHERPROFILES_RTPREFIX))
                 return new File(minecraftProfile.gameDir.replace(Tools.LAUNCHERPROFILES_RTPREFIX,Tools.DIR_GAME_HOME+"/"));
+            else if(new File(minecraftProfile.gameDir).isAbsolute())
+                return new File(minecraftProfile.gameDir);
             else
                 return new File(Tools.DIR_GAME_HOME,minecraftProfile.gameDir);
         }
@@ -1540,8 +1542,12 @@ public final class Tools {
         }
 
         if(!customJavaArgs){ // Launch the intent to get the jar file
+            if(activity instanceof com.star.launcher.ui.dashboard.AetherDashboardActivity) {
+                ((com.star.launcher.ui.dashboard.AetherDashboardActivity) activity).launchModInstallerPicker();
+                return;
+            }
             if(!(activity instanceof LauncherActivity))
-                throw new IllegalStateException("Cannot start Mod Installer without LauncherActivity");
+                throw new IllegalStateException("Cannot start Mod Installer without AetherDashboardActivity or LauncherActivity");
             LauncherActivity launcherActivity = (LauncherActivity)activity;
             launcherActivity.modInstallerLauncher.launch(null);
             return;
@@ -1622,9 +1628,9 @@ public final class Tools {
 
     public static String getSelectedRuntime(MinecraftProfile minecraftProfile) {
         String runtime = LauncherPreferences.PREF_DEFAULT_RUNTIME;
-        String profileRuntime = getRuntimeName(minecraftProfile.javaDir);
+        String profileRuntime = minecraftProfile != null ? getRuntimeName(minecraftProfile.javaDir) : null;
         if(profileRuntime != null) {
-            if(MultiRTUtils.forceReread(profileRuntime).versionString != null) {
+            if(MultiRTUtils.hasValidRuntimeStructure(profileRuntime)) {
                 runtime = profileRuntime;
             }
         }
@@ -1636,16 +1642,17 @@ public final class Tools {
     }
 
     public static @NonNull String pickRuntime(MinecraftProfile minecraftProfile, int targetJavaVersion) {
-        String runtime = getSelectedRuntime(minecraftProfile);
-        String profileRuntime = getRuntimeName(minecraftProfile.javaDir);
-        Runtime pickedRuntime = MultiRTUtils.read(runtime);
-        if(runtime == null || pickedRuntime.javaVersion == 0 || pickedRuntime.javaVersion < targetJavaVersion) {
-            String preferredRuntime = MultiRTUtils.getNearestJreName(targetJavaVersion);
-            if(preferredRuntime == null) throw new RuntimeException("Failed to autopick runtime!");
-            if(profileRuntime != null) minecraftProfile.javaDir = Tools.LAUNCHERPROFILES_RTPREFIX+preferredRuntime;
-            runtime = preferredRuntime;
+        String preferredRuntime = getSelectedRuntime(minecraftProfile);
+        String profileRuntime = minecraftProfile != null ? getRuntimeName(minecraftProfile.javaDir) : null;
+        MultiRTUtils.RuntimeSelectionResult selection = MultiRTUtils.selectRuntimeForLaunch(preferredRuntime, targetJavaVersion);
+        if (selection.selectedRuntime == null) {
+            throw new RuntimeException(selection.errorMessage);
         }
-        return runtime;
+        String pickedName = selection.selectedRuntime.name;
+        if (minecraftProfile != null && profileRuntime != null && !pickedName.equals(profileRuntime)) {
+            minecraftProfile.javaDir = Tools.LAUNCHERPROFILES_RTPREFIX + pickedName;
+        }
+        return pickedName;
     }
 
     /** Triggers the share intent chooser, with the latestlog file attached to it */

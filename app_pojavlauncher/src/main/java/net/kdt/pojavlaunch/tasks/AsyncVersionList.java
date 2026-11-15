@@ -13,6 +13,8 @@ import com.google.gson.stream.JsonReader;
 
 import net.kdt.pojavlaunch.JMinecraftVersionList;
 import net.kdt.pojavlaunch.Tools;
+import net.kdt.pojavlaunch.extra.ExtraConstants;
+import net.kdt.pojavlaunch.extra.ExtraCore;
 import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 
 import java.io.File;
@@ -26,34 +28,53 @@ public class AsyncVersionList {
 
     public void getVersionList(@Nullable VersionDoneListener listener, boolean secondPass){
         sExecutorService.execute(() -> {
-            File versionFile = new File(Tools.DIR_CACHE + "/version_list.json");
-            JMinecraftVersionList versionList = null;
-            try{
-                if(!versionFile.exists() || (System.currentTimeMillis() > versionFile.lastModified() + 86400000 )){
-                    versionList = downloadVersionList(LauncherPreferences.PREF_VERSION_REPOS);
-                }
-            }catch (Exception e){
-                Log.e("AsyncVersionList", "Refreshing version list failed :" + e);
-                e.printStackTrace();
-            }
-
-            // Fallback when no network or not needed
-            if (versionList == null) {
-                try {
-                    versionList = Tools.GLOBAL_GSON.fromJson(new JsonReader(new FileReader(versionFile)), JMinecraftVersionList.class);
-                } catch (FileNotFoundException e) {
-                    e.printStackTrace();
-                } catch (JsonIOException | JsonSyntaxException e) {
-                    e.printStackTrace();
-                    versionFile.delete();
-                    if(!secondPass)
-                        getVersionList(listener, true);
-                }
-            }
-
+            JMinecraftVersionList versionList = loadVersionListSync(secondPass);
             if(listener != null)
                 listener.onVersionDone(versionList);
         });
+    }
+
+    @Nullable
+    public static JMinecraftVersionList ensureReleaseTableLoadedSync() {
+        JMinecraftVersionList existing = (JMinecraftVersionList) ExtraCore.getValue(ExtraConstants.RELEASE_TABLE);
+        if (existing != null && existing.versions != null && existing.versions.length > 0) {
+            return existing;
+        }
+        JMinecraftVersionList loaded = new AsyncVersionList().loadVersionListSync(false);
+        if (loaded != null && loaded.versions != null) {
+            ExtraCore.setValue(ExtraConstants.RELEASE_TABLE, loaded);
+        }
+        return loaded;
+    }
+
+    @Nullable
+    private JMinecraftVersionList loadVersionListSync(boolean secondPass) {
+        File versionFile = new File(Tools.DIR_CACHE + "/version_list.json");
+        JMinecraftVersionList versionList = null;
+        try {
+            if (!versionFile.exists() || (System.currentTimeMillis() > versionFile.lastModified() + 86400000)) {
+                versionList = downloadVersionList(LauncherPreferences.PREF_VERSION_REPOS);
+            }
+        } catch (Exception e) {
+            Log.e("AsyncVersionList", "Refreshing version list failed :" + e);
+            e.printStackTrace();
+        }
+
+        // Fallback when no network or not needed
+        if (versionList == null && versionFile.exists()) {
+            try {
+                versionList = Tools.GLOBAL_GSON.fromJson(new JsonReader(new FileReader(versionFile)), JMinecraftVersionList.class);
+            } catch (FileNotFoundException e) {
+                e.printStackTrace();
+            } catch (JsonIOException | JsonSyntaxException e) {
+                e.printStackTrace();
+                versionFile.delete();
+                if (!secondPass) {
+                    versionList = loadVersionListSync(true);
+                }
+            }
+        }
+        return versionList;
     }
 
 
@@ -64,11 +85,13 @@ public class AsyncVersionList {
             Log.i("ExtVL", "Syncing to external: " + mirror);
             String jsonString = downloadString(mirror);
             list = Tools.GLOBAL_GSON.fromJson(jsonString, JMinecraftVersionList.class);
+            if (list == null || list.versions == null) return null;
             Log.i("ExtVL","Downloaded the version list, len=" + list.versions.length);
 
             // Then save the version list
-            //TODO make it not save at times ?
-            FileOutputStream fos = new FileOutputStream(Tools.DIR_CACHE + "/version_list.json");
+            File versionFile = new File(Tools.DIR_CACHE + "/version_list.json");
+            if (versionFile.getParentFile() != null) versionFile.getParentFile().mkdirs();
+            FileOutputStream fos = new FileOutputStream(versionFile);
             fos.write(jsonString.getBytes());
             fos.close();
 

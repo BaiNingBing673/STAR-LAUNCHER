@@ -82,6 +82,7 @@ public class Architecture {
 	 * @return The architecture as an int, can be UNSUPPORTED_ARCH if unknown.
 	 */
 	public static int archAsInt(String arch){
+		if(arch == null) return UNSUPPORTED_ARCH;
 		arch = arch.toLowerCase().trim().replace(" ", "");
 		if(arch.contains("arm64") || arch.equals("aarch64")) return ARCH_ARM64;
 		if(arch.contains("arm") || arch.equals("aarch32")) return ARCH_ARM;
@@ -89,6 +90,14 @@ public class Architecture {
 		if(arch.contains("x86") || (arch.startsWith("i") && arch.endsWith("86"))) return ARCH_X86;
 		//Shouldn't happen
 		return UNSUPPORTED_ARCH;
+	}
+
+	/**
+	 * Checks whether a runtime's OS_ARCH string matches the current device architecture.
+	 */
+	public static boolean isRuntimeArchCompatible(String runtimeArch) {
+		int runtimeArchId = archAsInt(runtimeArch);
+		return runtimeArchId != UNSUPPORTED_ARCH && runtimeArchId == getDeviceArchitecture();
 	}
 
 	/**

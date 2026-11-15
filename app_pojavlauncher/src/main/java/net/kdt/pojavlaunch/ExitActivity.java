@@ -12,8 +12,12 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.star.launcher.ui.dashboard.AetherDashboardActivity;
+
 @Keep
 public class ExitActivity extends AppCompatActivity {
+    private boolean mLaunchedShareChooser = false;
+    private boolean mReturnedToAether = false;
 
     @SuppressLint("StringFormatInvalid") //invalid on some translations but valid on most, cant fix that atm
     @Override
@@ -31,9 +35,35 @@ public class ExitActivity extends AppCompatActivity {
 
         new AlertDialog.Builder(this)
                 .setMessage(getString(message,code))
-                .setPositiveButton(R.string.main_share_logs, (dialog, which) -> shareLog(this))
-                .setOnDismissListener(dialog -> ExitActivity.this.finish())
+                .setPositiveButton(R.string.main_share_logs, (dialog, which) -> {
+                    mLaunchedShareChooser = true;
+                    shareLog(this);
+                })
+                .setNegativeButton(android.R.string.ok, (dialog, which) -> returnToAether())
+                .setOnDismissListener(dialog -> {
+                    if (!mLaunchedShareChooser) {
+                        returnToAether();
+                    }
+                })
                 .show();
+    }
+
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        if (mLaunchedShareChooser) {
+            mLaunchedShareChooser = false;
+            returnToAether();
+        }
+    }
+
+    public void returnToAether() {
+        if (mReturnedToAether || isFinishing() || isDestroyed()) return;
+        mReturnedToAether = true;
+        Intent intent = AetherDashboardActivity.createIntent(this);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(intent);
+        finish();
     }
 
     public static void showExitMessage(Context ctx, int code, boolean isSignal) {

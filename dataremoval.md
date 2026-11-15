@@ -1,5 +1,5 @@
-# Remove Angel Aura Amethyst account data
-Angel Aura Amethyst uses two types of accounts:
+# Remove STAR Launcher account data
+STAR Launcher uses two types of accounts:
 - Local accounts
 - Microsoft accounts
 <br>

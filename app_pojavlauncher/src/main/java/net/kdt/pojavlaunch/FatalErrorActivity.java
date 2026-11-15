@@ -9,6 +9,8 @@ import android.os.Bundle;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.star.launcher.ui.dashboard.AetherDashboardActivity;
+
 public class FatalErrorActivity extends AppCompatActivity {
 
 	@Override
@@ -32,7 +34,12 @@ public class FatalErrorActivity extends AppCompatActivity {
 			.setTitle(R.string.error_fatal)
 			.setMessage(errHeader + "\n\n" + stackTrace)
 			.setPositiveButton(android.R.string.ok, (p1, p2) -> finish())
-			.setNegativeButton(R.string.global_restart, (p1, p2) -> startActivity(new Intent(FatalErrorActivity.this, LauncherActivity.class)))
+			.setNegativeButton(R.string.global_restart, (p1, p2) -> {
+				Intent restartIntent = AetherDashboardActivity.createIntent(FatalErrorActivity.this);
+				restartIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+				startActivity(restartIntent);
+				finish();
+			})
 			.setNeutralButton(android.R.string.copy, (p1, p2) -> {
 				ClipboardManager mgr = (ClipboardManager) FatalErrorActivity.this.getSystemService(CLIPBOARD_SERVICE);
 				mgr.setPrimaryClip(ClipData.newPlainText("error", stackTrace));

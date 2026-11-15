@@ -3,7 +3,6 @@ package net.kdt.pojavlaunch.modloaders.modpacks.api;
 import android.content.Context;
 import android.content.Intent;
 
-import net.kdt.pojavlaunch.LauncherActivity;
 import net.kdt.pojavlaunch.R;
 import net.kdt.pojavlaunch.Tools;
 import net.kdt.pojavlaunch.modloaders.ModloaderDownloadListener;
@@ -11,6 +10,8 @@ import net.kdt.pojavlaunch.modloaders.modpacks.ModloaderInstallTracker;
 import net.kdt.pojavlaunch.utils.NotificationUtils;
 
 import java.io.File;
+
+import com.star.launcher.ui.dashboard.AetherDashboardActivity;
 
 public class NotificationDownloadListener implements ModloaderDownloadListener {
     private final Context mContext;
@@ -20,7 +21,7 @@ public class NotificationDownloadListener implements ModloaderDownloadListener {
     public NotificationDownloadListener(Context context, ModLoader modLoader) {
         mModLoader = modLoader;
         mContext = context.getApplicationContext();
-        mIntent = new Intent(mContext, LauncherActivity.class);
+        mIntent = AetherDashboardActivity.createRouteIntent(mContext, "VERSIONS");
     }
 
     @Override

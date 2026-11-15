@@ -66,7 +66,7 @@ public class TestStorageActivity extends Activity {
         AsyncAssetManager.unpackComponents(this);
         AsyncAssetManager.unpackSingleFiles(this);
 
-        Intent intent =  new Intent(this, LauncherActivity.class);
+        Intent intent = com.star.launcher.ui.dashboard.AetherDashboardActivity.createIntent(this);
         startActivity(intent);
         finish();
     }

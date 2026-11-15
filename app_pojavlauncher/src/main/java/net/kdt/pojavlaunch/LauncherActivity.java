@@ -128,6 +128,7 @@ public class LauncherActivity extends BaseActivity {
 
     private mcAccountSpinner mAccountSpinner;
     private FragmentContainerView mFragmentView;
+    private ImageButton mAetherHubButton;
     private ImageButton mSettingsButton;
     private ProgressLayout mProgressLayout;
     private ProgressServiceKeeper mProgressServiceKeeper;
@@ -332,6 +333,10 @@ public class LauncherActivity extends BaseActivity {
         ProgressKeeper.addTaskCountListener((mProgressServiceKeeper = new ProgressServiceKeeper(this)));
 
         mSettingsButton.setOnClickListener(mSettingButtonListener);
+        if (mAetherHubButton != null) {
+            mAetherHubButton.setOnClickListener(v ->
+                    startActivity(com.star.launcher.ui.dashboard.AetherDashboardActivity.createIntent(this)));
+        }
         ProgressKeeper.addTaskCountListener(mProgressLayout);
         ExtraCore.addExtraListener(ExtraConstants.BACK_PREFERENCE, mBackPreferenceListener);
         ExtraCore.addExtraListener(ExtraConstants.SELECT_AUTH_METHOD, mSelectAuthMethod);
@@ -347,7 +352,24 @@ public class LauncherActivity extends BaseActivity {
         mProgressLayout.observe(ProgressLayout.INSTALL_MODPACK);
         mProgressLayout.observe(ProgressLayout.AUTHENTICATE_MICROSOFT);
         mProgressLayout.observe(ProgressLayout.DOWNLOAD_VERSION_LIST);
+
+        String aetherRoute = getIntent() != null ? getIntent().getStringExtra(EXTRA_AETHER_ROUTE) : null;
+        if (aetherRoute != null) {
+            if ("AUTH".equals(aetherRoute)) {
+                Tools.swapFragment(this, SelectAuthFragment.class, SelectAuthFragment.TAG, null);
+            } else if ("SETTINGS".equals(aetherRoute)) {
+                Tools.swapFragment(this, LauncherPreferenceFragment.class, SETTING_FRAGMENT_TAG, null);
+            } else if ("GAMEPAD".equals(aetherRoute)) {
+                Tools.swapFragment(this, net.kdt.pojavlaunch.fragments.GamepadMapperFragment.class, net.kdt.pojavlaunch.fragments.GamepadMapperFragment.TAG, null);
+            } else if ("MOD_INSTALL".equals(aetherRoute)) {
+                modInstallerLauncher.launch(null);
+            } else if ("MODPACK_IMPORT".equals(aetherRoute)) {
+                modpackImportLauncher.launch(null);
+            }
+        }
     }
+
+    public static final String EXTRA_AETHER_ROUTE = "aether_route";
 
     @Override
     protected void onResume() {
@@ -485,6 +507,7 @@ public class LauncherActivity extends BaseActivity {
     /** Stuff all the view boilerplate here */
     private void bindViews(){
         mFragmentView = findViewById(R.id.container_fragment);
+        mAetherHubButton = findViewById(R.id.aether_hub_button);
         mSettingsButton = findViewById(R.id.setting_button);
         mAccountSpinner = findViewById(R.id.account_spinner);
         mProgressLayout = findViewById(R.id.progress_layout);

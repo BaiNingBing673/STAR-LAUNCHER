@@ -1,5 +1,8 @@
 plugins {
     id 'com.android.application' version '9.3.1'
+    id 'com.android.built-in-kotlin'
+    id 'org.jetbrains.kotlin.plugin.compose'
+    id 'com.google.devtools.ksp'
 }
 
 static def getDate() { return new Date().format('yyyyMMdd') }
@@ -41,7 +44,7 @@ def getVersionName = {
             return ("LOCAL-" + "${getDate()}")
         }else {
             // Used by github actions
-            TAG_STRING =  'amethyst-legacy-' + "${getDate()}" + "-" + TAG_PART_COMMIT.toString().trim()
+            TAG_STRING =  'star-legacy-' + "${getDate()}" + "-" + TAG_PART_COMMIT.toString().trim()
         }
 
     }
@@ -100,7 +103,7 @@ android {
     }
 
     defaultConfig {
-        applicationId "org.angelauramc.amethyst"
+        applicationId "com.star.launcher"
         minSdkVersion 21
         targetSdkVersion 34
         versionCode 10000000
@@ -122,11 +125,11 @@ android {
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.customDebug
-            resValue "string", "app_name", "Amethyst (Debug)"
-            resValue "string", "app_short_name", "Amethyst (Debug)"
-            resValue 'string', 'application_package', 'org.angelauramc.amethyst.debug'
-            resValue 'string', 'storageProviderAuthorities', 'org.angelauramc.amethyst.scoped.gamefolder.debug'
-            resValue 'string', 'shareProviderAuthority', 'org.angelauramc.amethyst.scoped.controlfolder.debug'
+            resValue "string", "app_name", "STAR Launcher (Debug)"
+            resValue "string", "app_short_name", "STAR (Debug)"
+            resValue 'string', 'application_package', 'com.star.launcher.debug'
+            resValue 'string', 'storageProviderAuthorities', 'com.star.launcher.scoped.gamefolder.debug'
+            resValue 'string', 'shareProviderAuthority', 'com.star.launcher.scoped.controlfolder.debug'
         }
         proguard {
             initWith debug
@@ -146,10 +149,11 @@ android {
             // defaultConfig already set
             // multiDexEnabled = true
             // debuggable = true
-            resValue "string", "app_name", "Amethyst"
-            resValue "string", "app_short_name", "Amethyst"
-            resValue 'string', 'storageProviderAuthorities', 'org.angelauramc.amethyst.scoped.gamefolder'
-            resValue 'string', 'application_package', 'org.angelauramc.amethyst'
+            resValue "string", "app_name", "STAR Launcher"
+            resValue "string", "app_short_name", "STAR"
+            resValue 'string', 'storageProviderAuthorities', 'com.star.launcher.scoped.gamefolder'
+            resValue 'string', 'shareProviderAuthority', 'com.star.launcher.scoped.controlfolder'
+            resValue 'string', 'application_package', 'com.star.launcher'
         }
         gplay {
             initWith release
@@ -171,6 +175,12 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+        }
+    }
+
     bundle {
         language {
             enableSplit = false
@@ -190,11 +200,30 @@ android {
     buildFeatures {
         prefab true
         buildConfig true
+        compose true
     }
 
     lint {
         abortOnError false
     }
+
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            all {
+                def toolchainService = project.extensions.getByType(org.gradle.jvm.toolchain.JavaToolchainService)
+                javaLauncher = toolchainService.launcherFor {
+                    languageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion.of(21)
+                }
+            }
+        }
+    }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.incremental", "true")
+    arg("room.generateKotlin", "true")
 }
 
 afterEvaluate {
@@ -252,6 +281,34 @@ dependencies {
     implementation "net.java.dev.jna:jna:5.14.0@aar"
 
     implementation project(":androidnsbypass")
+
+    // STAR Launcher M0.4 Design System (Kotlin + Jetpack Compose + Material 3, minSdk 21 compatible)
+    implementation 'androidx.core:core-ktx:1.16.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.9.1'
+    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.9.1'
+    implementation 'androidx.activity:activity-compose:1.10.1'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+
+    def composeBom = platform('androidx.compose:compose-bom:2025.08.00')
+    implementation composeBom
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.foundation:foundation'
+    implementation 'androidx.compose.material3:material3'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+
+    // STAR Launcher M0.5 Database Foundation (Room 2.7.2 preserves minSdk 21)
+    def roomVersion = '2.7.2'
+    implementation "androidx.room:room-runtime:$roomVersion"
+    implementation "androidx.room:room-ktx:$roomVersion"
+    ksp "androidx.room:room-compiler:$roomVersion"
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2'
+    testImplementation "androidx.room:room-testing:$roomVersion"
+    testImplementation 'androidx.test:core:1.6.1'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
 
 }
 apply from: rootProject.file('gradle/prefab_bypass.gradle')

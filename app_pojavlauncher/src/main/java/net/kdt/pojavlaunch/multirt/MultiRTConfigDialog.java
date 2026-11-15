@@ -39,12 +39,16 @@ public class MultiRTConfigDialog {
         adapter.setDialog(get());
         mDialogView.setAdapter(adapter);
 
-        mDialog = new AlertDialog.Builder(activity)
+        AlertDialog.Builder builder = new AlertDialog.Builder(activity)
                 .setTitle(R.string.multirt_config_title)
                 .setView(mDialogView)
-                .setPositiveButton(R.string.multirt_config_add, (dialog, which) -> installJvmLauncher.launch(null))
-                .setNeutralButton(R.string.multirt_delete_runtime, null)
-                .create();
+                .setNeutralButton(R.string.multirt_delete_runtime, null);
+        if (installJvmLauncher != null) {
+            builder.setPositiveButton(R.string.multirt_config_add, (dialog, which) -> installJvmLauncher.launch(null));
+        } else {
+            builder.setPositiveButton(android.R.string.ok, null);
+        }
+        mDialog = builder.create();
 
         // Custom button behavior without dismiss
         mDialog.setOnShowListener(dialog -> {

@@ -73,6 +73,10 @@ import net.kdt.pojavlaunch.utils.JREUtils;
 import net.kdt.pojavlaunch.utils.MCOptionUtils;
 import net.kdt.pojavlaunch.utils.TouchControllerInputView;
 import net.kdt.pojavlaunch.utils.TouchControllerUtils;
+import com.star.launcher.diagnostics.CrossProcessSpoolBridge;
+import com.star.launcher.engine.adapter.AetherLaunchPayload;
+import com.star.launcher.engine.adapter.PojavLaunchBridge;
+
 import net.kdt.pojavlaunch.value.MinecraftAccount;
 import net.kdt.pojavlaunch.value.launcherprofiles.LauncherProfiles;
 import net.kdt.pojavlaunch.value.launcherprofiles.MinecraftProfile;
@@ -112,6 +116,9 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     private boolean hasOngoingImeAnimation;
 
     MinecraftProfile minecraftProfile;
+    @Nullable
+    private AetherLaunchPayload mAetherPayload;
+    private volatile boolean mReachedGlSurfaceInit;
 
     private ArrayAdapter<String> gameActionArrayAdapter;
     private AdapterView.OnItemClickListener gameActionClickListener;
@@ -126,7 +133,13 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         super.onCreate(savedInstanceState);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
 
-        minecraftProfile = LauncherProfiles.getCurrentProfile();
+        mAetherPayload = PojavLaunchBridge.fromIntent(getIntent());
+        if (mAetherPayload != null) {
+            minecraftProfile = PojavLaunchBridge.toTransientMinecraftProfile(mAetherPayload, Tools.DIR_GAME_HOME);
+            LauncherPreferences.PREF_RAM_ALLOCATION = Math.max(256, mAetherPayload.getAllocatedRamMb());
+        } else {
+            minecraftProfile = LauncherProfiles.getCurrentProfile();
+        }
         Tools.useANGLE = minecraftProfile.useANGLE;
 
         String gameDirPath = Tools.getGameDirPath(minecraftProfile).getAbsolutePath();
@@ -277,6 +290,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
             final String finalVersion = version;
             minecraftGLView.setSurfaceReadyListener(() -> {
+                mReachedGlSurfaceInit = true;
                 try {
                     // Setup virtual mouse right before launching
                     if (PREF_VIRTUAL_MOUSE_START) {
@@ -483,9 +497,10 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
             if (Integer.parseInt(assetVersion) <= 12) folder.mkdir();
         } catch (NumberFormatException e) { folder.mkdir(); }
 
-        MinecraftAccount minecraftAccount = PojavProfile.getCurrentProfileContent(this, null);
+        String requestedAccount = mAetherPayload != null ? mAetherPayload.getAccountName() : null;
+        MinecraftAccount minecraftAccount = PojavProfile.getCurrentProfileContent(this, requestedAccount);
         if (hasMods("sodium"))
-            Logger.appendToLog("WARNING: Sodium is being used, Amethyst-Android does NOT support this mod, you are on your own");
+            Logger.appendToLog("WARNING: Sodium is being used, STAR Launcher does NOT support this mod, you are on your own");
         Logger.appendToLog("--------- Starting game with Launcher Debug!");
         Tools.printLauncherInfo(versionId, Tools.isValidString(minecraftProfile.javaArgs) ? minecraftProfile.javaArgs : LauncherPreferences.PREF_CUSTOM_JAVA_ARGS, Tools.getTotalDeviceMemory(this));
         if(Tools.LOCAL_RENDERER.equals("opengles_mobileglues")) {
@@ -495,7 +510,25 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         LauncherProfiles.load();
         int requiredJavaVersion = 8;
         if(version.javaVersion != null) requiredJavaVersion = version.javaVersion.majorVersion;
-        Tools.launchMinecraft(this, minecraftAccount, minecraftProfile, versionId, requiredJavaVersion);
+        boolean launchFailed = false;
+        String failureSummary = "JVM returned to MainActivity";
+        try {
+            Tools.launchMinecraft(this, minecraftAccount, minecraftProfile, versionId, requiredJavaVersion);
+        } catch (Throwable launchErr) {
+            launchFailed = true;
+            failureSummary = launchErr.getMessage() != null ? launchErr.getMessage() : launchErr.getClass().getSimpleName();
+            throw launchErr;
+        } finally {
+            if (mAetherPayload != null) {
+                CrossProcessSpoolBridge.writeGameExitSpoolJvm(
+                        mAetherPayload.getSessionId(),
+                        launchFailed,
+                        mReachedGlSurfaceInit,
+                        Tools.LOCAL_RENDERER,
+                        "Instance " + mAetherPayload.getInstanceName() + ": " + failureSummary
+                );
+            }
+        }
         //Note that we actually stall in the above function, even if the game crashes. But let's be safe.
         Tools.runOnUiThread(()-> mServiceBinder.isActive = false);
     }

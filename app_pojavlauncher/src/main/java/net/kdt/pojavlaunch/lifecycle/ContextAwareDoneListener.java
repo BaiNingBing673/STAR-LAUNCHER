@@ -5,10 +5,14 @@ import static net.kdt.pojavlaunch.MainActivity.INTENT_MINECRAFT_VERSION;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Bundle;
+
+import androidx.annotation.Nullable;
 
 import net.kdt.pojavlaunch.MainActivity;
 import net.kdt.pojavlaunch.R;
 import net.kdt.pojavlaunch.Tools;
+import com.star.launcher.core.AetherContainer;
 import net.kdt.pojavlaunch.lifecycle.ContextExecutor;
 import net.kdt.pojavlaunch.lifecycle.ContextExecutorTask;
 import net.kdt.pojavlaunch.progresskeeper.ProgressKeeper;
@@ -18,14 +22,24 @@ import net.kdt.pojavlaunch.utils.NotificationUtils;
 public class ContextAwareDoneListener implements AsyncMinecraftDownloader.DoneListener, ContextExecutorTask {
     private final String mErrorString;
     private final String mNormalizedVersionid;
+    @Nullable
+    private final Bundle mAetherLaunchExtras;
 
     public ContextAwareDoneListener(Context baseContext, String versionId) {
-        this.mErrorString = baseContext.getString(R.string.mc_download_failed);
-        this.mNormalizedVersionid = versionId;
+        this(baseContext, versionId, null);
     }
 
-    private Intent createGameStartIntent(Context context) {
+    public ContextAwareDoneListener(Context baseContext, String versionId, @Nullable Bundle aetherLaunchExtras) {
+        this.mErrorString = baseContext.getString(R.string.mc_download_failed);
+        this.mNormalizedVersionid = versionId;
+        this.mAetherLaunchExtras = aetherLaunchExtras == null ? null : new Bundle(aetherLaunchExtras);
+    }
+
+    public Intent createGameStartIntent(Context context) {
         Intent mainIntent = new Intent(context, MainActivity.class);
+        if (mAetherLaunchExtras != null) {
+            mainIntent.putExtras(mAetherLaunchExtras);
+        }
         mainIntent.putExtra(INTENT_MINECRAFT_VERSION, mNormalizedVersionid);
         mainIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         return mainIntent;
@@ -45,6 +59,7 @@ public class ContextAwareDoneListener implements AsyncMinecraftDownloader.DoneLi
     public void executeWithActivity(Activity activity) {
         try {
             Intent gameStartIntent = createGameStartIntent(activity);
+            AetherContainer.flushWalIfInitialized();
             activity.startActivity(gameStartIntent);
             activity.finish();
             android.os.Process.killProcess(android.os.Process.myPid()); //You should kill yourself, NOW!

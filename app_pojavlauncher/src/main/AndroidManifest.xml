@@ -63,6 +63,12 @@
             android:label="@string/app_short_name"
             android:windowSoftInputMode="adjustResize"/>
         <activity
+            android:name="com.star.launcher.ui.dashboard.AetherDashboardActivity"
+            android:exported="false"
+            android:label="@string/app_short_name"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:name=".ImportControlActivity"
             android:configChanges="keyboard|keyboardHidden"
             android:exported="true"
