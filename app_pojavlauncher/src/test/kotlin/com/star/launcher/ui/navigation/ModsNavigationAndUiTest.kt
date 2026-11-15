@@ -78,7 +78,9 @@ class ModsNavigationAndUiTest {
         assertEquals(AetherRoute.Tab(DashboardTab.MODS), recreated.stateViewModel.navigation.currentRoute)
 
         Shadows.shadowOf(Looper.getMainLooper()).idle()
-        assertNull(Shadows.shadowOf(recreated).nextStartedActivity)
+        val unexpected = Shadows.shadowOf(recreated).nextStartedActivity
+        val crashDetail = (unexpected?.getSerializableExtra("throwable") as? Throwable)?.stackTraceToString()
+        assertNull("Unexpected activity launched; detail=$crashDetail", unexpected)
         controller.pause().stop().destroy()
     }
 

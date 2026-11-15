@@ -36,16 +36,6 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Download JRE 8 component
-        uses: dawidd6/action-download-artifact@v9
-        with:
-          workflow: build.yml
-          path: app_pojavlauncher/src/main/assets/components/jre
-          workflow_conclusion: completed
-          repo: AngelAuraMC/angelauramc-openjdk-build
-          branch: buildjre8
-          name: jre8-pojav
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
@@ -94,6 +84,16 @@ jobs:
               print("::error file=logs/unit-tests.log::" + " | ".join(line.strip() for line in tail[-15:] if line.strip()))
           PY
           tail -n 120 logs/unit-tests.log || true
+
+      - name: Download JRE 8 component
+        uses: dawidd6/action-download-artifact@v9
+        with:
+          workflow: build.yml
+          path: app_pojavlauncher/src/main/assets/components/jre
+          workflow_conclusion: completed
+          repo: AngelAuraMC/angelauramc-openjdk-build
+          branch: buildjre8
+          name: jre8-pojav
 
       - name: Build Debug APK
         env:
@@ -167,16 +167,6 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Download JRE 8 component
-        uses: dawidd6/action-download-artifact@v9
-        with:
-          workflow: build.yml
-          path: app_pojavlauncher/src/main/assets/components/jre
-          workflow_conclusion: completed
-          repo: AngelAuraMC/angelauramc-openjdk-build
-          branch: buildjre8
-          name: jre8-pojav
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
@@ -215,6 +205,16 @@ jobs:
           done
           printf '%s' "$STAR_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/star-release.jks"
           chmod 600 "$RUNNER_TEMP/star-release.jks"
+
+      - name: Download JRE 8 component
+        uses: dawidd6/action-download-artifact@v9
+        with:
+          workflow: build.yml
+          path: app_pojavlauncher/src/main/assets/components/jre
+          workflow_conclusion: completed
+          repo: AngelAuraMC/angelauramc-openjdk-build
+          branch: buildjre8
+          name: jre8-pojav
 
       - name: Prepare language list & build signed Release APK
         env:

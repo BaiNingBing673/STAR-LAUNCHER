@@ -66,7 +66,8 @@ class AetherNavigationRegressionTest {
         assertEquals(AetherRoute.Tab(DashboardTab.HOME), activity.stateViewModel.navigation.currentRoute)
 
         val started = Shadows.shadowOf(activity).nextStartedActivity
-        assertNull("Normal dashboard navigation must not launch any legacy activity", started)
+        val crashDetail = (started?.getSerializableExtra("throwable") as? Throwable)?.stackTraceToString()
+        assertNull("Normal dashboard navigation must not launch any legacy activity; detail=$crashDetail", started)
         controller.pause().stop().destroy()
     }
 
