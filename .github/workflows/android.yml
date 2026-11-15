@@ -231,6 +231,13 @@ jobs:
           cp app_pojavlauncher/build/outputs/apk/release/app_pojavlauncher-release.apk "$APK_OUT"
           (cd out && sha256sum "$(basename "$APK_OUT")" > "$(basename "$APK_OUT").sha256")
 
+      - name: Report failed release build details
+        if: failure()
+        run: |
+          if [ -f logs/assemble-release.log ]; then
+            tail -n 120 logs/assemble-release.log || true
+          fi
+
       - name: Verify Release APK metadata, signature, and ABIs
         env:
           STAR_EXPECTED_CERT_SHA256: ${{ secrets.STAR_EXPECTED_CERT_SHA256 }}

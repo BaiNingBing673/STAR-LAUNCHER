@@ -339,8 +339,10 @@ afterEvaluate {
         }
     }
 
+    def gplayRequested = project.gradle.startParameter.taskNames.any { it.toLowerCase().contains('gplay') }
     tasks.matching { t ->
-        t.name in ["preGplayBuild", "assembleGplay", "packageGplay", "bundleGplay", "signGplayBundle"]
+        t.name in ["assembleGplay", "packageGplay", "bundleGplay", "signGplayBundle", "validateSigningGplay", "writeGplaySigningConfigVersions"] ||
+            (gplayRequested && t.name == "preGplayBuild")
     }.configureEach { t ->
         t.doFirst {
             def missing = []
