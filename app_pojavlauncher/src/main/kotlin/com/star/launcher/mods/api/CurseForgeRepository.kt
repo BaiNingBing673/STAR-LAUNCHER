@@ -28,7 +28,165 @@ class CurseForgeRepository(
     @Volatile
     private var rejectedKeyInSession: String? = null
 
+    @Volatile
+    var lastConnectionResult: CurseForgeConnectionTestResult? = null
+        private set
+
     private val cacheTtlMs = 5 * 60 * 1000L
+
+    fun clearCaches() {
+        rejectedKeyInSession = null
+        synchronized(cachedCategories) { cachedCategories.clear() }
+        synchronized(cachedMcVersions) { cachedMcVersions.clear() }
+        cachedLoaders.clear()
+        searchCache.clear()
+        modCache.clear()
+        descriptionCache.clear()
+        filesCache.clear()
+    }
+
+    suspend fun testConnection(): CurseForgeConnectionTestResult {
+        val startMs = System.currentTimeMillis()
+        val auth = credentialProvider.getAuthConfig()
+        val status = credentialProvider.getCredentialStatus()
+        if (auth is CurseForgeAuthConfig.Unconfigured) {
+            val res = CurseForgeConnectionTestResult(
+                state = CurseForgeConnectionState.CONFIGURATION_REQUIRED,
+                credentialStatus = status,
+                errorCategory = CurseForgeErrorCategory.MISSING_CONFIGURATION,
+                message = CurseForgeApiException.NotConfigured().message,
+                latencyMs = 0L
+            )
+            lastConnectionResult = res
+            return res
+        }
+        rejectedKeyInSession = null
+        return try {
+            val params = mapOf(
+                "gameId" to CurseForgeCredentialProvider.MINECRAFT_GAME_ID.toString(),
+                "classId" to CurseForgeCredentialProvider.MODS_CLASS_ID.toString()
+            )
+            val json = executeJsonGet("/v1/categories", params)
+            val data = json.optJSONArray("data")
+                ?: throw CurseForgeApiException.ParseError("Missing 'data' array in categories response")
+            val parsed = buildList {
+                for (i in 0 until data.length()) {
+                    data.optJSONObject(i)?.let { add(parseCategory(it)) }
+                }
+            }.sortedBy { it.name.lowercase() }
+            if (parsed.isNotEmpty()) {
+                synchronized(cachedCategories) {
+                    cachedCategories.clear()
+                    cachedCategories.addAll(parsed)
+                }
+            }
+            val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(0L)
+            val modeLabel = when (auth) {
+                is CurseForgeAuthConfig.BackendProxy -> "Connected via Backend Proxy"
+                is CurseForgeAuthConfig.DirectVaultKey -> "Connected to CurseForge API"
+                CurseForgeAuthConfig.Unconfigured -> "Configuration Required"
+            }
+            val res = CurseForgeConnectionTestResult(
+                state = CurseForgeConnectionState.CONNECTED,
+                credentialStatus = status,
+                errorCategory = CurseForgeErrorCategory.NONE,
+                message = modeLabel,
+                latencyMs = elapsed
+            )
+            lastConnectionResult = res
+            res
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(0L)
+            val res = classifyFailure(t, status, elapsed)
+            lastConnectionResult = res
+            res
+        }
+    }
+
+    suspend fun classifyFailure(
+        error: Throwable?,
+        statusOverride: CurseForgeCredentialStatus? = null,
+        latencyMs: Long = 0L
+    ): CurseForgeConnectionTestResult {
+        val status = statusOverride ?: runCatching { credentialProvider.getCredentialStatus() }
+            .getOrDefault(CurseForgeCredentialStatus.UNCONFIGURED)
+        val (state, category, msg) = when (error) {
+            null -> Triple(
+                if (status == CurseForgeCredentialStatus.UNCONFIGURED) {
+                    CurseForgeConnectionState.CONFIGURATION_REQUIRED
+                } else {
+                    CurseForgeConnectionState.CONNECTION_FAILED
+                },
+                if (status == CurseForgeCredentialStatus.UNCONFIGURED) {
+                    CurseForgeErrorCategory.MISSING_CONFIGURATION
+                } else {
+                    CurseForgeErrorCategory.SERVICE_ERROR
+                },
+                if (status == CurseForgeCredentialStatus.UNCONFIGURED) {
+                    CurseForgeApiException.NotConfigured().message
+                } else {
+                    "CurseForge API connection failed."
+                }
+            )
+            is CurseForgeApiException.NotConfigured -> Triple(
+                CurseForgeConnectionState.CONFIGURATION_REQUIRED,
+                CurseForgeErrorCategory.MISSING_CONFIGURATION,
+                error.message
+            )
+            is CurseForgeApiException.Unauthorized -> Triple(
+                CurseForgeConnectionState.CONNECTION_FAILED,
+                CurseForgeErrorCategory.INVALID_API_KEY,
+                "Invalid API key (HTTP 401): Verify your configured CurseForge API key or proxy token."
+            )
+            is CurseForgeApiException.Forbidden -> {
+                if (error.isDistributionRestriction) {
+                    Triple(
+                        CurseForgeConnectionState.CONNECTED,
+                        CurseForgeErrorCategory.NONE,
+                        error.message
+                    )
+                } else {
+                    Triple(
+                        CurseForgeConnectionState.CONNECTION_FAILED,
+                        CurseForgeErrorCategory.INVALID_API_KEY,
+                        "Invalid API key or forbidden access (HTTP 403): ${error.serverReason ?: "Verify your CurseForge API key in Vault or switch to a Backend Proxy."}"
+                    )
+                }
+            }
+            is CurseForgeApiException.RateLimited -> Triple(
+                CurseForgeConnectionState.CONNECTION_FAILED,
+                CurseForgeErrorCategory.RATE_LIMITED,
+                error.message
+            )
+            is CurseForgeApiException.NetworkOffline,
+            is CurseForgeApiException.Timeout -> Triple(
+                CurseForgeConnectionState.CONNECTION_FAILED,
+                CurseForgeErrorCategory.NETWORK_FAILURE,
+                error.message
+            )
+            is CurseForgeApiException.ServerError,
+            is CurseForgeApiException.ParseError,
+            is CurseForgeApiException.NotFound -> Triple(
+                CurseForgeConnectionState.CONNECTION_FAILED,
+                CurseForgeErrorCategory.SERVICE_ERROR,
+                error.message
+            )
+            else -> Triple(
+                CurseForgeConnectionState.CONNECTION_FAILED,
+                CurseForgeErrorCategory.SERVICE_ERROR,
+                error.message ?: "CurseForge API service error."
+            )
+        }
+        return CurseForgeConnectionTestResult(
+            state = state,
+            credentialStatus = status,
+            errorCategory = category,
+            message = msg,
+            latencyMs = latencyMs
+        )
+    }
 
     private data class TimedEntry<T>(val value: T, val timestampMs: Long = System.currentTimeMillis()) {
         fun isFresh(ttlMs: Long): Boolean =
@@ -384,27 +542,52 @@ class CurseForgeRepository(
     }
 
     private suspend fun executeJsonGet(path: String, params: Map<String, String> = emptyMap()): JSONObject {
+        val startMs = System.currentTimeMillis()
         val auth = credentialProvider.getAuthConfig()
-        if (enablePublicFallback && auth is CurseForgeAuthConfig.DirectVaultKey && auth.apiKey == rejectedKeyInSession) {
-            throw CurseForgeApiException.Forbidden(isDistributionRestriction = false, serverReason = "API Key missing or invalid")
-        }
-        val (url, headers) = buildRequest(auth, path, params)
-        var response = transport.get(url, headers)
-        if ((response.statusCode == 401 || response.statusCode == 403) && auth is CurseForgeAuthConfig.DirectVaultKey) {
-            val bundled = credentialProvider.getBundledAuthConfig()
-            if (bundled != null && bundled.apiKey != auth.apiKey) {
-                val (retryUrl, retryHeaders) = buildRequest(bundled, path, params)
-                response = transport.get(retryUrl, retryHeaders)
+        val status = credentialProvider.getCredentialStatus()
+        try {
+            if (enablePublicFallback && auth is CurseForgeAuthConfig.DirectVaultKey && auth.apiKey == rejectedKeyInSession) {
+                throw CurseForgeApiException.Forbidden(isDistributionRestriction = false, serverReason = "API Key missing or invalid")
             }
-            if (response.statusCode == 401 || response.statusCode == 403) {
-                rejectedKeyInSession = auth.apiKey
+            val (url, headers) = buildRequest(auth, path, params)
+            var response = transport.get(url, headers)
+            if ((response.statusCode == 401 || response.statusCode == 403) && auth is CurseForgeAuthConfig.DirectVaultKey) {
+                val bundled = credentialProvider.getBundledAuthConfig()
+                if (bundled != null && bundled.apiKey != auth.apiKey) {
+                    val (retryUrl, retryHeaders) = buildRequest(bundled, path, params)
+                    response = transport.get(retryUrl, retryHeaders)
+                }
+                if (response.statusCode == 401 || response.statusCode == 403) {
+                    rejectedKeyInSession = auth.apiKey
+                }
             }
-        }
-        if (response.statusCode !in 200..299) {
-            mapHttpError(response, path, auth)
-        }
-        return runCatching { JSONObject(response.body) }.getOrElse { err ->
-            throw CurseForgeApiException.ParseError(err.message ?: "Invalid JSON")
+            if (response.statusCode !in 200..299) {
+                mapHttpError(response, path, auth)
+            }
+            val parsed = runCatching { JSONObject(response.body) }.getOrElse { err ->
+                throw CurseForgeApiException.ParseError(err.message ?: "Invalid JSON")
+            }
+            lastConnectionResult = CurseForgeConnectionTestResult(
+                state = CurseForgeConnectionState.CONNECTED,
+                credentialStatus = status,
+                errorCategory = CurseForgeErrorCategory.NONE,
+                message = when (auth) {
+                    is CurseForgeAuthConfig.BackendProxy -> "Connected via Backend Proxy"
+                    is CurseForgeAuthConfig.DirectVaultKey -> "Connected to CurseForge API"
+                    CurseForgeAuthConfig.Unconfigured -> "Configuration Required"
+                },
+                latencyMs = (System.currentTimeMillis() - startMs).coerceAtLeast(0L)
+            )
+            return parsed
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            lastConnectionResult = classifyFailure(
+                error = t,
+                statusOverride = status,
+                latencyMs = (System.currentTimeMillis() - startMs).coerceAtLeast(0L)
+            )
+            throw t
         }
     }
 

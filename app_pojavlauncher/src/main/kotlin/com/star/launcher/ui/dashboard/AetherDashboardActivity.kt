@@ -191,6 +191,26 @@ class AetherDashboardActivity : ComponentActivity() {
             LaunchedEffect(modsController) {
                 modsController.startObserving()
             }
+            LaunchedEffect(modsState.pendingGuiInstaller) {
+                val pending = modsState.pendingGuiInstaller ?: return@LaunchedEffect
+                modsController.consumePendingGuiInstaller()
+                val installerFile = java.io.File(pending.installerJarPath)
+                if (installerFile.isFile) {
+                    val intent = Intent(this@AetherDashboardActivity, net.kdt.pojavlaunch.JavaGUILauncherActivity::class.java).apply {
+                        when (pending.loaderType) {
+                            com.star.launcher.data.db.model.ModLoaderType.FORGE -> {
+                                net.kdt.pojavlaunch.modloaders.ForgeUtils.addAutoInstallArgs(this, installerFile, pending.expectedVersionId)
+                            }
+                            com.star.launcher.data.db.model.ModLoaderType.NEOFORGE -> {
+                                putExtra("javaArgs", "-jar ${installerFile.absolutePath} --install-client")
+                                putExtra("openLogOutput", true)
+                            }
+                            else -> putExtra("javaArgs", "-jar ${installerFile.absolutePath}")
+                        }
+                    }
+                    startActivity(intent)
+                }
+            }
             val backStack by navigation.backStack.collectAsStateWithLifecycle()
             val currentRoute = backStack.lastOrNull() ?: AetherRoute.Tab(DashboardTab.HOME)
 
@@ -847,7 +867,18 @@ fun AetherDashboardScreen(
                                     onDismissCredentialConfig = { modsController?.dismissCredentialConfigDialog() },
                                     onSaveDeveloperKey = { modsController?.saveDeveloperKey(it) },
                                     onSaveProxyConfig = { url, token -> modsController?.saveProxyConfig(url, token) },
-                                    onClearCredentials = { modsController?.clearCredentials() }
+                                    onClearCredentials = { modsController?.clearCredentials() },
+                                    onTestApiConnection = { modsController?.testApiConnection() },
+                                    onOpenInstallLoader = { preferred -> modsController?.openInstallLoaderDialog(preferred) },
+                                    onDismissInstallLoader = { modsController?.dismissInstallLoaderDialog() },
+                                    onSelectInstallLoaderType = { modsController?.selectInstallLoaderType(it) },
+                                    onSelectInstallLoaderCandidate = { modsController?.selectInstallLoaderCandidate(it) },
+                                    onRefreshInstallLoaderCandidates = { modsController?.refreshInstallLoaderCandidates() },
+                                    onStartModLoaderInstall = {
+                                        modsController?.startModLoaderInstall()
+                                        onRefresh()
+                                    },
+                                    onCancelModLoaderInstall = { modsController?.cancelModLoaderInstall() }
                                 )
                                 DashboardTab.COMMUNITY -> CommunityScreen(
                                     state = state,
@@ -984,7 +1015,17 @@ fun AetherDashboardScreen(
                                     onCancelDownload = { modsController?.cancelDownload(it) },
                                     onRetryLastInstall = { modsController?.retryLastInstall() },
                                     onDismissProgressItem = { modsController?.dismissProgressItem(it) },
-                                    onClearBanners = { modsController?.clearBanners() }
+                                    onClearBanners = { modsController?.clearBanners() },
+                                    onOpenInstallLoader = { preferred -> modsController?.openInstallLoaderDialog(preferred) },
+                                    onDismissInstallLoader = { modsController?.dismissInstallLoaderDialog() },
+                                    onSelectInstallLoaderType = { modsController?.selectInstallLoaderType(it) },
+                                    onSelectInstallLoaderCandidate = { modsController?.selectInstallLoaderCandidate(it) },
+                                    onRefreshInstallLoaderCandidates = { modsController?.refreshInstallLoaderCandidates() },
+                                    onStartModLoaderInstall = {
+                                        modsController?.startModLoaderInstall()
+                                        onRefresh()
+                                    },
+                                    onCancelModLoaderInstall = { modsController?.cancelModLoaderInstall() }
                                 )
                             }
                         }

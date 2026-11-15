@@ -31,6 +31,7 @@ import com.star.launcher.mods.compat.ModCompatibilityEngine
 import com.star.launcher.mods.deps.ModDependencyResolver
 import com.star.launcher.mods.download.ModDownloadInstaller
 import com.star.launcher.mods.inventory.InstalledModManager
+import com.star.launcher.mods.loader.ModLoaderInstaller
 import com.star.launcher.version.PojavMinecraftInstallBackend
 import com.star.launcher.version.VersionCatalogService
 import com.star.launcher.version.VersionInstallCoordinator
@@ -115,6 +116,9 @@ class AetherContainer(context: Context) {
             settingsRepository = settingsRepository,
             bundledApiKeyProvider = {
                 runCatching { appContext.getString(net.kdt.pojavlaunch.R.string.curseforge_api_key) }.getOrNull()
+            },
+            bundledProxyUrlProvider = {
+                runCatching { appContext.getString(net.kdt.pojavlaunch.R.string.curseforge_default_proxy_url) }.getOrNull()
             }
         )
     }
@@ -152,6 +156,15 @@ class AetherContainer(context: Context) {
             installedModDao = database.installedModDao(),
             repository = curseForgeRepository,
             compatibilityEngine = modCompatibilityEngine
+        )
+    }
+    val modLoaderInstaller: ModLoaderInstaller by lazy {
+        ModLoaderInstaller(
+            storageManager = storageManager,
+            gameVersionDao = database.gameVersionDao(),
+            gameInstanceDao = database.gameInstanceDao(),
+            versionManager = versionManager,
+            environmentResolver = instanceEnvironmentResolver
         )
     }
 

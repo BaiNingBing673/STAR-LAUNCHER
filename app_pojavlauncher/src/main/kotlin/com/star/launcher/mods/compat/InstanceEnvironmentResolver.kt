@@ -6,7 +6,9 @@ import com.star.launcher.data.db.entity.GameInstanceEntity
 import com.star.launcher.data.db.entity.GameVersionEntity
 import com.star.launcher.data.db.model.ModLoaderType
 import com.star.launcher.mods.api.CurseForgeModLoader
+import com.star.launcher.version.ParsedVersionManifest
 import com.star.launcher.version.VersionManager
+import org.json.JSONObject
 import java.io.File
 
 enum class EnvironmentDetectionSource {
@@ -49,7 +51,21 @@ class InstanceEnvironmentResolver(
         val rawVersionId = instance.versionId?.trim()?.takeIf {
             it.isNotBlank() && !it.equals("unknown", ignoreCase = true)
         }
-        if (rawVersionId == null) {
+        val instanceDir = instance.gameDirPath.takeIf { it.isNotBlank() }?.let { File(it) }
+
+        // Check instance-level loader metadata (.star_loader.json / mmc-pack.json)
+        val instanceLoaderMeta = instanceDir?.let { readInstanceDirectoryLoaderMeta(it, rawVersionId) }
+
+        val effectiveVersionId = when {
+            rawVersionId == null -> instanceLoaderMeta?.installedVersionId
+            instanceLoaderMeta != null &&
+                instanceLoaderMeta.installedVersionId.isNotBlank() &&
+                (rawVersionId == instanceLoaderMeta.installedVersionId || rawVersionId == instanceLoaderMeta.minecraftVersion) ->
+                instanceLoaderMeta.installedVersionId
+            else -> rawVersionId
+        }
+
+        if (effectiveVersionId == null && instanceLoaderMeta == null) {
             return InstanceEnvironment(
                 instanceId = instance.instanceId,
                 instanceName = instance.name,
@@ -62,34 +78,68 @@ class InstanceEnvironmentResolver(
             )
         }
 
-        // 1. Prefer on-disk manifest if readable (authoritative)
-        val manifestFile = File(storageManager.versionsRoot(), "$rawVersionId/$rawVersionId.json")
-        if (manifestFile.isFile && manifestFile.length() > 0L) {
-            val parsed = runCatching {
-                VersionManager.parseManifestJson(manifestFile.readText(), rawVersionId)
-            }.getOrNull()
-            if (parsed != null) {
-                val baseMc = resolveBaseMinecraftVersion(
-                    versionId = parsed.versionId,
-                    inheritsFrom = parsed.inheritsFrom,
-                    loaderType = parsed.modLoaderType,
-                    loaderVersion = parsed.modLoaderVersion
-                )
+        val dbVersion: GameVersionEntity? = effectiveVersionId?.let { gameVersionDao.getById(it) }
+            ?: rawVersionId?.takeIf { it != effectiveVersionId }?.let { gameVersionDao.getById(it) }
+
+        // 1. Prefer on-disk manifest chain (versionsRoot, custom manifestPath, or instance directory)
+        if (effectiveVersionId != null) {
+            val chain = readManifestChain(
+                startVersionId = effectiveVersionId,
+                customManifestPath = dbVersion?.manifestPath,
+                instanceDir = instanceDir
+            )
+            if (chain.isNotEmpty()) {
+                val moddedNode = chain.firstOrNull { it.modLoaderType != ModLoaderType.VANILLA }
+                val primaryNode = moddedNode ?: chain.first()
+                val loaderType = when {
+                    primaryNode.modLoaderType != ModLoaderType.VANILLA -> primaryNode.modLoaderType
+                    instanceLoaderMeta != null && instanceLoaderMeta.loaderType != ModLoaderType.VANILLA -> instanceLoaderMeta.loaderType
+                    else -> ModLoaderType.VANILLA
+                }
+                val loaderVersion = primaryNode.modLoaderVersion ?: instanceLoaderMeta?.loaderVersion
+                val baseMc = chain.firstNotNullOfOrNull { node ->
+                    node.detectedMinecraftVersion?.takeIf { MC_VERSION_EXACT_REGEX.matches(it) }
+                } ?: chain.lastOrNull()?.let { rootNode ->
+                    if (rootNode.modLoaderType == ModLoaderType.VANILLA && rootNode.inheritsFrom == null) {
+                        rootNode.versionId
+                    } else {
+                        null
+                    }
+                } ?: resolveBaseMinecraftVersion(
+                    versionId = primaryNode.versionId,
+                    inheritsFrom = primaryNode.inheritsFrom,
+                    loaderType = loaderType,
+                    loaderVersion = loaderVersion
+                ) ?: instanceLoaderMeta?.minecraftVersion
+
                 return InstanceEnvironment(
                     instanceId = instance.instanceId,
                     instanceName = instance.name,
                     gameDirPath = instance.gameDirPath,
-                    rawVersionId = rawVersionId,
+                    rawVersionId = effectiveVersionId,
                     baseMinecraftVersion = baseMc,
-                    loaderType = parsed.modLoaderType,
-                    loaderVersion = parsed.modLoaderVersion,
+                    loaderType = loaderType,
+                    loaderVersion = loaderVersion,
                     detectionSource = EnvironmentDetectionSource.MANIFEST_VERIFIED
                 )
             }
         }
 
-        // 2. Check Room catalog entry (if scanned or synced)
-        val dbVersion: GameVersionEntity? = gameVersionDao.getById(rawVersionId)
+        // 2. If instance directory has verified loader metadata (.star_loader.json / mmc-pack.json)
+        if (instanceLoaderMeta != null && instanceLoaderMeta.loaderType != ModLoaderType.VANILLA) {
+            return InstanceEnvironment(
+                instanceId = instance.instanceId,
+                instanceName = instance.name,
+                gameDirPath = instance.gameDirPath,
+                rawVersionId = effectiveVersionId ?: rawVersionId,
+                baseMinecraftVersion = instanceLoaderMeta.minecraftVersion ?: rawVersionId?.let { inferFromVersionId(it).first },
+                loaderType = instanceLoaderMeta.loaderType,
+                loaderVersion = instanceLoaderMeta.loaderVersion,
+                detectionSource = EnvironmentDetectionSource.MANIFEST_VERIFIED
+            )
+        }
+
+        // 3. Check Room catalog entry (if scanned or synced)
         if (dbVersion != null && (dbVersion.isInstalled || dbVersion.modLoaderType != ModLoaderType.VANILLA || dbVersion.inheritsFrom != null)) {
             val baseMc = resolveBaseMinecraftVersion(
                 versionId = dbVersion.versionId,
@@ -113,8 +163,9 @@ class InstanceEnvironmentResolver(
             )
         }
 
-        // 3. Infer from versionId string patterns as fallback (marked VERSION_ID_INFERRED)
-        val inferred = inferFromVersionId(rawVersionId)
+        // 4. Infer from versionId string patterns as fallback (marked VERSION_ID_INFERRED)
+        val targetId = effectiveVersionId ?: rawVersionId ?: ""
+        val inferred = inferFromVersionId(targetId)
         return InstanceEnvironment(
             instanceId = instance.instanceId,
             instanceName = instance.name,
@@ -127,12 +178,148 @@ class InstanceEnvironmentResolver(
         )
     }
 
+    private fun readManifestChain(
+        startVersionId: String,
+        customManifestPath: String?,
+        instanceDir: File?
+    ): List<ParsedVersionManifest> {
+        val chain = mutableListOf<ParsedVersionManifest>()
+        val visited = HashSet<String>()
+        var currentId: String? = startVersionId
+        var isFirst = true
+
+        while (currentId != null && visited.add(currentId) && chain.size < 6) {
+            val manifestFile = findManifestFile(
+                versionId = currentId,
+                customManifestPath = if (isFirst) customManifestPath else null,
+                instanceDir = instanceDir
+            ) ?: break
+            isFirst = false
+            val parsed = runCatching {
+                VersionManager.parseManifestJson(manifestFile.readText(), currentId)
+            }.getOrNull() ?: break
+            chain.add(parsed)
+            currentId = parsed.inheritsFrom?.trim()?.takeIf { it.isNotEmpty() }
+        }
+        return chain
+    }
+
+    private fun findManifestFile(
+        versionId: String,
+        customManifestPath: String?,
+        instanceDir: File?
+    ): File? {
+        val candidates = buildList {
+            add(File(storageManager.versionsRoot(), "$versionId/$versionId.json"))
+            if (!customManifestPath.isNullOrBlank()) {
+                add(File(customManifestPath))
+            }
+            if (instanceDir != null) {
+                add(File(instanceDir, "versions/$versionId/$versionId.json"))
+                add(File(instanceDir, "$versionId.json"))
+                add(File(instanceDir, "version.json"))
+            }
+        }
+        return candidates.firstOrNull { it.isFile && it.length() > 0L }
+    }
+
+    private data class InstanceDirectoryLoaderMeta(
+        val installedVersionId: String,
+        val minecraftVersion: String?,
+        val loaderType: ModLoaderType,
+        val loaderVersion: String?
+    )
+
+    private fun readInstanceDirectoryLoaderMeta(
+        instanceDir: File,
+        rawVersionId: String?
+    ): InstanceDirectoryLoaderMeta? {
+        if (!instanceDir.isDirectory) return null
+
+        // 1. Check STAR Launcher's authoritative instance loader metadata file (.star_loader.json)
+        val starMetaFile = File(instanceDir, STAR_LOADER_METADATA_FILE)
+        if (starMetaFile.isFile && starMetaFile.length() > 0L) {
+            runCatching {
+                val obj = JSONObject(starMetaFile.readText())
+                val loaderRaw = obj.optString("loaderType").trim().uppercase()
+                val loaderType = runCatching { ModLoaderType.valueOf(loaderRaw) }.getOrNull()
+                val installedId = obj.optString("installedVersionId").trim()
+                val mcVer = obj.optString("minecraftVersion").trim().ifEmpty { null }
+                val loaderVer = obj.optString("loaderVersion").trim().ifEmpty { null }
+                if (loaderType != null && loaderType != ModLoaderType.VANILLA) {
+                    if (rawVersionId == null || rawVersionId == installedId || rawVersionId == mcVer) {
+                        return InstanceDirectoryLoaderMeta(
+                            installedVersionId = installedId,
+                            minecraftVersion = mcVer,
+                            loaderType = loaderType,
+                            loaderVersion = loaderVer
+                        )
+                    }
+                }
+            }
+        }
+
+        // 2. Check MultiMC / Prism Launcher mmc-pack.json if present in instance directory
+        val mmcPackFile = File(instanceDir, "mmc-pack.json")
+        if (mmcPackFile.isFile && mmcPackFile.length() > 0L) {
+            runCatching {
+                val obj = JSONObject(mmcPackFile.readText())
+                val components = obj.optJSONArray("components")
+                if (components != null) {
+                    var mcVer: String? = null
+                    var detectedLoader = ModLoaderType.VANILLA
+                    var detectedLoaderVer: String? = null
+                    for (i in 0 until components.length()) {
+                        val comp = components.optJSONObject(i) ?: continue
+                        val uid = comp.optString("uid").lowercase()
+                        val ver = comp.optString("version").trim().ifEmpty { null }
+                        when {
+                            uid == "net.minecraft" -> mcVer = ver
+                            uid == "org.quiltmc.quilt-loader" -> {
+                                detectedLoader = ModLoaderType.QUILT
+                                detectedLoaderVer = ver
+                            }
+                            uid == "net.fabricmc.fabric-loader" -> {
+                                if (detectedLoader == ModLoaderType.VANILLA) {
+                                    detectedLoader = ModLoaderType.FABRIC
+                                    detectedLoaderVer = ver
+                                }
+                            }
+                            uid == "net.neoforged" -> {
+                                detectedLoader = ModLoaderType.NEOFORGE
+                                detectedLoaderVer = ver
+                            }
+                            uid == "net.minecraftforge" -> {
+                                if (detectedLoader == ModLoaderType.VANILLA) {
+                                    detectedLoader = ModLoaderType.FORGE
+                                    detectedLoaderVer = ver
+                                }
+                            }
+                        }
+                    }
+                    if (detectedLoader != ModLoaderType.VANILLA) {
+                        return InstanceDirectoryLoaderMeta(
+                            installedVersionId = rawVersionId.orEmpty(),
+                            minecraftVersion = mcVer,
+                            loaderType = detectedLoader,
+                            loaderVersion = detectedLoaderVer
+                        )
+                    }
+                }
+            }
+        }
+
+        return null
+    }
+
     companion object {
+        const val STAR_LOADER_METADATA_FILE = ".star_loader.json"
         private val FABRIC_ID_REGEX = Regex("""^fabric-loader-([^-]+)-(.+)$""", RegexOption.IGNORE_CASE)
         private val QUILT_ID_REGEX = Regex("""^quilt-loader-([^-]+)-(.+)$""", RegexOption.IGNORE_CASE)
         private val FORGE_ID_REGEX = Regex("""^(\d+\.\d+(?:\.\d+)?)-forge-(.+)$""", RegexOption.IGNORE_CASE)
         private val NEOFORGE_ID_REGEX = Regex("""^neoforge-(.+)$""", RegexOption.IGNORE_CASE)
         private val MC_VERSION_REGEX = Regex("""(\d+\.\d+(?:\.\d+)?)""")
+        private val MC_VERSION_EXACT_REGEX = Regex("""^\d+\.\d+(?:\.\d+)?$""")
 
         fun resolveBaseMinecraftVersion(
             versionId: String,

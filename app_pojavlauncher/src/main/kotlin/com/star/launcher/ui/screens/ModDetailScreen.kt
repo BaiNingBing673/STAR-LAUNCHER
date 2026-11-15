@@ -38,12 +38,14 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.star.launcher.data.db.model.ModLoaderType
 import com.star.launcher.mods.api.CurseForgeFile
 import com.star.launcher.mods.api.CurseForgeMod
 import com.star.launcher.mods.api.CurseForgeModLoader
 import com.star.launcher.mods.api.CurseForgeRelationType
 import com.star.launcher.mods.api.CurseForgeReleaseType
 import com.star.launcher.mods.compat.ModCompatibilityAssessment
+import com.star.launcher.mods.loader.ModLoaderCandidate
 import com.star.launcher.mods.ui.ModsUiState
 import com.star.launcher.ui.components.AetherAccentCard
 import com.star.launcher.ui.components.AetherEmptyState
@@ -77,6 +79,13 @@ fun ModDetailScreen(
     onRetryLastInstall: () -> Unit,
     onDismissProgressItem: (Long) -> Unit,
     onClearBanners: () -> Unit,
+    onOpenInstallLoader: (ModLoaderType?) -> Unit = {},
+    onDismissInstallLoader: () -> Unit = {},
+    onSelectInstallLoaderType: (ModLoaderType) -> Unit = {},
+    onSelectInstallLoaderCandidate: (ModLoaderCandidate) -> Unit = {},
+    onRefreshInstallLoaderCandidates: () -> Unit = {},
+    onStartModLoaderInstall: () -> Unit = {},
+    onCancelModLoaderInstall: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val detail = state.detailState
@@ -341,6 +350,20 @@ fun ModDetailScreen(
                             color = AetherColors.OnSurfaceVariantDark
                         )
                     }
+                    overview.reasons.forEach { reason ->
+                        Text(
+                            text = "• $reason",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (overview.canInstall) AetherColors.OnSurfaceVariantDark else AetherColors.TierTestedFg
+                        )
+                    }
+                    if (overview.requiresModLoaderInstall || (env != null && !env.isModdedLoader)) {
+                        AetherPrimaryButton(
+                            text = "Install Mod Loader",
+                            onClick = { onOpenInstallLoader(overview.suggestedModLoader) },
+                            icon = AetherIcons.Download
+                        )
+                    }
                 }
             }
         }
@@ -399,6 +422,7 @@ fun ModDetailScreen(
                     assessment = detail.fileAssessments[file.id],
                     hasSelectedInstance = state.instanceEnvironment != null,
                     onInstall = { onPrepareInstall(mod, file) },
+                    onInstallModLoader = { preferred -> onOpenInstallLoader(preferred) },
                     onOpenWebsite = {
                         mod.links.websiteUrl?.let { url ->
                             runCatching { uriHandler.openUri(url) }
@@ -414,7 +438,11 @@ fun ModDetailScreen(
         ModInstallPlanDialog(
             dialogState = pendingPlan,
             onConfirm = onConfirmPlanInstall,
-            onDismiss = onDismissPlanDialog
+            onDismiss = onDismissPlanDialog,
+            onInstallModLoader = { preferred ->
+                onDismissPlanDialog()
+                onOpenInstallLoader(preferred)
+            }
         )
     }
 
@@ -423,6 +451,18 @@ fun ModDetailScreen(
         RestrictedDownloadDialog(
             notice = restricted,
             onDismiss = onDismissRestrictedNotice
+        )
+    }
+
+    if (state.showInstallLoaderDialog) {
+        InstallModLoaderDialog(
+            state = state,
+            onSelectLoaderType = onSelectInstallLoaderType,
+            onSelectCandidate = onSelectInstallLoaderCandidate,
+            onRefreshCandidates = onRefreshInstallLoaderCandidates,
+            onStartInstall = onStartModLoaderInstall,
+            onCancelInstall = onCancelModLoaderInstall,
+            onDismiss = onDismissInstallLoader
         )
     }
 }
@@ -540,6 +580,7 @@ private fun ModFileVersionCard(
     assessment: ModCompatibilityAssessment?,
     hasSelectedInstance: Boolean,
     onInstall: () -> Unit,
+    onInstallModLoader: (ModLoaderType?) -> Unit = {},
     onOpenWebsite: () -> Unit
 ) {
     val isRestricted = mod.allowModDistribution == false || file.downloadUrl.isNullOrBlank()
@@ -614,6 +655,13 @@ private fun ModFileVersionCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = if (assessment.canInstall) AetherColors.OnSurfaceVariantDark else AetherColors.TierBlockedFg
             )
+            assessment.reasons.forEach { reason ->
+                Text(
+                    text = "• $reason",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (assessment.canInstall) AetherColors.OnSurfaceVariantDark else AetherColors.TierTestedFg
+                )
+            }
         }
 
         val reqDeps = file.dependencies.filter { it.relationType == CurseForgeRelationType.REQUIRED_DEPENDENCY }
@@ -633,7 +681,7 @@ private fun ModFileVersionCard(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End
+            horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm, Alignment.End)
         ) {
             when {
                 isRestricted -> {
@@ -648,6 +696,20 @@ private fun ModFileVersionCard(
                         text = "Select Instance First",
                         onClick = onInstall,
                         enabled = false
+                    )
+                }
+                assessment?.requiresModLoaderInstall == true -> {
+                    AetherTonalButton(
+                        text = "Install Mod Loader",
+                        onClick = { onInstallModLoader(assessment.suggestedModLoader) },
+                        containerColor = AetherColors.PrimaryContainerDark,
+                        contentColor = AetherColors.AccentCyan
+                    )
+                    AetherPrimaryButton(
+                        text = "Incompatible",
+                        onClick = onInstall,
+                        enabled = false,
+                        icon = AetherIcons.Download
                     )
                 }
                 else -> {

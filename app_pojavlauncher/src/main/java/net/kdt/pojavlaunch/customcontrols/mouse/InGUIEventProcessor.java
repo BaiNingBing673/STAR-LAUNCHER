@@ -47,7 +47,7 @@ public class InGUIEventProcessor implements TouchEventProcessor {
                 if(pointerCount == 1 || LauncherPreferences.PREF_DISABLE_GESTURES) {
                     if(touchpadDisplayed()) {
                         mTouchpad.applyMotionVector(mTracker.getMotionVector());
-                    } else {
+                    } else if (pointerIndex >= 0) {
                         float mainPointerX = motionEvent.getX(pointerIndex);
                         float mainPointerY = motionEvent.getY(pointerIndex);
                         sendTouchCoordinates(mainPointerX, mainPointerY);
@@ -118,6 +118,11 @@ public class InGUIEventProcessor implements TouchEventProcessor {
     @Override
     public void cancelPendingActions() {
         mScroller.resetScrollOvershoot();
-        disableMouse();
+        mTracker.cancelTracking();
+        resetGesture();
+        CallbackBridge.flushPendingTapRelease();
+        if (mIsMouseDown) {
+            disableMouse();
+        }
     }
 }

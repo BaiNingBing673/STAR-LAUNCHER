@@ -5,6 +5,8 @@ import net.kdt.pojavlaunch.customcontrols.gamepad.direct.DirectGamepadEnableHand
 import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 
 import android.content.*;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Choreographer;
@@ -13,6 +15,8 @@ import android.view.MotionEvent;
 
 import androidx.annotation.Keep;
 import androidx.annotation.Nullable;
+
+import com.star.launcher.hud.StarHudInputManager;
 
 import org.libsdl.app.SDLActivity;
 
@@ -56,10 +60,55 @@ public class CallbackBridge {
     public static boolean sGamepadDirectInput = false;
     public static boolean sdlControllerActive = false;
     private static int sMouseButtonState = 0;
+    private static final Object sPendingTapLock = new Object();
+    @Nullable private static Choreographer.FrameCallback sPendingTapReleaseCallback;
+    private static int sPendingTapReleaseButton = -1;
+    private static volatile boolean sSawGrabLossSinceNotify = false;
+    private static final Handler sGrabHandler = new Handler(Looper.getMainLooper());
 
     public static void putMouseEventWithCoords(int button, float x, float y) {
+        flushPendingTapRelease();
         putMouseEventWithCoords(button, true, x, y);
-        sChoreographer.postFrameCallbackDelayed(l -> putMouseEventWithCoords(button, false, x, y), 33);
+        final boolean scheduledWhileGrabbing = isGrabbing;
+        final Choreographer.FrameCallback callback = l -> {
+            synchronized (sPendingTapLock) {
+                if (sPendingTapReleaseCallback == null) {
+                    return;
+                }
+                sPendingTapReleaseCallback = null;
+                sPendingTapReleaseButton = -1;
+            }
+            // Never fire a stale GUI delayed release after gameplay grab has already started.
+            if (!scheduledWhileGrabbing && isGrabbing) {
+                return;
+            }
+            putMouseEventWithCoords(button, false, x, y);
+        };
+        synchronized (sPendingTapLock) {
+            sPendingTapReleaseCallback = callback;
+            sPendingTapReleaseButton = button;
+        }
+        sChoreographer.postFrameCallbackDelayed(callback, 33);
+    }
+
+    public static void flushPendingTapRelease() {
+        Choreographer.FrameCallback pending;
+        int pendingButton;
+        synchronized (sPendingTapLock) {
+            pending = sPendingTapReleaseCallback;
+            pendingButton = sPendingTapReleaseButton;
+            sPendingTapReleaseCallback = null;
+            sPendingTapReleaseButton = -1;
+        }
+        if (pending != null) {
+            try {
+                sChoreographer.removeFrameCallback(pending);
+            } catch (Throwable ignored) {
+            }
+            if (pendingButton >= 0 && !StarHudInputManager.getInstance().isMouseButtonHeld(pendingButton)) {
+                sendMouseKeycode(pendingButton, CallbackBridge.getCurrentMods(), false);
+            }
+        }
     }
     
     public static void putMouseEventWithCoords(int button, boolean isDown, float x, float y /* , int dz, long nanos */) {
@@ -345,17 +394,45 @@ public class CallbackBridge {
     @Keep
     private static void onGrabStateChanged(final boolean grabbing) {
         isGrabbing = grabbing;
+        if (!grabbing) {
+            sSawGrabLossSinceNotify = true;
+            StarHudInputManager.getInstance().releaseAllInputs("grab_state_lost");
+        } else {
+            sGrabHandler.post(CallbackBridge::flushPendingTapRelease);
+        }
         sChoreographer.postFrameCallbackDelayed((time) -> {
-            // If the grab re-changed, skip notify process
-            if(isGrabbing != grabbing) return;
-
-            System.out.println("Grab changed : " + grabbing);
-            synchronized (grabListeners) {
-                for (GrabListener g : grabListeners) g.onGrabState(grabbing);
+            if (isGrabbing != grabbing) {
+                // Even if grab flickered false -> true inside 16ms, never drop the ungrab cleanup.
+                if (sSawGrabLossSinceNotify) {
+                    sSawGrabLossSinceNotify = false;
+                    notifyGrabListeners(false);
+                    if (isGrabbing) {
+                        notifyGrabListeners(true);
+                    }
+                }
+                return;
             }
 
+            if (!grabbing) {
+                sSawGrabLossSinceNotify = false;
+            } else if (sSawGrabLossSinceNotify) {
+                sSawGrabLossSinceNotify = false;
+                notifyGrabListeners(false);
+            }
+            System.out.println("Grab changed : " + grabbing);
+            notifyGrabListeners(grabbing);
         }, 16);
 
+    }
+
+    private static void notifyGrabListeners(boolean grabbing) {
+        ArrayList<GrabListener> snapshot;
+        synchronized (grabListeners) {
+            snapshot = new ArrayList<>(grabListeners);
+        }
+        for (GrabListener g : snapshot) {
+            g.onGrabState(grabbing);
+        }
     }
     public static void addGrabListener(GrabListener listener) {
         synchronized (grabListeners) {

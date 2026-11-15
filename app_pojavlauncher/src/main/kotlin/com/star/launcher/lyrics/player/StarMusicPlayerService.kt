@@ -18,12 +18,16 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.star.launcher.lyrics.media.ExternalMediaSessionMonitor
 import com.star.launcher.ui.dashboard.AetherDashboardActivity
 import net.kdt.pojavlaunch.R
+import java.util.concurrent.Executors
+import kotlin.math.max
 
 /**
  * Optional lightweight background audio player integrated into STAR Launcher.
@@ -39,7 +43,13 @@ class StarMusicPlayerService : Service() {
     private var playlist: List<StarLocalTrack> = emptyList()
     private var currentIndex: Int = -1
     private var isPrepared: Boolean = false
+    private var isInForeground: Boolean = false
     private var currentArtBitmap: Bitmap? = null
+    private var pendingArtworkRequestId: Long = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val artworkExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "StarArtworkDecoder").apply { isDaemon = true }
+    }
 
     private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
@@ -61,7 +71,14 @@ class StarMusicPlayerService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action ?: return START_NOT_STICKY
+        ensureForegroundStarted()
+        val action = intent?.action
+        if (action == null) {
+            if (!isPrepared) {
+                stopPlaybackAndSelf()
+            }
+            return START_NOT_STICKY
+        }
         playlist = StarPlaylistStore.loadPlaylist(this)
         when (action) {
             ACTION_PLAY_INDEX -> {
@@ -71,7 +88,11 @@ class StarMusicPlayerService : Service() {
             ACTION_PLAY_TRACK_ID -> {
                 val trackId = intent.getStringExtra(EXTRA_TRACK_ID)
                 val idx = playlist.indexOfFirst { it.id == trackId }
-                if (idx >= 0) playAtIndex(idx)
+                if (idx >= 0) {
+                    playAtIndex(idx)
+                } else if (!isPrepared) {
+                    stopPlaybackAndSelf()
+                }
             }
             ACTION_TOGGLE_PLAY_PAUSE -> {
                 if (mediaPlayer?.isPlaying == true) pausePlayback() else resumeOrStart()
@@ -93,6 +114,11 @@ class StarMusicPlayerService : Service() {
             ACTION_STOP -> {
                 stopPlaybackAndSelf()
             }
+            else -> {
+                if (!isPrepared) {
+                    stopPlaybackAndSelf()
+                }
+            }
         }
         return START_NOT_STICKY
     }
@@ -100,13 +126,16 @@ class StarMusicPlayerService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        pendingArtworkRequestId++
+        mainHandler.removeCallbacksAndMessages(null)
+        artworkExecutor.shutdownNow()
         releasePlayer()
         abandonAudioFocus()
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null
-        currentArtBitmap?.recycle()
         currentArtBitmap = null
+        isInForeground = false
         StarPlayerStateBridge.write(this, StarPlayerSnapshot(isServiceActive = false))
         broadcastStateChanged()
         super.onDestroy()
@@ -136,9 +165,19 @@ class StarMusicPlayerService : Service() {
         currentIndex = safeIdx
         isPrepared = false
 
-        currentArtBitmap?.recycle()
-        currentArtBitmap = track.artworkPath?.let { path ->
-            runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
+        currentArtBitmap = null
+        val artworkRequestId = ++pendingArtworkRequestId
+        val artPath = track.artworkPath
+        if (!artPath.isNullOrBlank()) {
+            artworkExecutor.execute {
+                val decoded = decodeBoundedArtwork(artPath)
+                mainHandler.post {
+                    if (artworkRequestId == pendingArtworkRequestId && currentIndex == safeIdx) {
+                        currentArtBitmap = decoded
+                        publishStateAndNotification()
+                    }
+                }
+            }
         }
 
         if (!requestAudioFocus()) {
@@ -238,6 +277,7 @@ class StarMusicPlayerService : Service() {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
+        isInForeground = false
         StarPlayerStateBridge.write(this, StarPlayerSnapshot(isServiceActive = false))
         broadcastStateChanged()
         stopSelf()
@@ -315,8 +355,48 @@ class StarMusicPlayerService : Service() {
 
         if (track != null) {
             startForeground(NOTIFICATION_ID, buildMediaNotification(track, playing))
+            isInForeground = true
         }
     }
+
+    private fun ensureForegroundStarted() {
+        if (isInForeground) return
+        val currentTrack = playlist.getOrNull(currentIndex)
+        if (currentTrack != null) {
+            startForeground(
+                NOTIFICATION_ID,
+                buildMediaNotification(currentTrack, isPrepared && mediaPlayer?.isPlaying == true)
+            )
+        } else {
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(this, CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+            val placeholder = builder
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle("STAR Music Player")
+                .setContentText("Preparing playback")
+                .build()
+            startForeground(NOTIFICATION_ID, placeholder)
+        }
+        isInForeground = true
+    }
+
+    private fun decodeBoundedArtwork(path: String): Bitmap? = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        val maxSide = max(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (maxSide / (sample * 2) >= 512) {
+            sample *= 2
+        }
+        BitmapFactory.decodeFile(
+            path,
+            BitmapFactory.Options().apply { inSampleSize = sample }
+        )
+    }.getOrNull()
 
     private fun buildMediaNotification(track: StarLocalTrack, playing: Boolean): Notification {
         val openAppIntent = Intent(this, AetherDashboardActivity::class.java).apply {

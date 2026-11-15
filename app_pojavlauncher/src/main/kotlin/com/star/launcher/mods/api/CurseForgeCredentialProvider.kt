@@ -33,8 +33,14 @@ enum class CurseForgeCredentialStatus {
 class CurseForgeCredentialProvider(
     private val tokenVault: TokenVault,
     private val settingsRepository: AetherSettingsRepository,
-    private val bundledApiKeyProvider: () -> String? = { null }
+    private val bundledApiKeyProvider: () -> String? = { null },
+    private val bundledProxyUrlProvider: () -> String? = { null }
 ) {
+    constructor(
+        tokenVault: TokenVault,
+        settingsRepository: AetherSettingsRepository,
+        bundledApiKeyProvider: () -> String?
+    ) : this(tokenVault, settingsRepository, bundledApiKeyProvider, { null })
     fun getBundledAuthConfig(): CurseForgeAuthConfig.DirectVaultKey? {
         val raw = runCatching { bundledApiKeyProvider() }.getOrNull() ?: return null
         val normalized = normalizeDeveloperKey(raw)
@@ -45,6 +51,18 @@ class CurseForgeCredentialProvider(
         }
     }
 
+    fun getBundledProxyConfig(): CurseForgeAuthConfig.BackendProxy? {
+        val raw = runCatching { bundledProxyUrlProvider() }.getOrNull()?.trim()?.trimEnd('/') ?: return null
+        return if (isValidProxyUrl(raw)) {
+            CurseForgeAuthConfig.BackendProxy(proxyBaseUrl = raw, clientToken = null)
+        } else {
+            null
+        }
+    }
+
+    suspend fun getSavedProxyUrl(): String =
+        settingsRepository.getString(KEY_PROXY_BASE_URL, "").trim()
+
     suspend fun getAuthConfig(): CurseForgeAuthConfig {
         val mode = settingsRepository.getString(KEY_AUTH_MODE, MODE_UNCONFIGURED)
         return when (mode) {
@@ -54,7 +72,7 @@ class CurseForgeCredentialProvider(
                     val token = tokenVault.getSecret(VAULT_ALIAS_PROXY_TOKEN)?.trim()?.takeIf { it.isNotEmpty() }
                     CurseForgeAuthConfig.BackendProxy(proxyBaseUrl = url, clientToken = token)
                 } else {
-                    getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
+                    getBundledProxyConfig() ?: getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
                 }
             }
             MODE_DIRECT_VAULT -> {
@@ -63,7 +81,7 @@ class CurseForgeCredentialProvider(
                 if (key != null) {
                     CurseForgeAuthConfig.DirectVaultKey(apiKey = key)
                 } else {
-                    getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
+                    getBundledProxyConfig() ?: getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
                 }
             }
             else -> {
@@ -72,7 +90,13 @@ class CurseForgeCredentialProvider(
                 if (fallbackKey != null) {
                     CurseForgeAuthConfig.DirectVaultKey(apiKey = fallbackKey)
                 } else {
-                    getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
+                    val savedProxy = settingsRepository.getString(KEY_PROXY_BASE_URL, "").trim().trimEnd('/')
+                    if (isValidProxyUrl(savedProxy)) {
+                        val token = tokenVault.getSecret(VAULT_ALIAS_PROXY_TOKEN)?.trim()?.takeIf { it.isNotEmpty() }
+                        CurseForgeAuthConfig.BackendProxy(proxyBaseUrl = savedProxy, clientToken = token)
+                    } else {
+                        getBundledProxyConfig() ?: getBundledAuthConfig() ?: CurseForgeAuthConfig.Unconfigured
+                    }
                 }
             }
         }

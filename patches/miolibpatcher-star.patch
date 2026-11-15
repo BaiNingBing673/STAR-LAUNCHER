@@ -1,0 +1,1142 @@
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 2f3e0ae29798e7ac217769794afd1ed1c1ee6ecd..0f0d810c5b4eaac233e2b6aee85fcb4149cc411b 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -11,6 +11,7 @@ repositories {
+ dependencies {
+     implementation("org.javassist:javassist:3.29.2-GA")
+     testImplementation("org.junit.jupiter:junit-jupiter:5.8.2")
++    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.8.2")
+ }
+ 
+ java {
+diff --git a/src/main/java/com/mio/libpatcher/MainAgent.java b/src/main/java/com/mio/libpatcher/MainAgent.java
+index 2afab934a40b33613a0c9d03f30d550f33a09489..8b071713449216aba296f931dbd2874e264c3924 100644
+--- a/src/main/java/com/mio/libpatcher/MainAgent.java
++++ b/src/main/java/com/mio/libpatcher/MainAgent.java
+@@ -53,6 +53,7 @@ public class MainAgent {
+         List<BaseTransformer> transformers = new ArrayList<>();
+         transformers.add(new TTSTransformer());
+         transformers.add(new LibraryTransformer());
++        transformers.add(new GLTransformer());
+         transformers.add(new SystemInfoTransformer());
+         transformers.add(new RandomPatchesTransformer());
+         transformers.add(new ProcessorIdentifierTransformer());
+@@ -68,6 +69,10 @@ public class MainAgent {
+         transformers.add(new ALC10Transformer());
+         transformers.add(new ASMTransformer());
+         transformers.add(new SmoothFontTransformer());
++        transformers.add(new VulkanSurfaceTransformer());
++        transformers.add(new MinecraftSurfaceResumeTransformer());
++        transformers.add(new GlSingleWindowTransformer());
++        transformers.add(new GlShaderUniformNameTransformer());
+         return transformers;
+     }
+ 
+diff --git a/src/main/java/com/mio/libpatcher/transformer/GLTransformer.java b/src/main/java/com/mio/libpatcher/transformer/GLTransformer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..88e7e4eb43a79909167dc0ebfecd564999bfe9de
+--- /dev/null
++++ b/src/main/java/com/mio/libpatcher/transformer/GLTransformer.java
+@@ -0,0 +1,36 @@
++package com.mio.libpatcher.transformer;
++
++import javassist.CtClass;
++import javassist.CtMethod;
++
++/**
++ * Aligns LWJGL's OpenGL FunctionProvider ({@code org.lwjgl.opengl.GL$1}) with SDL3's patched
++ * lookup order on Android: resolve directly from the loaded GL wrapper/driver library via
++ * {@code dlsym} ({@code library.getFunctionAddress}) before consulting {@code glXGetProcAddress} /
++ * {@code eglGetProcAddress}. This prevents global symbol preemption (e.g. RTLD_GLOBAL MobileGlues
++ * or system libGLESv2) from diverging from {@code SDL_GL_GetProcAddress("glGetError")}.
++ */
++public class GLTransformer implements BaseTransformer {
++    @Override
++    public String getTargetClassName() {
++        return "org.lwjgl.opengl.GL$1";
++    }
++
++    @Override
++    public void transform(CtClass clazz) throws Throwable {
++        CtClass byteBufferClass = clazz.getClassPool().get("java.nio.ByteBuffer");
++        CtMethod method = clazz.getDeclaredMethod("getFunctionAddress", new CtClass[]{byteBufferClass});
++        method.setBody(
++                "{"
++                        + "  long addr = this.library.getFunctionAddress($1);"
++                        + "  if (addr == 0L && this.GetProcAddress != 0L) {"
++                        + "    addr = org.lwjgl.system.JNI.callPP(org.lwjgl.system.MemoryUtil.memAddress($1), this.GetProcAddress);"
++                        + "  }"
++                        + "  if (addr == 0L && org.lwjgl.system.Checks.DEBUG_FUNCTIONS) {"
++                        + "    org.lwjgl.system.APIUtil.apiLogMissing(\"GL\", $1);"
++                        + "  }"
++                        + "  return addr;"
++                        + "}"
++        );
++    }
++}
+diff --git a/src/main/java/com/mio/libpatcher/transformer/GlShaderUniformNameTransformer.java b/src/main/java/com/mio/libpatcher/transformer/GlShaderUniformNameTransformer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9225c07e002b2f4505dc970c27cccbc1a8fbe42
+--- /dev/null
++++ b/src/main/java/com/mio/libpatcher/transformer/GlShaderUniformNameTransformer.java
+@@ -0,0 +1,54 @@
++package com.mio.libpatcher.transformer;
++
++import com.mio.libpatcher.util.LogUtil;
++import javassist.CannotCompileException;
++import javassist.CtClass;
++import javassist.CtMethod;
++import javassist.expr.ExprEditor;
++import javassist.expr.MethodCall;
++
++/**
++ * Renames RenderPearl's OpenGL decompiled UBO instance variables away from names
++ * containing the substring "uniform" ({@code _uniform_instance_*} -> {@code _rp_inst_*}).
++ *
++ * <p>MobileGlues's GLSL post-processor scans for {@code uniform} without word
++ * boundaries; expressions like {@code if (_uniform_instance_00_00.UseRgss == 1)}
++ * in Minecraft 26.3's {@code core/terrain.fsh} get rewritten into broken syntax
++ * ({@code if (_uniform _instance_00_00 ;}) and fail shader compilation.
++ * The UBO block and sampler names ({@code _uniform_%02d_%02d}) stay unchanged so
++ * {@code GlProgram.setupBindGroupLayouts} resolves bindings identically.
++ */
++public class GlShaderUniformNameTransformer implements BaseTransformer {
++
++    @Override
++    public String getTargetClassName() {
++        return "com.mojang.renderpearl.backend.opengl.GlPipelineRecompiler";
++    }
++
++    @Override
++    public void transform(CtClass clazz) throws Throwable {
++        if (clazz.isFrozen()) {
++            clazz.defrost();
++        }
++        CtMethod renameDescriptors = clazz.getDeclaredMethod("renameDescriptors");
++        renameDescriptors.instrument(new ExprEditor() {
++            @Override
++            public void edit(MethodCall m) throws CannotCompileException {
++                if ("java.lang.String".equals(m.getClassName())
++                        && "format".equals(m.getMethodName())
++                        && "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;".equals(m.getSignature())) {
++                    m.replace(
++                            "{ " +
++                                    "  if (\"_uniform_instance_%02d_%02d\".equals($2)) {" +
++                                    "    $_ = java.lang.String.format($1, \"_rp_inst_%02d_%02d\", $3);" +
++                                    "  } else {" +
++                                    "    $_ = $proceed($$);" +
++                                    "  }" +
++                                    "}"
++                    );
++                }
++            }
++        });
++        LogUtil.info("Patched GlPipelineRecompiler UBO instance names for MobileGlues compatibility");
++    }
++}
+diff --git a/src/main/java/com/mio/libpatcher/transformer/GlSingleWindowTransformer.java b/src/main/java/com/mio/libpatcher/transformer/GlSingleWindowTransformer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..92ac5e42ec62a5e3538ba6095a4940424c38fcc3
+--- /dev/null
++++ b/src/main/java/com/mio/libpatcher/transformer/GlSingleWindowTransformer.java
+@@ -0,0 +1,156 @@
++package com.mio.libpatcher.transformer;
++
++import com.mio.libpatcher.util.LogUtil;
++import javassist.CannotCompileException;
++import javassist.CtClass;
++import javassist.CtConstructor;
++import javassist.CtMethod;
++import javassist.NotFoundException;
++import javassist.expr.ExprEditor;
++import javassist.expr.MethodCall;
++
++import java.util.Arrays;
++import java.util.List;
++
++/**
++ * Allows RenderPearl's OpenGL backend to initialize and run on Android SDL3, where
++ * SDL enforces a single-window limit ("Android only supports one window").
++ * Skips the hidden test window probe in GlDevice and reuses the initial utility
++ * SDL window handle when Window creates the main game window.
++ *
++ * State is shared via JVM system properties instead of adding methods to GlBackend
++ * so GlDevice transforms independently even when Javassist loads an untransformed
++ * GlBackend bytecode stub from disk.
++ */
++public class GlSingleWindowTransformer implements BaseTransformer {
++
++    private static final String GL_BACKEND = "com.mojang.renderpearl.backend.opengl.GlBackend";
++    private static final String GL_DEVICE = "com.mojang.renderpearl.backend.opengl.GlDevice";
++    private static final String UTILITY_TITLE = "Minecraft - RenderPearl OpenGL Hidden Utility Window";
++    private static final String TEST_TITLE = "Minecraft - RenderPearl OpenGL Hidden Test Window";
++    private static final String PROP_WINDOW = "mio.rp.gl.singleWindow";
++    private static final String PROP_CLAIMED = "mio.rp.gl.windowClaimed";
++    // SDL_WINDOW_OPENGL (0x2) | SDL_WINDOW_RESIZABLE (0x20) | SDL_WINDOW_HIGH_PIXEL_DENSITY (0x2000)
++    private static final long ANDROID_WINDOW_FLAGS = 8226L;
++
++    @Override
++    public List<String> getTargetClassNames() {
++        return Arrays.asList(GL_BACKEND, GL_DEVICE);
++    }
++
++    @Override
++    public void transform(CtClass clazz) throws Throwable {
++        if (clazz.isFrozen()) {
++            clazz.defrost();
++        }
++        String name = clazz.getName();
++        if (GL_BACKEND.equals(name)) {
++            patchGlBackend(clazz);
++        } else if (GL_DEVICE.equals(name)) {
++            patchGlDevice(clazz);
++        }
++    }
++
++    private static void patchGlBackend(CtClass clazz) throws NotFoundException, CannotCompileException {
++        CtMethod createWindow = clazz.getDeclaredMethod("createWindow");
++        createWindow.instrument(new ExprEditor() {
++            @Override
++            public void edit(MethodCall m) throws CannotCompileException {
++                if ("org.lwjgl.sdl.SDLVideo".equals(m.getClassName())
++                        && "SDL_CreateWindow".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  if (\"Android\".equals(org.lwjgl.sdl.SDLPlatform.SDL_GetPlatform())) {" +
++                                    "    String mioTitle = $1 != null ? $1.toString() : \"\";" +
++                                    "    String mioSaved = java.lang.System.getProperty(\"" + PROP_WINDOW + "\");" +
++                                    "    boolean mioClaimed = \"true\".equals(java.lang.System.getProperty(\"" + PROP_CLAIMED + "\"));" +
++                                    "    if (mioSaved != null && !mioClaimed) {" +
++                                    "      long mioHandle = java.lang.Long.parseLong(mioSaved);" +
++                                    "      java.lang.System.setProperty(\"" + PROP_CLAIMED + "\", \"true\");" +
++                                    "      org.lwjgl.sdl.SDLVideo.SDL_SetWindowTitle(mioHandle, $1);" +
++                                    "      org.lwjgl.sdl.SDLVideo.SDL_SetWindowSize(mioHandle, $2, $3);" +
++                                    "      $_ = mioHandle;" +
++                                    "    } else {" +
++                                    "      long mioFlags = \"" + UTILITY_TITLE + "\".equals(mioTitle) ? " + ANDROID_WINDOW_FLAGS + "L : $4;" +
++                                    "      long mioWin = org.lwjgl.sdl.SDLVideo.SDL_CreateWindow($1, $2, $3, mioFlags);" +
++                                    "      if (mioWin != 0L && mioSaved == null) {" +
++                                    "        java.lang.System.setProperty(\"" + PROP_WINDOW + "\", java.lang.Long.toString(mioWin));" +
++                                    "        java.lang.System.setProperty(\"" + PROP_CLAIMED + "\", \"" + UTILITY_TITLE + "\".equals(mioTitle) ? \"false\" : \"true\");" +
++                                    "      }" +
++                                    "      $_ = mioWin;" +
++                                    "    }" +
++                                    "  } else {" +
++                                    "    $_ = $proceed($$);" +
++                                    "  }" +
++                                    "}"
++                    );
++                }
++            }
++        });
++        LogUtil.info("Patched GlBackend for Android single-window reuse");
++    }
++
++    private static void patchGlDevice(CtClass clazz) throws NotFoundException, CannotCompileException {
++        CtConstructor ctor = clazz.getDeclaredConstructor(new CtClass[]{
++                clazz.getClassPool().get(GL_BACKEND),
++                clazz.getClassPool().get("com.mojang.renderpearl.api.device.GpuDebugOptions")
++        });
++        ctor.instrument(new ExprEditor() {
++            @Override
++            public void edit(MethodCall m) throws CannotCompileException {
++                if (GL_BACKEND.equals(m.getClassName()) && "createWindow".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  if (\"Android\".equals(org.lwjgl.sdl.SDLPlatform.SDL_GetPlatform()) && \"" + TEST_TITLE + "\".equals($1)) {" +
++                                    "    $_ = -1L;" +
++                                    "  } else {" +
++                                    "    $_ = $proceed($$);" +
++                                    "  }" +
++                                    "}"
++                    );
++                } else if ("org.lwjgl.sdl.SDLVideo".equals(m.getClassName())
++                        && "SDL_DestroyWindow".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  if ($1 != -1L) {" +
++                                    "    $proceed($$);" +
++                                    "    String mioSaved = java.lang.System.getProperty(\"" + PROP_WINDOW + "\");" +
++                                    "    if (mioSaved != null && $1 == java.lang.Long.parseLong(mioSaved)) {" +
++                                    "      java.lang.System.clearProperty(\"" + PROP_WINDOW + "\");" +
++                                    "      java.lang.System.clearProperty(\"" + PROP_CLAIMED + "\");" +
++                                    "    }" +
++                                    "  }" +
++                                    "}"
++                    );
++                }
++            }
++        });
++
++        CtMethod close = clazz.getDeclaredMethod("close");
++        close.instrument(new ExprEditor() {
++            @Override
++            public void edit(MethodCall m) throws CannotCompileException {
++                if ("org.lwjgl.sdl.SDLVideo".equals(m.getClassName())
++                        && "SDL_DestroyWindow".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  String mioSaved = java.lang.System.getProperty(\"" + PROP_WINDOW + "\");" +
++                                    "  boolean mioClaimed = \"true\".equals(java.lang.System.getProperty(\"" + PROP_CLAIMED + "\"));" +
++                                    "  if (mioClaimed && mioSaved != null && $1 == java.lang.Long.parseLong(mioSaved)) {" +
++                                    "    java.lang.System.clearProperty(\"" + PROP_WINDOW + "\");" +
++                                    "    java.lang.System.clearProperty(\"" + PROP_CLAIMED + "\");" +
++                                    "  } else {" +
++                                    "    $proceed($$);" +
++                                    "    if (mioSaved != null && $1 == java.lang.Long.parseLong(mioSaved)) {" +
++                                    "      java.lang.System.clearProperty(\"" + PROP_WINDOW + "\");" +
++                                    "      java.lang.System.clearProperty(\"" + PROP_CLAIMED + "\");" +
++                                    "    }" +
++                                    "  }" +
++                                    "}"
++                    );
++                }
++            }
++        });
++        LogUtil.info("Patched GlDevice for Android single-window lifecycle");
++    }
++}
+diff --git a/src/main/java/com/mio/libpatcher/transformer/MinecraftSurfaceResumeTransformer.java b/src/main/java/com/mio/libpatcher/transformer/MinecraftSurfaceResumeTransformer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..700d799098e586c54722161f17a2564587c2ca07
+--- /dev/null
++++ b/src/main/java/com/mio/libpatcher/transformer/MinecraftSurfaceResumeTransformer.java
+@@ -0,0 +1,54 @@
++package com.mio.libpatcher.transformer;
++
++import com.mio.libpatcher.util.LogUtil;
++import javassist.CtClass;
++import javassist.CtField;
++import javassist.CtMethod;
++import javassist.NotFoundException;
++
++/**
++ * Keeps RenderPearl's surfaceInvalid/windowSurfaceNeedsReconfiguring state
++ * synchronized with Android's SurfaceView lifecycle on Minecraft 26.3+.
++ * Without this, an Android background/foreground cycle that destroys the surface
++ * at the same resolution leaves surfaceIsInvalid=true while
++ * windowSurfaceNeedsReconfiguring=false, causing a permanent black screen.
++ */
++public class MinecraftSurfaceResumeTransformer implements BaseTransformer {
++
++    @Override
++    public String getTargetClassName() {
++        return "net.minecraft.client.Minecraft";
++    }
++
++    @Override
++    public void transform(CtClass clazz) throws Throwable {
++        CtMethod renderFrame;
++        try {
++            clazz.getDeclaredField("surfaceIsInvalid");
++            clazz.getDeclaredField("windowSurfaceNeedsReconfiguring");
++            renderFrame = clazz.getDeclaredMethod("renderFrame", new CtClass[]{CtClass.booleanType});
++        } catch (NotFoundException ignored) {
++            return;
++        }
++
++        if (clazz.isFrozen()) {
++            clazz.defrost();
++        }
++
++        clazz.addField(CtField.make("private boolean mioAndroidSurfaceLost;", clazz));
++        renderFrame.insertBefore(
++                "{ " +
++                        "  if (!org.lwjgl.sdl.SDLHints.SDL_GetHintBoolean(\"SDL_AETHER_SURFACE_READY\", true)) {" +
++                        "    this.mioAndroidSurfaceLost = true;" +
++                        "    this.surfaceIsInvalid = true;" +
++                        "    this.windowSurfaceNeedsReconfiguring = false;" +
++                        "  } else if (this.mioAndroidSurfaceLost || this.surfaceIsInvalid) {" +
++                        "    this.mioAndroidSurfaceLost = false;" +
++                        "    this.windowSurfaceNeedsReconfiguring = true;" +
++                        "  }" +
++                        "}"
++        );
++
++        LogUtil.info("Patched Minecraft.renderFrame for Android surface resume recovery");
++    }
++}
+diff --git a/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java b/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a8b7402376798aec53819827e5e5c370b8bdd1e
+--- /dev/null
++++ b/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java
+@@ -0,0 +1,259 @@
++package com.mio.libpatcher.transformer;
++
++import com.mio.libpatcher.util.LogUtil;
++import javassist.CannotCompileException;
++import javassist.CtClass;
++import javassist.CtConstructor;
++import javassist.CtField;
++import javassist.CtMethod;
++import javassist.CtNewMethod;
++import javassist.Modifier;
++import javassist.NotFoundException;
++import javassist.expr.ExprEditor;
++import javassist.expr.MethodCall;
++
++/**
++ * Recovers from VK_ERROR_SURFACE_LOST_KHR (-1000000000) on Android when the
++ * Activity/SurfaceView surface is destroyed and recreated (background, screen off,
++ * or rotation), and forces VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR preTransform when
++ * supported so Android SurfaceFlinger rotates un-rotated blit output properly
++ * instead of presenting landscape frames sideways.
++ */
++public class VulkanSurfaceTransformer implements BaseTransformer {
++
++    private static final int VK_ERROR_SURFACE_LOST_KHR = -1000000000;
++    private static final int VK_SUBOPTIMAL_KHR = 1000001003;
++    private static final int VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR = 1;
++
++    @Override
++    public String getTargetClassName() {
++        return "com.mojang.renderpearl.backend.vulkan.VulkanGpuSurface";
++    }
++
++    @Override
++    public void transform(CtClass clazz) throws Throwable {
++        if (clazz.isFrozen()) {
++            clazz.defrost();
++        }
++
++        CtField surfaceField = clazz.getDeclaredField("surface");
++        surfaceField.setModifiers(surfaceField.getModifiers() & ~Modifier.FINAL);
++
++        clazz.addField(CtField.make("private long mioWindowHandle;", clazz));
++        clazz.addField(CtField.make("private boolean mioSurfaceLost;", clazz));
++        clazz.addField(CtField.make("private String mioLastSurfaceGen;", clazz));
++        clazz.addField(CtField.make("private boolean mioIdentitySupported;", clazz));
++        clazz.addField(CtField.make("private boolean mioTransformMismatch;", clazz));
++
++        CtConstructor ctor = clazz.getDeclaredConstructor(new CtClass[]{
++                clazz.getClassPool().get("com.mojang.renderpearl.backend.vulkan.VulkanDevice"),
++                CtClass.longType
++        });
++        ctor.insertAfter("{ this.mioWindowHandle = $2; this.mioSurfaceLost = false; this.mioLastSurfaceGen = org.lwjgl.sdl.SDLHints.SDL_GetHint(\"SDL_AETHER_SURFACE_GEN\"); }");
++
++        clazz.addMethod(CtNewMethod.make(
++                "private void mioRecreateSurfaceIfNeeded() throws com.mojang.renderpearl.api.device.SurfaceException {" +
++                        "  String curGen = org.lwjgl.sdl.SDLHints.SDL_GetHint(\"SDL_AETHER_SURFACE_GEN\");" +
++                        "  boolean genChanged = curGen != null && !curGen.equals(this.mioLastSurfaceGen);" +
++                        "  if (!this.mioSurfaceLost && !genChanged && this.surface != 0L) { return; }" +
++                        "  this.destroySwapchain();" +
++                        "  if (this.surface != 0L) {" +
++                        "    org.lwjgl.vulkan.KHRSurface.vkDestroySurfaceKHR(this.device.instance().vkInstance(), this.surface, (org.lwjgl.vulkan.VkAllocationCallbacks) null);" +
++                        "    this.surface = 0L;" +
++                        "  }" +
++                        "  if (this.mioWindowHandle == 0L) {" +
++                        "    throw new com.mojang.renderpearl.api.device.SurfaceException(\"Missing SDL window handle for Vulkan surface recreation\");" +
++                        "  }" +
++                        "  if (!org.lwjgl.sdl.SDLHints.SDL_GetHintBoolean(\"SDL_AETHER_SURFACE_READY\", true)) {" +
++                        "    throw new com.mojang.renderpearl.api.device.SurfaceException(\"Android surface is not ready for Vulkan recreation\");" +
++                        "  }" +
++                        "  if ((org.lwjgl.sdl.SDLVideo.SDL_GetWindowFlags(this.mioWindowHandle) & 72L) != 0L) {" +
++                        "    throw new com.mojang.renderpearl.api.device.SurfaceException(\"Vulkan window is hidden or minimized\");" +
++                        "  }" +
++                        "  org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush();" +
++                        "  try {" +
++                        "    java.nio.LongBuffer pSurface = stack.longs(0L);" +
++                        "    org.lwjgl.vulkan.VkInstance instance = this.device.vkDevice().getPhysicalDevice().getInstance();" +
++                        "    boolean ok = org.lwjgl.sdl.SDLVulkan.SDL_Vulkan_CreateSurface(this.mioWindowHandle, instance, (org.lwjgl.vulkan.VkAllocationCallbacks) null, pSurface);" +
++                        "    if (!ok || pSurface.get(0) == 0L) {" +
++                        "      String err = org.lwjgl.sdl.SDLError.SDL_GetError();" +
++                        "      throw new com.mojang.renderpearl.api.device.SurfaceException(\"Failed to recreate Vulkan surface: \" + (err != null ? err : \"<no error>\"));" +
++                        "    }" +
++                        "    this.surface = pSurface.get(0);" +
++                        "    this.mioLastSurfaceGen = curGen;" +
++                        "    this.mioSurfaceLost = false;" +
++                        "  } finally {" +
++                        "    stack.close();" +
++                        "  }" +
++                        "}",
++                clazz
++        ));
++
++        patchConfigure(clazz);
++        patchAcquireNextTexture(clazz);
++        patchPresent(clazz);
++        patchClose(clazz);
++
++        LogUtil.info("Patched VulkanGpuSurface for Android VK_ERROR_SURFACE_LOST_KHR recovery");
++    }
++
++    private static void patchConfigure(CtClass clazz) throws NotFoundException, CannotCompileException {
++        CtMethod configure = clazz.getDeclaredMethod("configure");
++        configure.insertBefore(
++                "{ " +
++                        "  this.mioIdentitySupported = false;" +
++                        "  this.mioTransformMismatch = false;" +
++                        "  this.mioRecreateSurfaceIfNeeded();" +
++                        "}"
++        );
++        configure.instrument(new ExprEditor() {
++            @Override
++            public void edit(MethodCall m) throws CannotCompileException {
++                if ("com.mojang.renderpearl.backend.vulkan.VulkanGpuSurface".equals(m.getClassName())
++                        && "throwIfFailure".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  if ($1 == " + VK_ERROR_SURFACE_LOST_KHR + ") { this.mioSurfaceLost = true; }" +
++                                    "  $_ = $proceed($$);" +
++                                    "}"
++                    );
++                } else if ("org.lwjgl.vulkan.KHRSurface".equals(m.getClassName())
++                        && "vkGetPhysicalDeviceSurfaceCapabilitiesKHR".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  $_ = $proceed($$);" +
++                                    "  if ($_ == 0 && $3 != null) {" +
++                                    "    this.mioIdentitySupported = ($3.supportedTransforms() & " + VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR + ") != 0;" +
++                                    "  }" +
++                                    "}"
++                    );
++                } else if ("org.lwjgl.vulkan.VkSwapchainCreateInfoKHR".equals(m.getClassName())
++                        && "preTransform".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  int mioPreTransform = $1;" +
++                                    "  if (this.mioIdentitySupported) {" +
++                                    "    mioPreTransform = " + VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR + ";" +
++                                    "  }" +
++                                    "  this.mioTransformMismatch = (mioPreTransform != $1);" +
++                                    "  $_ = $proceed(mioPreTransform);" +
++                                    "}"
++                    );
++                }
++            }
++        });
++        configure.insertAfter("{ this.eatenException = null; }", false);
++    }
++
++    private static void patchAcquireNextTexture(CtClass clazz) throws NotFoundException, CannotCompileException {
++        CtMethod acquire = clazz.getDeclaredMethod("acquireNextTexture");
++        acquire.insertBefore(
++                "{ " +
++                        "  if (this.eatenException != null) {" +
++                        "    com.mojang.renderpearl.api.device.SurfaceException mioEx = this.eatenException;" +
++                        "    this.eatenException = null;" +
++                        "    throw new com.mojang.renderpearl.api.device.SurfaceException((java.lang.Throwable) mioEx);" +
++                        "  }" +
++                        "  if (this.mioSurfaceLost || this.surface == 0L || this.swapchain == 0L) {" +
++                        "    this.mioSurfaceLost = true;" +
++                        "    this.swapchainSuboptimal = true;" +
++                        "    this.swapchainOutOfDate = true;" +
++                        "    throw new com.mojang.renderpearl.api.device.SurfaceException(\"Vulkan surface lost or unconfigured\");" +
++                        "  }" +
++                        "}"
++        );
++        acquire.instrument(new ExprEditor() {
++            @Override
++            public void edit(MethodCall m) throws CannotCompileException {
++                if ("com.mojang.renderpearl.backend.vulkan.VulkanUtils".equals(m.getClassName())
++                        && "crashIfFailure".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  if ($2 == " + VK_ERROR_SURFACE_LOST_KHR + ") {" +
++                                    "    this.mioSurfaceLost = true;" +
++                                    "    this.swapchainSuboptimal = true;" +
++                                    "    this.swapchainOutOfDate = true;" +
++                                    "    throw new com.mojang.renderpearl.api.device.SurfaceException(\"Failed to acquire image, surface lost\");" +
++                                    "  } else {" +
++                                    "    $_ = $proceed($$);" +
++                                    "  }" +
++                                    "}"
++                    );
++                } else if ("org.lwjgl.vulkan.KHRSwapchain".equals(m.getClassName())
++                        && "vkAcquireNextImageKHR".equals(m.getMethodName())) {
++                    suppressSuboptimalWhenTransformDiffers(m);
++                }
++            }
++        });
++    }
++
++    private static void patchPresent(CtClass clazz) throws NotFoundException, CannotCompileException {
++        CtMethod present = clazz.getDeclaredMethod("present");
++        present.insertBefore(
++                "{ " +
++                        "  if (this.swapchain == 0L || this.surface == 0L || this.currentImageIndex < 0 || this.currentImageIndex >= this.presentSemaphores.length) {" +
++                        "    this.mioSurfaceLost = true;" +
++                        "    this.swapchainSuboptimal = true;" +
++                        "    this.swapchainOutOfDate = true;" +
++                        "    this.eatenException = new com.mojang.renderpearl.api.device.SurfaceException(\"Vulkan surface not ready for present\");" +
++                        "    return;" +
++                        "  }" +
++                        "}"
++        );
++        present.instrument(new ExprEditor() {
++            @Override
++            public void edit(MethodCall m) throws CannotCompileException {
++                if ("com.mojang.renderpearl.backend.vulkan.VulkanUtils".equals(m.getClassName())
++                        && "crashIfFailure".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  if ($2 == " + VK_ERROR_SURFACE_LOST_KHR + ") {" +
++                                    "    this.mioSurfaceLost = true;" +
++                                    "    this.swapchainSuboptimal = true;" +
++                                    "    this.swapchainOutOfDate = true;" +
++                                    "    this.eatenException = new com.mojang.renderpearl.api.device.SurfaceException(\"Failed to present image, surface lost\");" +
++                                    "  } else {" +
++                                    "    $_ = $proceed($$);" +
++                                    "  }" +
++                                    "}"
++                    );
++                } else if ("org.lwjgl.vulkan.KHRSwapchain".equals(m.getClassName())
++                        && "vkQueuePresentKHR".equals(m.getMethodName())) {
++                    suppressSuboptimalWhenTransformDiffers(m);
++                }
++            }
++        });
++    }
++
++    private static void suppressSuboptimalWhenTransformDiffers(MethodCall m) throws CannotCompileException {
++        m.replace(
++                "{ " +
++                        "  int mioRes = $proceed($$);" +
++                        "  if (mioRes == " + VK_SUBOPTIMAL_KHR + " && this.mioTransformMismatch) {" +
++                        "    mioRes = 0;" +
++                        "  }" +
++                        "  $_ = mioRes;" +
++                        "}"
++        );
++    }
++
++    private static void patchClose(CtClass clazz) throws NotFoundException, CannotCompileException {
++        CtMethod close = clazz.getDeclaredMethod("close");
++        close.instrument(new ExprEditor() {
++            @Override
++            public void edit(MethodCall m) throws CannotCompileException {
++                if ("org.lwjgl.vulkan.KHRSurface".equals(m.getClassName())
++                        && "vkDestroySurfaceKHR".equals(m.getMethodName())) {
++                    m.replace(
++                            "{ " +
++                                    "  if ($2 != 0L) {" +
++                                    "    $proceed($$);" +
++                                    "    this.surface = 0L;" +
++                                    "  }" +
++                                    "}"
++                    );
++                }
++            }
++        });
++    }
++}
+diff --git a/src/test/java/com/mio/libpatcher/transformer/BaseTransformerSmokeTest.java b/src/test/java/com/mio/libpatcher/transformer/BaseTransformerSmokeTest.java
+index 35f980310b99d05ad47c309ece626217213e7c19..9257ae23cc3cbda0ed3a233fb620c01f90eba520 100644
+--- a/src/test/java/com/mio/libpatcher/transformer/BaseTransformerSmokeTest.java
++++ b/src/test/java/com/mio/libpatcher/transformer/BaseTransformerSmokeTest.java
+@@ -195,4 +195,513 @@ class BaseTransformerSmokeTest {
+             System.clearProperty("miolibpatcher.asmBackport");
+         }
+     }
++
++    @Test
++    void glFunctionProviderOrder() throws Exception {
++        ClassPool pool = new ClassPool(true);
++        CtClass sharedLib = pool.makeClass("org.lwjgl.system.SharedLibrary");
++        sharedLib.addMethod(CtMethod.make(
++                "public long getFunctionAddress(java.nio.ByteBuffer name) { return name.capacity() == 4 ? 0x1111L : 0L; }",
++                sharedLib));
++        CtClass jni = pool.makeClass("org.lwjgl.system.JNI");
++        jni.addMethod(CtMethod.make(
++                "public static long callPP(long name, long fn) { return fn; }",
++                jni));
++        CtClass memUtil = pool.makeClass("org.lwjgl.system.MemoryUtil");
++        memUtil.addMethod(CtMethod.make(
++                "public static long memAddress(java.nio.ByteBuffer buf) { return 0xCAFEL; }",
++                memUtil));
++        CtClass checks = pool.makeClass("org.lwjgl.system.Checks");
++        checks.addField(CtField.make("public static boolean DEBUG_FUNCTIONS = false;", checks));
++        CtClass apiUtil = pool.makeClass("org.lwjgl.system.APIUtil");
++        apiUtil.addMethod(CtMethod.make(
++                "public static void apiLogMissing(String api, java.nio.ByteBuffer name) {}",
++                apiUtil));
++
++        CtClass cc = pool.makeClass("org.lwjgl.opengl.GL$1");
++        cc.addField(CtField.make("protected org.lwjgl.system.SharedLibrary library;", cc));
++        cc.addField(CtField.make("private long GetProcAddress;", cc));
++        cc.addConstructor(CtNewConstructor.make(
++                "public GL$1(org.lwjgl.system.SharedLibrary lib, long gpa) { this.library = lib; this.GetProcAddress = gpa; }",
++                cc));
++        cc.addMethod(CtMethod.make(
++                "public long getFunctionAddress(java.nio.ByteBuffer name) { return 0L; }",
++                cc));
++
++        try {
++            new GLTransformer().transform(cc);
++            cc.toBytecode();
++        } catch (Throwable e) {
++            throw new AssertionError("GLTransformer transform 失败", e);
++        }
++
++        ClassLoader cl = new ClassLoader(BaseTransformerSmokeTest.class.getClassLoader()) {};
++        sharedLib.toClass(cl, null);
++        jni.toClass(cl, null);
++        memUtil.toClass(cl, null);
++        checks.toClass(cl, null);
++        apiUtil.toClass(cl, null);
++        Class<?> gl1Class = cc.toClass(cl, null);
++        Class<?> sharedLibClass = Class.forName("org.lwjgl.system.SharedLibrary", true, cl);
++        Object libInstance = sharedLibClass.getDeclaredConstructor().newInstance();
++        Object gl1 = gl1Class.getDeclaredConstructor(sharedLibClass, long.class)
++                .newInstance(libInstance, 0x2222L);
++
++        java.lang.reflect.Method getFn = gl1Class.getMethod("getFunctionAddress", java.nio.ByteBuffer.class);
++        // When library exports symbol (capacity == 4), library address must win over GetProcAddress
++        assertEquals(0x1111L, (long) getFn.invoke(gl1, java.nio.ByteBuffer.allocate(4)));
++        // When library does not export symbol (capacity == 8), must fall back to GetProcAddress
++        assertEquals(0x2222L, (long) getFn.invoke(gl1, java.nio.ByteBuffer.allocate(8)));
++    }
++
++    @Test
++    void vulkanSurfaceLostRecovery() throws Exception {
++        ClassPool pool = new ClassPool(true);
++
++        CtClass surfaceEx = pool.makeClass("com.mojang.renderpearl.api.device.SurfaceException");
++        surfaceEx.setSuperclass(pool.get("java.lang.Exception"));
++        surfaceEx.addConstructor(CtNewConstructor.make("public SurfaceException(String msg) { super(msg); }", surfaceEx));
++        surfaceEx.addConstructor(CtNewConstructor.make("public SurfaceException(Throwable cause) { super(cause); }", surfaceEx));
++
++        CtClass cfg = pool.makeClass("com.mojang.renderpearl.api.device.GpuSurface$Configuration");
++        CtClass vkInstance = pool.makeClass("org.lwjgl.vulkan.VkInstance");
++        vkInstance.addConstructor(CtNewConstructor.defaultConstructor(vkInstance));
++        CtClass vkPhysDev = pool.makeClass("org.lwjgl.vulkan.VkPhysicalDevice");
++        vkPhysDev.addConstructor(CtNewConstructor.defaultConstructor(vkPhysDev));
++        vkPhysDev.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkInstance getInstance() { return new org.lwjgl.vulkan.VkInstance(); }", vkPhysDev));
++        CtClass vkDevice = pool.makeClass("org.lwjgl.vulkan.VkDevice");
++        vkDevice.addConstructor(CtNewConstructor.defaultConstructor(vkDevice));
++        vkDevice.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkPhysicalDevice getPhysicalDevice() { return new org.lwjgl.vulkan.VkPhysicalDevice(); }", vkDevice));
++        CtClass rpInstance = pool.makeClass("com.mojang.renderpearl.backend.vulkan.VulkanInstance");
++        rpInstance.addConstructor(CtNewConstructor.defaultConstructor(rpInstance));
++        rpInstance.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkInstance vkInstance() { return new org.lwjgl.vulkan.VkInstance(); }", rpInstance));
++        CtClass rpDevice = pool.makeClass("com.mojang.renderpearl.backend.vulkan.VulkanDevice");
++        rpDevice.addConstructor(CtNewConstructor.defaultConstructor(rpDevice));
++        rpDevice.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkDevice vkDevice() { return new org.lwjgl.vulkan.VkDevice(); }", rpDevice));
++        rpDevice.addMethod(CtMethod.make("public com.mojang.renderpearl.backend.vulkan.VulkanInstance instance() { return new com.mojang.renderpearl.backend.vulkan.VulkanInstance(); }", rpDevice));
++
++        CtClass vkUtils = pool.makeClass("com.mojang.renderpearl.backend.vulkan.VulkanUtils");
++        vkUtils.addMethod(CtMethod.make("public static void crashIfFailure(com.mojang.renderpearl.backend.vulkan.VulkanDevice d, int r, String m) { throw new IllegalStateException(\"crash: \" + r); }", vkUtils));
++
++        CtClass allocCb = pool.makeClass("org.lwjgl.vulkan.VkAllocationCallbacks");
++        CtClass khrSurface = pool.makeClass("org.lwjgl.vulkan.KHRSurface");
++        khrSurface.addField(CtField.make("public static long lastDestroyed;", khrSurface));
++        khrSurface.addMethod(CtMethod.make("public static void vkDestroySurfaceKHR(org.lwjgl.vulkan.VkInstance i, long s, org.lwjgl.vulkan.VkAllocationCallbacks a) { lastDestroyed = s; }", khrSurface));
++
++        CtClass sdlVulkan = pool.makeClass("org.lwjgl.sdl.SDLVulkan");
++        sdlVulkan.addField(CtField.make("public static long nextSurface = 200L;", sdlVulkan));
++        sdlVulkan.addField(CtField.make("public static boolean createSucceeds = true;", sdlVulkan));
++        sdlVulkan.addMethod(CtMethod.make("public static boolean SDL_Vulkan_CreateSurface(long w, org.lwjgl.vulkan.VkInstance i, org.lwjgl.vulkan.VkAllocationCallbacks a, java.nio.LongBuffer out) { if (!createSucceeds) return false; out.put(0, nextSurface); return true; }", sdlVulkan));
++
++        CtClass sdlError = pool.makeClass("org.lwjgl.sdl.SDLError");
++        sdlError.addMethod(CtMethod.make("public static String SDL_GetError() { return \"no surface\"; }", sdlError));
++
++        CtClass sdlHints = pool.makeClass("org.lwjgl.sdl.SDLHints");
++        sdlHints.addField(CtField.make("public static boolean surfaceReady = true;", sdlHints));
++        sdlHints.addField(CtField.make("public static String surfaceGen = \"1\";", sdlHints));
++        sdlHints.addMethod(CtMethod.make("public static boolean SDL_GetHintBoolean(CharSequence name, boolean def) { return surfaceReady; }", sdlHints));
++        sdlHints.addMethod(CtMethod.make("public static String SDL_GetHint(CharSequence name) { return surfaceGen; }", sdlHints));
++
++        CtClass sdlVideo = pool.makeClass("org.lwjgl.sdl.SDLVideo");
++        sdlVideo.addField(CtField.make("public static long windowFlags = 0L;", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static long SDL_GetWindowFlags(long w) { return windowFlags; }", sdlVideo));
++
++        CtClass memStack = pool.makeClass("org.lwjgl.system.MemoryStack");
++        memStack.addConstructor(CtNewConstructor.defaultConstructor(memStack));
++        memStack.addMethod(CtMethod.make("public static org.lwjgl.system.MemoryStack stackPush() { return new org.lwjgl.system.MemoryStack(); }", memStack));
++        memStack.addMethod(CtMethod.make("public java.nio.LongBuffer longs(long v) { java.nio.LongBuffer b = java.nio.LongBuffer.allocate(1); b.put(0, v); return b; }", memStack));
++        memStack.addMethod(CtMethod.make("public void close() {}", memStack));
++
++        CtClass vgs = pool.makeClass("com.mojang.renderpearl.backend.vulkan.VulkanGpuSurface");
++        vgs.addField(CtField.make("private final com.mojang.renderpearl.backend.vulkan.VulkanDevice device;", vgs));
++        vgs.addField(CtField.make("private final long surface;", vgs));
++        vgs.addField(CtField.make("private long swapchain = 50L;", vgs));
++        vgs.addField(CtField.make("private long[] presentSemaphores = new long[]{ 1L };", vgs));
++        vgs.addField(CtField.make("private int currentImageIndex = 0;", vgs));
++        vgs.addField(CtField.make("private com.mojang.renderpearl.api.device.SurfaceException eatenException;", vgs));
++        vgs.addField(CtField.make("private boolean swapchainSuboptimal;", vgs));
++        vgs.addField(CtField.make("private boolean swapchainOutOfDate;", vgs));
++        vgs.addConstructor(CtNewConstructor.make("public VulkanGpuSurface(com.mojang.renderpearl.backend.vulkan.VulkanDevice dev, long win) { this.device = dev; this.surface = 100L; }", vgs));
++        vgs.addMethod(CtMethod.make("private void destroySwapchain() { this.swapchain = 0L; }", vgs));
++        vgs.addMethod(CtMethod.make("public static void throwIfFailure(int r, String m) throws com.mojang.renderpearl.api.device.SurfaceException { if (r < 0) throw new com.mojang.renderpearl.api.device.SurfaceException(m); }", vgs));
++        vgs.addMethod(CtMethod.make("public void configure(com.mojang.renderpearl.api.device.GpuSurface$Configuration c) throws com.mojang.renderpearl.api.device.SurfaceException { this.destroySwapchain(); throwIfFailure(0, \"ok\"); this.swapchain = 60L; this.swapchainSuboptimal = false; this.swapchainOutOfDate = false; }", vgs));
++        vgs.addMethod(CtMethod.make("public void acquireNextTexture() throws com.mojang.renderpearl.api.device.SurfaceException { com.mojang.renderpearl.backend.vulkan.VulkanUtils.crashIfFailure(this.device, -1000000000, \"acquire\"); }", vgs));
++        vgs.addMethod(CtMethod.make("public void present() { com.mojang.renderpearl.backend.vulkan.VulkanUtils.crashIfFailure(this.device, -1000000000, \"present\"); }", vgs));
++        vgs.addMethod(CtMethod.make("public void close() { this.destroySwapchain(); org.lwjgl.vulkan.KHRSurface.vkDestroySurfaceKHR(this.device.instance().vkInstance(), this.surface, null); }", vgs));
++
++        try {
++            new VulkanSurfaceTransformer().transform(vgs);
++            vgs.toBytecode();
++        } catch (Throwable e) {
++            throw new AssertionError("VulkanSurfaceTransformer transform 失败", e);
++        }
++
++        ClassLoader cl = new ClassLoader(BaseTransformerSmokeTest.class.getClassLoader()) {};
++        surfaceEx.toClass(cl, null);
++        cfg.toClass(cl, null);
++        vkInstance.toClass(cl, null);
++        vkPhysDev.toClass(cl, null);
++        vkDevice.toClass(cl, null);
++        rpInstance.toClass(cl, null);
++        rpDevice.toClass(cl, null);
++        vkUtils.toClass(cl, null);
++        allocCb.toClass(cl, null);
++        khrSurface.toClass(cl, null);
++        sdlVulkan.toClass(cl, null);
++        sdlError.toClass(cl, null);
++        sdlHints.toClass(cl, null);
++        sdlVideo.toClass(cl, null);
++        memStack.toClass(cl, null);
++        Class<?> vgsClass = vgs.toClass(cl, null);
++        Class<?> devClass = Class.forName("com.mojang.renderpearl.backend.vulkan.VulkanDevice", true, cl);
++        Class<?> cfgClass = Class.forName("com.mojang.renderpearl.api.device.GpuSurface$Configuration", true, cl);
++
++        Object surf = vgsClass.getConstructor(devClass, long.class)
++                .newInstance(devClass.getDeclaredConstructor().newInstance(), 999L);
++
++        // present() on VK_ERROR_SURFACE_LOST_KHR must record eatenException instead of crashing
++        vgsClass.getMethod("present").invoke(surf);
++
++        // While Android surface is not ready, configure() must defer recreation without calling SDL_Vulkan_CreateSurface
++        Class<?> sdlHintsClass = Class.forName("org.lwjgl.sdl.SDLHints", true, cl);
++        sdlHintsClass.getField("surfaceReady").setBoolean(null, false);
++        try {
++            vgsClass.getMethod("configure", cfgClass).invoke(surf, new Object[]{ null });
++            throw new AssertionError("Expected SurfaceException while surfaceReady=false");
++        } catch (java.lang.reflect.InvocationTargetException expected) {
++            assertEquals("com.mojang.renderpearl.api.device.SurfaceException",
++                    expected.getCause().getClass().getName());
++        }
++        Class<?> khrClass = Class.forName("org.lwjgl.vulkan.KHRSurface", true, cl);
++        assertEquals(100L, khrClass.getField("lastDestroyed").getLong(null));
++
++        // Once Android surface is ready again, configure() must recreate new surface 200L
++        sdlHintsClass.getField("surfaceReady").setBoolean(null, true);
++        vgsClass.getMethod("configure", cfgClass).invoke(surf, new Object[]{ null });
++
++        java.lang.reflect.Field surfField = vgsClass.getDeclaredField("surface");
++        surfField.setAccessible(true);
++        assertEquals(200L, surfField.getLong(surf));
++
++        // acquireNextTexture() on VK_ERROR_SURFACE_LOST_KHR must throw SurfaceException instead of crashing
++        try {
++            vgsClass.getMethod("acquireNextTexture").invoke(surf);
++            throw new AssertionError("Expected SurfaceException from acquireNextTexture");
++        } catch (java.lang.reflect.InvocationTargetException expected) {
++            assertEquals("com.mojang.renderpearl.api.device.SurfaceException",
++                    expected.getCause().getClass().getName());
++        }
++    }
++
++    @Test
++    void vulkanSurfaceIdentityPreTransformAndSuboptimalSuppression() throws Throwable {
++        ClassPool pool = new ClassPool(true);
++
++        CtClass surfaceEx = pool.makeClass("com.mojang.renderpearl.api.device.SurfaceException");
++        surfaceEx.setSuperclass(pool.get("java.lang.Exception"));
++        surfaceEx.addConstructor(CtNewConstructor.make("public SurfaceException(String msg) { super(msg); }", surfaceEx));
++        surfaceEx.addConstructor(CtNewConstructor.make("public SurfaceException(Throwable cause) { super(cause); }", surfaceEx));
++
++        CtClass cfg = pool.makeClass("com.mojang.renderpearl.api.device.GpuSurface$Configuration");
++        CtClass vkInstance = pool.makeClass("org.lwjgl.vulkan.VkInstance");
++        vkInstance.addConstructor(CtNewConstructor.defaultConstructor(vkInstance));
++        CtClass vkPhysDev = pool.makeClass("org.lwjgl.vulkan.VkPhysicalDevice");
++        vkPhysDev.addConstructor(CtNewConstructor.defaultConstructor(vkPhysDev));
++        vkPhysDev.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkInstance getInstance() { return new org.lwjgl.vulkan.VkInstance(); }", vkPhysDev));
++        CtClass vkDevice = pool.makeClass("org.lwjgl.vulkan.VkDevice");
++        vkDevice.addConstructor(CtNewConstructor.defaultConstructor(vkDevice));
++        vkDevice.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkPhysicalDevice getPhysicalDevice() { return new org.lwjgl.vulkan.VkPhysicalDevice(); }", vkDevice));
++        CtClass rpInstance = pool.makeClass("com.mojang.renderpearl.backend.vulkan.VulkanInstance");
++        rpInstance.addConstructor(CtNewConstructor.defaultConstructor(rpInstance));
++        rpInstance.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkInstance vkInstance() { return new org.lwjgl.vulkan.VkInstance(); }", rpInstance));
++        CtClass rpDevice = pool.makeClass("com.mojang.renderpearl.backend.vulkan.VulkanDevice");
++        rpDevice.addConstructor(CtNewConstructor.defaultConstructor(rpDevice));
++        rpDevice.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkDevice vkDevice() { return new org.lwjgl.vulkan.VkDevice(); }", rpDevice));
++        rpDevice.addMethod(CtMethod.make("public com.mojang.renderpearl.backend.vulkan.VulkanInstance instance() { return new com.mojang.renderpearl.backend.vulkan.VulkanInstance(); }", rpDevice));
++
++        CtClass vkUtils = pool.makeClass("com.mojang.renderpearl.backend.vulkan.VulkanUtils");
++        vkUtils.addMethod(CtMethod.make("public static void crashIfFailure(com.mojang.renderpearl.backend.vulkan.VulkanDevice d, int r, String m) { if (r < 0) throw new IllegalStateException(\"crash: \" + r); }", vkUtils));
++
++        CtClass allocCb = pool.makeClass("org.lwjgl.vulkan.VkAllocationCallbacks");
++        CtClass caps = pool.makeClass("org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR");
++        caps.addField(CtField.make("public static int nextSupported = 15;", caps));
++        caps.addField(CtField.make("public static int nextCurrent = 2;", caps));
++        caps.addConstructor(CtNewConstructor.defaultConstructor(caps));
++        caps.addMethod(CtMethod.make("public int supportedTransforms() { return nextSupported; }", caps));
++        caps.addMethod(CtMethod.make("public int currentTransform() { return nextCurrent; }", caps));
++
++        CtClass swInfo = pool.makeClass("org.lwjgl.vulkan.VkSwapchainCreateInfoKHR");
++        swInfo.addField(CtField.make("public static int lastPreTransform;", swInfo));
++        swInfo.addConstructor(CtNewConstructor.defaultConstructor(swInfo));
++        swInfo.addMethod(CtMethod.make("public org.lwjgl.vulkan.VkSwapchainCreateInfoKHR preTransform(int t) { lastPreTransform = t; return this; }", swInfo));
++
++        CtClass khrSurface = pool.makeClass("org.lwjgl.vulkan.KHRSurface");
++        khrSurface.addMethod(CtMethod.make("public static int vkGetPhysicalDeviceSurfaceCapabilitiesKHR(org.lwjgl.vulkan.VkPhysicalDevice p, long s, org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR c) { return 0; }", khrSurface));
++        khrSurface.addMethod(CtMethod.make("public static void vkDestroySurfaceKHR(org.lwjgl.vulkan.VkInstance i, long s, org.lwjgl.vulkan.VkAllocationCallbacks a) {}", khrSurface));
++
++        CtClass khrSwapchain = pool.makeClass("org.lwjgl.vulkan.KHRSwapchain");
++        khrSwapchain.addField(CtField.make("public static int nextAcquireResult = 1000001003;", khrSwapchain));
++        khrSwapchain.addField(CtField.make("public static int nextPresentResult = 1000001003;", khrSwapchain));
++        khrSwapchain.addMethod(CtMethod.make("public static int vkAcquireNextImageKHR(org.lwjgl.vulkan.VkDevice d, long s, long t, long sem, long f, java.nio.IntBuffer out) { return nextAcquireResult; }", khrSwapchain));
++        khrSwapchain.addMethod(CtMethod.make("public static int vkQueuePresentKHR(long q, long p) { return nextPresentResult; }", khrSwapchain));
++
++        CtClass sdlVulkan = pool.makeClass("org.lwjgl.sdl.SDLVulkan");
++        sdlVulkan.addMethod(CtMethod.make("public static boolean SDL_Vulkan_CreateSurface(long w, org.lwjgl.vulkan.VkInstance i, org.lwjgl.vulkan.VkAllocationCallbacks a, java.nio.LongBuffer out) { out.put(0, 200L); return true; }", sdlVulkan));
++        CtClass sdlError = pool.makeClass("org.lwjgl.sdl.SDLError");
++        sdlError.addMethod(CtMethod.make("public static String SDL_GetError() { return \"\"; }", sdlError));
++        CtClass sdlHints = pool.makeClass("org.lwjgl.sdl.SDLHints");
++        sdlHints.addMethod(CtMethod.make("public static boolean SDL_GetHintBoolean(CharSequence name, boolean def) { return true; }", sdlHints));
++        sdlHints.addMethod(CtMethod.make("public static String SDL_GetHint(CharSequence name) { return \"1\"; }", sdlHints));
++        CtClass sdlVideo = pool.makeClass("org.lwjgl.sdl.SDLVideo");
++        sdlVideo.addMethod(CtMethod.make("public static long SDL_GetWindowFlags(long w) { return 0L; }", sdlVideo));
++        CtClass memStack = pool.makeClass("org.lwjgl.system.MemoryStack");
++        memStack.addConstructor(CtNewConstructor.defaultConstructor(memStack));
++        memStack.addMethod(CtMethod.make("public static org.lwjgl.system.MemoryStack stackPush() { return new org.lwjgl.system.MemoryStack(); }", memStack));
++        memStack.addMethod(CtMethod.make("public java.nio.LongBuffer longs(long v) { return java.nio.LongBuffer.allocate(1); }", memStack));
++        memStack.addMethod(CtMethod.make("public void close() {}", memStack));
++
++        CtClass vgs = pool.makeClass("com.mojang.renderpearl.backend.vulkan.VulkanGpuSurface");
++        vgs.addField(CtField.make("private final com.mojang.renderpearl.backend.vulkan.VulkanDevice device;", vgs));
++        vgs.addField(CtField.make("private final long surface;", vgs));
++        vgs.addField(CtField.make("private long swapchain = 50L;", vgs));
++        vgs.addField(CtField.make("private long[] presentSemaphores = new long[]{ 1L };", vgs));
++        vgs.addField(CtField.make("private int currentImageIndex = 0;", vgs));
++        vgs.addField(CtField.make("private com.mojang.renderpearl.api.device.SurfaceException eatenException;", vgs));
++        vgs.addField(CtField.make("private boolean swapchainSuboptimal;", vgs));
++        vgs.addField(CtField.make("private boolean swapchainOutOfDate;", vgs));
++        vgs.addConstructor(CtNewConstructor.make("public VulkanGpuSurface(com.mojang.renderpearl.backend.vulkan.VulkanDevice dev, long win) { this.device = dev; this.surface = 100L; }", vgs));
++        vgs.addMethod(CtMethod.make("private void destroySwapchain() { this.swapchain = 0L; }", vgs));
++        vgs.addMethod(CtMethod.make("public static void throwIfFailure(int r, String m) throws com.mojang.renderpearl.api.device.SurfaceException { if (r < 0) throw new com.mojang.renderpearl.api.device.SurfaceException(m); }", vgs));
++        vgs.addMethod(CtMethod.make(
++                "public void configure(com.mojang.renderpearl.api.device.GpuSurface$Configuration c) throws com.mojang.renderpearl.api.device.SurfaceException {" +
++                        "  this.destroySwapchain();" +
++                        "  org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR cap = new org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR();" +
++                        "  throwIfFailure(org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(this.device.vkDevice().getPhysicalDevice(), this.surface, cap), \"caps\");" +
++                        "  org.lwjgl.vulkan.VkSwapchainCreateInfoKHR info = new org.lwjgl.vulkan.VkSwapchainCreateInfoKHR();" +
++                        "  info.preTransform(cap.currentTransform());" +
++                        "  this.swapchain = 60L;" +
++                        "  this.swapchainSuboptimal = false;" +
++                        "  this.swapchainOutOfDate = false;" +
++                        "}",
++                vgs
++        ));
++        vgs.addMethod(CtMethod.make("public boolean isSuboptimal() { return this.swapchainSuboptimal; }", vgs));
++        vgs.addMethod(CtMethod.make(
++                "public void acquireNextTexture() throws com.mojang.renderpearl.api.device.SurfaceException {" +
++                        "  int r = org.lwjgl.vulkan.KHRSwapchain.vkAcquireNextImageKHR(this.device.vkDevice(), this.swapchain, 0L, 0L, 0L, null);" +
++                        "  if (r == 1000001003) { this.swapchainSuboptimal = true; } else { com.mojang.renderpearl.backend.vulkan.VulkanUtils.crashIfFailure(this.device, r, \"acq\"); }" +
++                        "}",
++                vgs
++        ));
++        vgs.addMethod(CtMethod.make(
++                "public void present() {" +
++                        "  int r = org.lwjgl.vulkan.KHRSwapchain.vkQueuePresentKHR(0L, 0L);" +
++                        "  if (r == 1000001003) { this.swapchainSuboptimal = true; } else { com.mojang.renderpearl.backend.vulkan.VulkanUtils.crashIfFailure(this.device, r, \"pres\"); }" +
++                        "}",
++                vgs
++        ));
++        vgs.addMethod(CtMethod.make("public void close() { this.destroySwapchain(); org.lwjgl.vulkan.KHRSurface.vkDestroySurfaceKHR(this.device.instance().vkInstance(), this.surface, null); }", vgs));
++
++        new VulkanSurfaceTransformer().transform(vgs);
++        vgs.toBytecode();
++
++        ClassLoader cl = new ClassLoader(BaseTransformerSmokeTest.class.getClassLoader()) {};
++        surfaceEx.toClass(cl, null);
++        cfg.toClass(cl, null);
++        vkInstance.toClass(cl, null);
++        vkPhysDev.toClass(cl, null);
++        vkDevice.toClass(cl, null);
++        rpInstance.toClass(cl, null);
++        rpDevice.toClass(cl, null);
++        vkUtils.toClass(cl, null);
++        allocCb.toClass(cl, null);
++        Class<?> capsClass = caps.toClass(cl, null);
++        Class<?> swInfoClass = swInfo.toClass(cl, null);
++        khrSurface.toClass(cl, null);
++        khrSwapchain.toClass(cl, null);
++        sdlVulkan.toClass(cl, null);
++        sdlError.toClass(cl, null);
++        sdlHints.toClass(cl, null);
++        sdlVideo.toClass(cl, null);
++        memStack.toClass(cl, null);
++        Class<?> vgsClass = vgs.toClass(cl, null);
++        Class<?> devClass = Class.forName("com.mojang.renderpearl.backend.vulkan.VulkanDevice", true, cl);
++        Class<?> cfgClass = Class.forName("com.mojang.renderpearl.api.device.GpuSurface$Configuration", true, cl);
++
++        Object surf = vgsClass.getConstructor(devClass, long.class)
++                .newInstance(devClass.getDeclaredConstructor().newInstance(), 999L);
++
++        // Landscape Android surface: currentTransform=ROTATE_90 (2), supportedTransforms includes IDENTITY (1)
++        capsClass.getField("nextSupported").setInt(null, 15);
++        capsClass.getField("nextCurrent").setInt(null, 2);
++        vgsClass.getMethod("configure", cfgClass).invoke(surf, new Object[]{ null });
++        assertEquals(1, swInfoClass.getField("lastPreTransform").getInt(null));
++
++        // VK_SUBOPTIMAL_KHR from acquire/present must NOT trigger swapchain thrashing when transform differs
++        vgsClass.getMethod("acquireNextTexture").invoke(surf);
++        assertEquals(false, vgsClass.getMethod("isSuboptimal").invoke(surf));
++        vgsClass.getMethod("present").invoke(surf);
++        assertEquals(false, vgsClass.getMethod("isSuboptimal").invoke(surf));
++
++        // When currentTransform already equals IDENTITY (1), VK_SUBOPTIMAL_KHR must still mark suboptimal
++        capsClass.getField("nextCurrent").setInt(null, 1);
++        vgsClass.getMethod("configure", cfgClass).invoke(surf, new Object[]{ null });
++        assertEquals(1, swInfoClass.getField("lastPreTransform").getInt(null));
++        vgsClass.getMethod("acquireNextTexture").invoke(surf);
++        assertEquals(true, vgsClass.getMethod("isSuboptimal").invoke(surf));
++    }
++
++    @Test
++    void glSingleWindowOnAndroid() throws Exception {
++        ClassPool pool = new ClassPool(true);
++        CtClass sdlPlatform = pool.makeClass("org.lwjgl.sdl.SDLPlatform");
++        sdlPlatform.addMethod(CtMethod.make("public static String SDL_GetPlatform() { return \"Android\"; }", sdlPlatform));
++
++        CtClass sdlVideo = pool.makeClass("org.lwjgl.sdl.SDLVideo");
++        sdlVideo.addField(CtField.make("public static int createCount;", sdlVideo));
++        sdlVideo.addField(CtField.make("public static int destroyCount;", sdlVideo));
++        sdlVideo.addField(CtField.make("public static long lastFlags;", sdlVideo));
++        sdlVideo.addField(CtField.make("public static String lastTitle;", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static long SDL_CreateWindow(CharSequence t, int w, int h, long f) { createCount++; lastFlags = f; if (createCount > 1) return 0L; return 777L; }", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static boolean SDL_SetWindowTitle(long w, CharSequence t) { lastTitle = t.toString(); return true; }", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static boolean SDL_SetWindowSize(long w, int wi, int h) { return true; }", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static void SDL_DestroyWindow(long w) { destroyCount++; }", sdlVideo));
++
++        CtClass debugOpts = pool.makeClass("com.mojang.renderpearl.api.device.GpuDebugOptions");
++        CtClass glBackend = pool.makeClass("com.mojang.renderpearl.backend.opengl.GlBackend");
++        glBackend.addMethod(CtMethod.make("public long createWindow(String t, int w, int h, long f) { return org.lwjgl.sdl.SDLVideo.SDL_CreateWindow(t, w, h, 2L | f); }", glBackend));
++
++        CtClass glDevice = pool.makeClass("com.mojang.renderpearl.backend.opengl.GlDevice");
++        glDevice.addField(CtField.make("private final long initialWindowHandle;", glDevice));
++        glDevice.addConstructor(CtNewConstructor.make(
++                "public GlDevice(com.mojang.renderpearl.backend.opengl.GlBackend b, com.mojang.renderpearl.api.device.GpuDebugOptions o) {" +
++                        "  this.initialWindowHandle = b.createWindow(\"Minecraft - RenderPearl OpenGL Hidden Utility Window\", 320, 480, 2147614728L);" +
++                        "  long test = b.createWindow(\"Minecraft - RenderPearl OpenGL Hidden Test Window\", 320, 480, 2147614728L);" +
++                        "  if (test == 0L) throw new RuntimeException(\"second window failed\");" +
++                        "  org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow(test);" +
++                        "}",
++                glDevice
++        ));
++        glDevice.addMethod(CtMethod.make("public void close() { org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow(this.initialWindowHandle); }", glDevice));
++
++        try {
++            GlSingleWindowTransformer transformer = new GlSingleWindowTransformer();
++            transformer.transform(glBackend);
++            glBackend.toBytecode();
++
++            // Verify GlDevice transforms cleanly against an untransformed GlBackend in a fresh pool
++            ClassPool devPool = new ClassPool(true);
++            devPool.makeClass("org.lwjgl.sdl.SDLPlatform").addMethod(CtMethod.make("public static String SDL_GetPlatform() { return \"Android\"; }", devPool.get("org.lwjgl.sdl.SDLPlatform")));
++            devPool.makeClass("org.lwjgl.sdl.SDLVideo").addMethod(CtMethod.make("public static void SDL_DestroyWindow(long w) {}", devPool.get("org.lwjgl.sdl.SDLVideo")));
++            devPool.makeClass("com.mojang.renderpearl.api.device.GpuDebugOptions");
++            CtClass rawBackend = devPool.makeClass("com.mojang.renderpearl.backend.opengl.GlBackend");
++            rawBackend.addMethod(CtMethod.make("public long createWindow(String t, int w, int h, long f) { return 0L; }", rawBackend));
++            CtClass isolatedDevice = devPool.makeClass("com.mojang.renderpearl.backend.opengl.GlDevice");
++            isolatedDevice.addField(CtField.make("private final long initialWindowHandle;", isolatedDevice));
++            isolatedDevice.addConstructor(CtNewConstructor.make(
++                    "public GlDevice(com.mojang.renderpearl.backend.opengl.GlBackend b, com.mojang.renderpearl.api.device.GpuDebugOptions o) {" +
++                            "  this.initialWindowHandle = b.createWindow(\"Minecraft - RenderPearl OpenGL Hidden Utility Window\", 320, 480, 2147614728L);" +
++                            "  long test = b.createWindow(\"Minecraft - RenderPearl OpenGL Hidden Test Window\", 320, 480, 2147614728L);" +
++                            "  if (test == 0L) throw new RuntimeException(\"second window failed\");" +
++                            "  org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow(test);" +
++                            "}",
++                    isolatedDevice
++            ));
++            isolatedDevice.addMethod(CtMethod.make("public void close() { org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow(this.initialWindowHandle); }", isolatedDevice));
++            transformer.transform(isolatedDevice);
++            isolatedDevice.toBytecode();
++
++            transformer.transform(glDevice);
++            glDevice.toBytecode();
++        } catch (Throwable e) {
++            throw new AssertionError("GlSingleWindowTransformer transform failed", e);
++        }
++
++        System.clearProperty("mio.rp.gl.singleWindow");
++        System.clearProperty("mio.rp.gl.windowClaimed");
++        ClassLoader cl = new ClassLoader(BaseTransformerSmokeTest.class.getClassLoader()) {};
++        sdlPlatform.toClass(cl, null);
++        Class<?> videoClass = sdlVideo.toClass(cl, null);
++        Class<?> optsClass = debugOpts.toClass(cl, null);
++        Class<?> backendClass = glBackend.toClass(cl, null);
++        Class<?> devClass = glDevice.toClass(cl, null);
++
++        Object backend = backendClass.getDeclaredConstructor().newInstance();
++        Object device = devClass.getConstructor(backendClass, optsClass).newInstance(backend, null);
++        long gameWin = (long) backendClass.getMethod("createWindow", String.class, int.class, int.class, long.class)
++                .invoke(backend, "Minecraft 26.3", 1280, 720, 8224L);
++
++        assertEquals(777L, gameWin);
++        assertEquals(1, videoClass.getField("createCount").getInt(null));
++        assertEquals("Minecraft 26.3", videoClass.getField("lastTitle").get(null));
++        // GlDevice.close() must not double-destroy the window handed off to Window
++        devClass.getMethod("close").invoke(device);
++        assertEquals(0, videoClass.getField("destroyCount").getInt(null));
++    }
++
++    @Test
++    void minecraftSurfaceResumeRecovery() throws Throwable {
++        ClassPool pool = new ClassPool(true);
++        CtClass sdlHints = pool.makeClass("org.lwjgl.sdl.SDLHints");
++        sdlHints.addField(CtField.make("public static boolean surfaceReady = true;", sdlHints));
++        sdlHints.addMethod(CtMethod.make("public static boolean SDL_GetHintBoolean(CharSequence name, boolean def) { return surfaceReady; }", sdlHints));
++
++        CtClass mc = pool.makeClass("net.minecraft.client.Minecraft");
++        mc.addField(CtField.make("private boolean surfaceIsInvalid;", mc));
++        mc.addField(CtField.make("private boolean windowSurfaceNeedsReconfiguring;", mc));
++        mc.addMethod(CtMethod.make("public void renderFrame(boolean renderLevel) {}", mc));
++
++        new MinecraftSurfaceResumeTransformer().transform(mc);
++        mc.toBytecode();
++
++        ClassLoader cl = new ClassLoader(BaseTransformerSmokeTest.class.getClassLoader()) {};
++        Class<?> hintsClass = sdlHints.toClass(cl, null);
++        Class<?> mcClass = mc.toClass(cl, null);
++        Object instance = mcClass.getDeclaredConstructor().newInstance();
++
++        java.lang.reflect.Field invalidField = mcClass.getDeclaredField("surfaceIsInvalid");
++        java.lang.reflect.Field reconfigField = mcClass.getDeclaredField("windowSurfaceNeedsReconfiguring");
++        invalidField.setAccessible(true);
++        reconfigField.setAccessible(true);
++        java.lang.reflect.Method renderFrame = mcClass.getMethod("renderFrame", boolean.class);
++
++        // Background: surfaceReady=false marks surfaceIsInvalid=true without spamming reconfig
++        hintsClass.getField("surfaceReady").setBoolean(null, false);
++        reconfigField.setBoolean(instance, true);
++        renderFrame.invoke(instance, true);
++        assertEquals(true, invalidField.getBoolean(instance));
++        assertEquals(false, reconfigField.getBoolean(instance));
++
++        // Foreground resume: surfaceReady=true triggers windowSurfaceNeedsReconfiguring=true
++        hintsClass.getField("surfaceReady").setBoolean(null, true);
++        renderFrame.invoke(instance, true);
++        assertEquals(true, reconfigField.getBoolean(instance));
++    }
++
++    @Test
++    void glShaderUniformRename() throws Throwable {
++        ClassPool pool = new ClassPool(true);
++        CtClass recompiler = pool.makeClass("com.mojang.renderpearl.backend.opengl.GlPipelineRecompiler");
++        recompiler.addMethod(CtMethod.make(
++                "public String[] renameDescriptors(int set, int binding) {" +
++                        "  String inst = String.format(java.util.Locale.ROOT, \"_uniform_instance_%02d_%02d\", new Object[]{ Integer.valueOf(set), Integer.valueOf(binding) });" +
++                        "  String block = String.format(java.util.Locale.ROOT, \"_uniform_%02d_%02d\", new Object[]{ Integer.valueOf(set), Integer.valueOf(binding) });" +
++                        "  return new String[]{ inst, block };" +
++                        "}",
++                recompiler
++        ));
++
++        GlShaderUniformNameTransformer transformer = new GlShaderUniformNameTransformer();
++        transformer.transform(recompiler);
++        recompiler.toBytecode();
++
++        ClassLoader cl = new ClassLoader(BaseTransformerSmokeTest.class.getClassLoader()) {};
++        Class<?> recompilerClass = recompiler.toClass(cl, null);
++
++        Object recompilerInst = recompilerClass.getDeclaredConstructor().newInstance();
++        String[] renamed = (String[]) recompilerClass.getMethod("renameDescriptors", int.class, int.class)
++                .invoke(recompilerInst, 0, 2);
++        assertEquals("_rp_inst_00_02", renamed[0]);
++        assertEquals("_uniform_00_02", renamed[1]);
++    }
+ }

@@ -277,6 +277,7 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         }
         TouchControllerUtils.processTouchEvent(e, this);
         if (mIngameProcessor == null || mInGUIProcessor == null) return true;
+        updateGrabState(CallbackBridge.isGrabbing());
         return mCurrentTouchProcessor.processTouchEvent(e);
     }
 
@@ -550,7 +551,11 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
 
     @Override
     public void onGrabState(boolean isGrabbing) {
-        post(()->updateGrabState(isGrabbing));
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            updateGrabState(isGrabbing);
+        } else {
+            post(() -> updateGrabState(isGrabbing));
+        }
     }
 
     private TouchEventProcessor pickEventProcessor(boolean isGrabbing) {

@@ -1,103 +1,88 @@
-# Building STAR Launcher from Source
+# Building STAR Launcher
 
-> Verified against `build.gradle`, `settings.gradle`, `app_pojavlauncher/build.gradle`, `app_pojavlauncher/src/main/jni/Application.mk`, and `.github/workflows/android.yml`.
-
----
-
-## 1. System & Toolchain Prerequisites
-
-| Dependency | Verified Version / Requirement | Notes |
-| --- | --- | --- |
-| **Android Gradle Plugin** | `9.3.1` | Configured in `build.gradle` & `app_pojavlauncher/build.gradle` |
-| **Gradle Wrapper** | `9.6.1` | Invoke via `./gradlew` (macOS/Linux) or `.\gradlew.bat` (Windows) |
-| **Primary JDK (`JAVA_HOME`)** | **JDK 21** (Eclipse Temurin recommended) | Used for Gradle daemon, Kotlin (`JvmTarget.JVM_1_8`), Compose, and unit tests (`testOptions` explicitly requests Java 21 launcher) |
-| **Secondary JDK Toolchain** | **JDK 8** | Required by `:MioLibPatcher` (`JavaLanguageVersion.of(8)`). Gradle toolchain auto-detection must be able to locate JDK 8 on the host machine |
-| **Android SDK Platforms** | `compileSdk = 37`, `android-36.1` (`androidnsbypass`), `targetSdk = 34`, `minSdk = 21` | `app_pojavlauncher` compiles against API `37`; `androidnsbypass` compiles against API `36.1` |
-| **Android NDK** | `27.3.13750724` (pinned in `app_pojavlauncher/build.gradle`) | Compiles `pojavexec`, `exithook`, `linkerhook`, `glxshim`, `pojavexec_awt`, and `awt_xawt` |
-| **CMake** | `3.22.1` (plus Ninja from Android SDK) | Required by `:androidnsbypass` CMake build |
-| **Working Directory Path** | **No spaces in absolute path** | On Windows/Unix, `ndk-build` fails when the repository path contains spaces (`android/ndk#1400`) |
+Verified build instructions for **STAR Launcher** (`com.star.launcher`, branch `v3_openjdk`).
 
 ---
 
-## 2. Repository Clone & Submodules
+## 1. Prerequisites
 
-Active Git submodules declared in the index:
+- **JDK 21** (`JAVA_HOME`): Required for AGP `9.3.1`, Kotlin, Jetpack Compose, and Android/unit test tasks.
+- **JDK 8**: Required on the host for Gradle Java toolchain auto-detection (`:MioLibPatcher` and helper JVM agents compile to Java 8 bytecode).
+- **Android SDK** (`ANDROID_HOME` / `sdk.dir` in `local.properties`):
+  - Compile SDK `37` (`app_pojavlauncher`), `36.1` (`androidnsbypass`), Target SDK `34`, Min SDK `21`.
+  - Build Tools `36.0.0` (or `34.0.0`+) for `aapt2`, `apksigner`, and `apkanalyzer`.
+  - CMake and NDK (`25.2.9519653`+ / matching local SDK NDK installation).
+- **Spaceless Working Directory**: On Windows, keep the repository in a path without spaces (for example `D:\STARLauncher`) because `ndk-build` splits unquoted paths on spaces.
 
-- `MioLibPatcher` (`AngelAuraMC/MioLibPatcher`)
-- `androidnsbypass` (`alexytomi/androidnsbypass`)
+---
 
-*(Note: `.gitmodules` still lists `MobileGlues`, `SDL`, and `sdl2-compat`, though those dependencies are actually consumed as prebuilt `.aar` archives in `app_pojavlauncher/libs/`.)*
-
-Clone recursively into a spaceless path:
+## 2. Clone & Apply Submodule Overlay
 
 ```bash
-git clone --recursive <repository-url> STAR-Launcher
+git clone --recursive https://github.com/BaiNingBing673/STAR-LAUNCHER.git STAR-Launcher
 cd STAR-Launcher
 ```
 
-Ensure `local.properties` points to your Android SDK (gitignored):
-
-```properties
-sdk.dir=/path/to/android-sdk
-```
-
-And if Gradle does not automatically find JDK 8 alongside JDK 21, configure `~/.gradle/gradle.properties`:
-
-```properties
-org.gradle.java.installations.auto-detect=true
-org.gradle.java.installations.paths=/path/to/jdk-8,/path/to/jdk-21
-```
-
----
-
-## 3. Optional Pre-Build Assets & Environment Variables
-
-### 3.1 Embedded Java 8 Runtime (`components/jre/`)
-Pre-built OpenJDK 8 binaries are **not** committed to Git.
-
-- **Without bundled JRE 8**: The APK compiles and installs normally. Users can download OpenJDK 8, 17, 21, or 25 runtimes in-app via **Settings -> Runtime Management**, or import a `.tar.xz` runtime archive.
-- **With bundled JRE 8 (matches CI)**: Place unpacked `jre8-pojav` contents inside `app_pojavlauncher/src/main/assets/components/jre/` before running `assembleDebug` or `assembleRelease`.
-
-### 3.2 Language List Generator
-When adding or updating Crowdin localizations under `app_pojavlauncher/src/main/res/values-*/`:
-
-- **Linux / macOS**: `bash scripts/languagelist_updater.sh`
-- **Windows**: `scripts\languagelist_updater.bat`
-
-### 3.3 Optional CurseForge API Key
-If neither `CURSEFORGE_API_KEY` (environment variable) nor `app_pojavlauncher/curseforge_key.txt` exists, Gradle logs:
-`BUILD: You have no CurseForge key, the curseforge api will get disabled !`
-This is **non-fatal** (`resValue 'string', 'curseforge_api_key', 'DUMMY'`); debug builds and unit tests still succeed.
-
----
-
-## 4. Build & Test Commands
-
-### Build Debug APK
+Ensure `MioLibPatcher` includes STAR's custom bytecode transformers (`patches/miolibpatcher-star.patch`):
 
 ```bash
-# Linux / macOS
+if [ ! -f MioLibPatcher/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java ]; then
+  git -C MioLibPatcher apply ../patches/miolibpatcher-star.patch
+fi
+```
+
+Update the tracked language index on Linux/macOS before assembling APKs:
+
+```bash
+./scripts/languagelist_updater.sh
+```
+
+*(Note: Pre-built JRE 8 binaries under `app_pojavlauncher/src/main/assets/components/jre/` are not stored in Git. CI downloads them from `AngelAuraMC/angelauramc-openjdk-build`; local developers can omit them and install OpenJDK 8/17/21/25 inside the app via Runtime Management.)*
+
+---
+
+## 3. Version Source of Truth
+
+Version metadata lives in `app_pojavlauncher/build.gradle`:
+
+- `starVersionCode` (e.g. `10000002`)
+- `starVersionName` (e.g. `"3.0.1"`)
+
+`BuildConfig.VERSION_CODE`, `BuildConfig.VERSION_NAME`, in-app About info, HTTP User-Agent headers, and CI APK/tag validation all read from these values.
+
+---
+
+## 4. Running Tests & Debug Builds
+
+```bash
+# Run MioLibPatcher + Android JVM/Robolectric unit tests
+./gradlew :MioLibPatcher:test :app_pojavlauncher:testDebugUnitTest --console=plain
+
+# Build Debug APK (signed automatically with app_pojavlauncher/debug.keystore)
 ./gradlew :app_pojavlauncher:assembleDebug --console=plain
 ```
 
-```powershell
-# Windows PowerShell (from a spaceless directory)
-$env:JAVA_HOME = "D:\tools\jdks\temurin-21"
-$env:ANDROID_HOME = "D:\tools\android-sdk"
-.\gradlew.bat :app_pojavlauncher:assembleDebug --console=plain
-```
-
-Output path:
+Output:
 `app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk`
 
-### Run Unit & Robolectric Tests
+---
 
-```bash
-./gradlew :app_pojavlauncher:testDebugUnitTest --console=plain
-```
+## 5. Production Release Signing (Required)
 
-### Build Release / Google Play Variants
-Release signing expects keystore credentials in environment variables (`GPLAY_KEYSTORE_PASSWORD`) and keystore files (`aamc_upload.jks` / `upload.jks`) referenced in `app_pojavlauncher/build.gradle`:
+**Release builds (`:app_pojavlauncher:assembleRelease`, `bundleRelease`) NEVER fall back to `debug.keystore`.**
+If production signing credentials are missing, Gradle intentionally fails before packaging an unsigned or debug-signed release APK.
+
+Supply the **existing STAR Launcher production signing keystore** using environment variables, Gradle properties (`-P...`), or git-ignored `local.properties` (never commit secrets or keystores):
+
+- `STAR_KEYSTORE_FILE` — Path to the `.jks`/`.keystore` file (absolute or relative to repo/module root)
+- `STAR_KEYSTORE_PASSWORD` — Keystore store password
+- `STAR_KEY_ALIAS` — Signing key alias
+- `STAR_KEY_PASSWORD` — Key password
+
+Optional CurseForge key (if absent, Mods Hub still works via keyless `ModrinthFallbackCatalog`):
+- `CURSEFORGE_API_KEY` env var / `local.properties`, or git-ignored `app_pojavlauncher/curseforge_key.txt`.
+
+Build the signed Release APK:
 
 ```bash
 ./gradlew :app_pojavlauncher:assembleRelease --console=plain
@@ -105,16 +90,28 @@ Release signing expects keystore credentials in environment variables (`GPLAY_KE
 
 ---
 
-## 5. Known Build Caveat (`clean` Task Ordering with Prefab)
+## 6. Post-Build APK Verification & Checksums
 
-Running `./gradlew clean` directly while `:app_pojavlauncher:externalNativeBuildCleanDebug` executes can fail if `:androidnsbypass:clean` removes `libandroidnsbypass.so` before `:app_pojavlauncher` finishes running `ndk-build clean` against its cached prefab `.cxx` metadata.
+Verify APK metadata, native libraries, signature certificate, and generate SHA-256 checksums:
 
-To perform a guaranteed cold clean build:
+```bash
+APK="out/STAR-Launcher-v3.0.1.apk"
 
-```powershell
-.\gradlew.bat --stop
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
-  app_pojavlauncher\build, app_pojavlauncher\.cxx, `
-  androidnsbypass\build, androidnsbypass\.cxx
-.\gradlew.bat :app_pojavlauncher:testDebugUnitTest :app_pojavlauncher:assembleDebug --console=plain
+# 1. Inspect metadata & permissions
+"$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK"
+
+# 2. Verify APK signature and inspect SHA-256 certificate digest
+"$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs --verbose "$APK"
+
+# 3. Verify native ABI directories (arm64-v8a, armeabi-v7a, x86, x86_64)
+"$ANDROID_HOME/build-tools/36.0.0/apkanalyzer" files list "$APK" | grep '^/lib/'
+
+# 4. Generate SHA-256 checksum
+sha256sum "$APK" > "${APK}.sha256"
 ```
+
+---
+
+## 7. Known Build Caveat (`clean` with Native Prefab Caches)
+
+Directly running `./gradlew clean` when CMake/ndk-build prefab caches already exist can fail inside `:androidnsbypass` / `:app_pojavlauncher:externalNativeBuildCleanDebug`. If you need a full clean rebuild, remove `app_pojavlauncher/.cxx`, `androidnsbypass/.cxx`, and `build/` folders before rebuilding.

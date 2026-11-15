@@ -228,3 +228,27 @@ sealed interface CurseForgeDownloadUrlResult {
         val websiteUrl: String?
     ) : CurseForgeDownloadUrlResult
 }
+
+enum class CurseForgeConnectionState(val displayLabel: String) {
+    CONNECTED("Connected"),
+    CONFIGURATION_REQUIRED("Configuration Required"),
+    CONNECTION_FAILED("Connection Failed"),
+    CHECKING("Checking...")
+}
+
+enum class CurseForgeErrorCategory {
+    NONE,
+    MISSING_CONFIGURATION,
+    INVALID_API_KEY,
+    RATE_LIMITED,
+    NETWORK_FAILURE,
+    SERVICE_ERROR
+}
+
+data class CurseForgeConnectionTestResult(
+    val state: CurseForgeConnectionState,
+    val credentialStatus: CurseForgeCredentialStatus,
+    val errorCategory: CurseForgeErrorCategory = CurseForgeErrorCategory.NONE,
+    val message: String,
+    val latencyMs: Long = 0L
+)

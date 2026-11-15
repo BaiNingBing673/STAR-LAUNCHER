@@ -44,6 +44,7 @@ import com.star.launcher.ui.theme.AetherMonoStyle
 import com.star.launcher.ui.theme.AetherSpacing
 import com.star.launcher.ui.theme.CompatibilityBadgeTier
 import com.star.launcher.ui.theme.CompatibilityTierBadge
+import net.kdt.pojavlaunch.BuildConfig
 import net.kdt.pojavlaunch.Tools
 import net.kdt.pojavlaunch.multirt.MultiRTUtils
 import kotlin.math.roundToInt
@@ -562,6 +563,25 @@ fun SettingsScreen(
                     text = "Open Engine Preferences",
                     onClick = onOpenEnginePreferences,
                     modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+
+        // 6. Application & Build Info
+        item {
+            AetherSurfaceCard {
+                Text(
+                    text = "About STAR Launcher",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = AetherColors.OnSurfaceDark
+                )
+                Text(
+                    text = "Version ${BuildConfig.VERSION_NAME} (Code ${BuildConfig.VERSION_CODE}) · ${BuildConfig.BUILD_TYPE}",
+                    style = AetherMonoStyle.copy(color = AetherColors.AccentCyan)
+                )
+                Text(
+                    text = "Package: ${BuildConfig.APPLICATION_ID} · Min Android: 5.0 (API 21)",
+                    style = AetherMonoStyle.copy(color = AetherColors.OnSurfaceVariantDark)
                 )
             }
         }

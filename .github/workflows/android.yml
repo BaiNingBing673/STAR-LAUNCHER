@@ -3,32 +3,43 @@ name: Android CI
 on:
   pull_request:
     branches-ignore:
-      - 'l10n_v3_openjdk' 
-    types: [ opened, reopened ]
+      - 'l10n_v3_openjdk'
+    types: [ opened, reopened, synchronize ]
   push:
     branches-ignore:
       - 'l10n_v3_openjdk'
+    tags:
+      - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  verify-and-debug:
     runs-on: ubuntu-22.04
-    env:
-      GPLAY_KEYSTORE_PASSWORD: ${{ secrets.GPLAY_KEYSTORE_PASSWORD }}
-      CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
     steps:
-      - name: Checkout
+      - name: Checkout repository and submodules
         uses: actions/checkout@v4
         with:
           submodules: "recursive"
 
+      - name: Apply STAR MioLibPatcher overlay if needed
+        run: |
+          if [ ! -f MioLibPatcher/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java ]; then
+            git -C MioLibPatcher apply ../patches/miolibpatcher-star.patch
+          fi
+
       - name: Set up JDK 21
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Get JRE 8
+      - name: Set up Android SDK build-tools
+        uses: android-actions/setup-android@v3
+
+      - name: Download JRE 8 component
         uses: dawidd6/action-download-artifact@v9
         with:
           workflow: build.yml
@@ -38,74 +49,204 @@ jobs:
           branch: buildjre8
           name: jre8-pojav
 
-      # - name: Get JRE17
-      #   uses: dawidd6/action-download-artifact@v9
-      #   with:
-      #     workflow: build.yml
-      #     path: app_pojavlauncher/src/main/assets/components/jre-new
-      #     workflow_conclusion: completed
-      #     repo: AngelAuraMC/angelauramc-openjdk-build
-      #     branch: buildjre17-21
-      #     name: jre17-pojav
-      #
-      # - name: Get JRE21
-      #   uses: dawidd6/action-download-artifact@v9
-      #   with:
-      #     workflow: build.yml
-      #     path: app_pojavlauncher/src/main/assets/components/jre-21
-      #     workflow_conclusion: completed
-      #     repo: AngelAuraMC/angelauramc-openjdk-build
-      #     branch: buildjre17-21
-      #     name: jre21-pojav
-      #
-      # - name: Get JRE25
-      #   uses: dawidd6/action-download-artifact@v9
-      #   with:
-      #     workflow: build.yml
-      #     path: app_pojavlauncher/src/main/assets/components/jre-25
-      #     workflow_conclusion: completed
-      #     repo: FCL-Team/Android-OpenJDK-Build
-      #     branch: Build_JRE_25
-      #     name: jre25-multiarch
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          validate-wrappers: false
-          gradle-version: "9.6.1"
-
-      - name: Run scripts
+      - name: Update language list and read version metadata
+        id: meta
         run: |
           ./scripts/languagelist_updater.sh
-          mkdir out
+          mkdir -p out logs
+          VERSION_NAME=$(grep -m1 'starVersionName\s*=' app_pojavlauncher/build.gradle | sed -E 's/.*"(.*)".*/\1/')
+          VERSION_CODE=$(grep -m1 'starVersionCode\s*=' app_pojavlauncher/build.gradle | sed -E 's/.*=\s*([0-9]+).*/\1/')
+          test -n "$VERSION_NAME"
+          test -n "$VERSION_CODE"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
 
-      - name: Build Release .apk
+      - name: Run unit tests
         run: |
-          # Build the launcher
-          gradle :app_pojavlauncher:assembleRelease
-          mv app_pojavlauncher/build/outputs/apk/release/app_pojavlauncher-release.apk out/app-release.apk
+          set -o pipefail
+          ./gradlew :MioLibPatcher:test :app_pojavlauncher:testDebugUnitTest --no-daemon --console=plain 2>&1 | tee logs/unit-tests.log
 
-      - name: Gen md5sums
+      - name: Build Debug APK
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
         run: |
-          md5sum out/app-release.apk > out/app-release.md5
+          set -o pipefail
+          ./gradlew :app_pojavlauncher:assembleDebug --no-daemon --console=plain 2>&1 | tee logs/assemble-debug.log
+          APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk"
+          cp app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk "$APK_OUT"
+          (cd out && sha256sum "$(basename "$APK_OUT")" > "$(basename "$APK_OUT").sha256")
 
-      - name: Build Debug .apk
+      - name: Verify Debug APK metadata, signature, and ABIs
         run: |
-          # Build the launcher
-          gradle :app_pojavlauncher:assembleDebug
-          mv app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk out/app-debug.apk
+          set -euo pipefail
+          APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk"
+          BUILD_TOOLS_DIR=$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          "$BUILD_TOOLS_DIR/aapt2" dump badging "$APK_OUT" | tee logs/debug-badging.txt
+          grep -q "package: name='com.star.launcher.debug'" logs/debug-badging.txt
+          grep -q "versionCode='${{ steps.meta.outputs.version_code }}'" logs/debug-badging.txt
+          grep -q "versionName='${{ steps.meta.outputs.version_name }}'" logs/debug-badging.txt
+          grep -q "minSdkVersion:'21'" logs/debug-badging.txt
+          grep -q "targetSdkVersion:'34'" logs/debug-badging.txt
+          "$BUILD_TOOLS_DIR/apksigner" verify --print-certs --verbose "$APK_OUT" | tee logs/debug-apksigner.txt
+          unzip -l "$APK_OUT" 'lib/*.so' | tee logs/debug-native-libs.txt
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            grep -q "lib/$abi/libpojavexec.so" logs/debug-native-libs.txt
+          done
 
-      - name: Gen md5sums
-        run: |
-          md5sum out/app-debug.apk > out/app-debug.md5
-
-      - name: Upload debug APK
+      - name: Upload Debug APK and SHA-256
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug (recommended)
-          path: out/app-debug.*
+          name: STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug
+          path: |
+            out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk
+            out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk.sha256
 
-      - name: Upload release APK
+      - name: Upload Debug & Test Logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: out/app-release.*
+          name: ci-debug-test-logs
+          path: |
+            logs/
+            MioLibPatcher/build/reports/tests/
+            app_pojavlauncher/build/reports/tests/
+
+  release:
+    needs: verify-and-debug
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Apply STAR MioLibPatcher overlay if needed
+        run: |
+          if [ ! -f MioLibPatcher/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java ]; then
+            git -C MioLibPatcher apply ../patches/miolibpatcher-star.patch
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK build-tools
+        uses: android-actions/setup-android@v3
+
+      - name: Download JRE 8 component
+        uses: dawidd6/action-download-artifact@v9
+        with:
+          workflow: build.yml
+          path: app_pojavlauncher/src/main/assets/components/jre
+          workflow_conclusion: completed
+          repo: AngelAuraMC/angelauramc-openjdk-build
+          branch: buildjre8
+          name: jre8-pojav
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Validate version and tag consistency
+        id: meta
+        run: |
+          set -euo pipefail
+          mkdir -p out logs
+          VERSION_NAME=$(grep -m1 'starVersionName\s*=' app_pojavlauncher/build.gradle | sed -E 's/.*"(.*)".*/\1/')
+          VERSION_CODE=$(grep -m1 'starVersionCode\s*=' app_pojavlauncher/build.gradle | sed -E 's/.*=\s*([0-9]+).*/\1/')
+          test -n "$VERSION_NAME"
+          test -n "$VERSION_CODE"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG_VER="${GITHUB_REF_NAME#v}"
+            if [ "$TAG_VER" != "$VERSION_NAME" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match starVersionName=$VERSION_NAME"
+              exit 1
+            fi
+          fi
+
+      - name: Validate production signing secrets and decode keystore
+        env:
+          STAR_KEYSTORE_BASE64: ${{ secrets.STAR_KEYSTORE_BASE64 }}
+          STAR_KEYSTORE_PASSWORD: ${{ secrets.STAR_KEYSTORE_PASSWORD }}
+          STAR_KEY_ALIAS: ${{ secrets.STAR_KEY_ALIAS }}
+          STAR_KEY_PASSWORD: ${{ secrets.STAR_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for var_name in STAR_KEYSTORE_BASE64 STAR_KEYSTORE_PASSWORD STAR_KEY_ALIAS STAR_KEY_PASSWORD; do
+            if [ -z "${!var_name:-}" ]; then
+              echo "::error::Missing required production signing secret: $var_name. Release builds never fall back to debug signing."
+              exit 1
+            fi
+          done
+          printf '%s' "$STAR_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/star-release.jks"
+          chmod 600 "$RUNNER_TEMP/star-release.jks"
+
+      - name: Prepare language list & build signed Release APK
+        env:
+          STAR_KEYSTORE_FILE: ${{ runner.temp }}/star-release.jks
+          STAR_KEYSTORE_PASSWORD: ${{ secrets.STAR_KEYSTORE_PASSWORD }}
+          STAR_KEY_ALIAS: ${{ secrets.STAR_KEY_ALIAS }}
+          STAR_KEY_PASSWORD: ${{ secrets.STAR_KEY_PASSWORD }}
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+        run: |
+          set -euo pipefail
+          ./scripts/languagelist_updater.sh
+          ./gradlew :app_pojavlauncher:assembleRelease --no-daemon --console=plain 2>&1 | tee logs/assemble-release.log
+          APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          cp app_pojavlauncher/build/outputs/apk/release/app_pojavlauncher-release.apk "$APK_OUT"
+          (cd out && sha256sum "$(basename "$APK_OUT")" > "$(basename "$APK_OUT").sha256")
+
+      - name: Verify Release APK metadata, signature, and ABIs
+        env:
+          STAR_EXPECTED_CERT_SHA256: ${{ secrets.STAR_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          BUILD_TOOLS_DIR=$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          "$BUILD_TOOLS_DIR/aapt2" dump badging "$APK_OUT" | tee logs/release-badging.txt
+          grep -q "package: name='com.star.launcher'" logs/release-badging.txt
+          grep -q "versionCode='${{ steps.meta.outputs.version_code }}'" logs/release-badging.txt
+          grep -q "versionName='${{ steps.meta.outputs.version_name }}'" logs/release-badging.txt
+          grep -q "minSdkVersion:'21'" logs/release-badging.txt
+          grep -q "targetSdkVersion:'34'" logs/release-badging.txt
+          "$BUILD_TOOLS_DIR/apksigner" verify --print-certs --verbose "$APK_OUT" | tee logs/release-apksigner.txt
+          ACTUAL_SHA256=$(grep -m1 "Signer #1 certificate SHA-256 digest:" logs/release-apksigner.txt | awk '{print tolower($NF)}')
+          DEBUG_SHA256="d0d0886a0d7e3486e6627f9b09424530b6d7be14f8c2cc33"
+          if [ -z "$ACTUAL_SHA256" ] || [ "${ACTUAL_SHA256#$DEBUG_SHA256}" != "$ACTUAL_SHA256" ]; then
+            echo "::error::Release APK appears unsigned or signed with the debug certificate."
+            exit 1
+          fi
+          if [ -n "${STAR_EXPECTED_CERT_SHA256:-}" ] && [ "$ACTUAL_SHA256" != "$(echo "$STAR_EXPECTED_CERT_SHA256" | tr '[:upper:]' '[:lower:]')" ]; then
+            echo "::error::Release APK certificate SHA-256 does not match STAR_EXPECTED_CERT_SHA256."
+            exit 1
+          fi
+          unzip -l "$APK_OUT" 'lib/*.so' | tee logs/release-native-libs.txt
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            grep -q "lib/$abi/libpojavexec.so" logs/release-native-libs.txt
+          done
+
+      - name: Clean up temporary keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/star-release.jks"
+
+      - name: Upload Release APK and SHA-256
+        uses: actions/upload-artifact@v4
+        with:
+          name: STAR-Launcher-v${{ steps.meta.outputs.version_name }}
+          path: |
+            out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk
+            out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk.sha256
+
+      - name: Upload Release Verification Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-release-logs
+          path: logs/

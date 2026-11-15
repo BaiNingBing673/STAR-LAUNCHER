@@ -424,7 +424,9 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     @Override
     public void onResume() {
         super.onResume();
+        StarHudInputManager.getInstance().releaseAllInputs("activity_onResume");
         if (mStarTouchHudOverlay != null) {
+            mStarTouchHudOverlay.releaseAllInputs();
             StarHudConfig latestConfig = StarHudConfigStore.load(this);
             mStarTouchHudOverlay.setConfig(latestConfig);
             boolean useStarHud = latestConfig.getUseStarHud()

@@ -22,7 +22,8 @@ data class ParsedVersionManifest(
     val releaseTimeEpochMs: Long,
     val hasJavaVersionDeclared: Boolean,
     val hasClientDownload: Boolean = false,
-    val assetIndexId: String? = null
+    val assetIndexId: String? = null,
+    val detectedMinecraftVersion: String? = null
 )
 
 data class VersionVerificationResult(
@@ -491,14 +492,24 @@ class VersionManager(
                 }
             }
             val mainClass = root.optString("mainClass")
+            val gameArguments = extractGameArguments(root)
 
-            val (loaderType, loaderVer) = detectModLoader(id, mainClass, libNames)
+            val (loaderType, loaderVer) = detectModLoader(id, mainClass, libNames, gameArguments, root)
+            val detectedMcVersion = extractDetectedMinecraftVersion(
+                root = root,
+                id = id,
+                inheritsFrom = inheritsFrom,
+                loaderType = loaderType,
+                loaderVersion = loaderVer,
+                libraries = libNames,
+                gameArguments = gameArguments
+            )
             val lwjglMajor = detectLwjglMajor(root, libNames, inheritsFrom)
             val releaseTimeMs = parseReleaseTimeMillis(root.optString("releaseTime"))
             val requiredJava = if (hasJavaDeclared) {
                 declaredJava
             } else {
-                inferDefaultJavaMajor(inheritsFrom ?: id, loaderType)
+                inferDefaultJavaMajor(detectedMcVersion ?: inheritsFrom ?: id, loaderType)
             }
 
             val hasClientDownload = root.optJSONObject("downloads")?.has("client") == true
@@ -516,8 +527,40 @@ class VersionManager(
                 releaseTimeEpochMs = releaseTimeMs,
                 hasJavaVersionDeclared = hasJavaDeclared,
                 hasClientDownload = hasClientDownload,
-                assetIndexId = assetIndexId
+                assetIndexId = assetIndexId,
+                detectedMinecraftVersion = detectedMcVersion
             )
+        }
+
+        private fun extractGameArguments(root: JSONObject): List<String> {
+            val result = mutableListOf<String>()
+            val argsObj = root.optJSONObject("arguments")
+            val gameArr = argsObj?.optJSONArray("game")
+            if (gameArr != null) {
+                for (i in 0 until gameArr.length()) {
+                    val item = gameArr.opt(i)
+                    if (item is String && item.isNotBlank()) {
+                        result.add(item.trim())
+                    }
+                }
+            }
+            val legacyArgs = root.optString("minecraftArguments").trim()
+            if (legacyArgs.isNotEmpty()) {
+                result.addAll(legacyArgs.split(Regex("\\s+")).filter { it.isNotBlank() })
+            }
+            return result
+        }
+
+        private fun findArgValue(args: List<String>, flag: String): String? {
+            for (i in 0 until args.size - 1) {
+                if (args[i].equals(flag, ignoreCase = true)) {
+                    val value = args[i + 1].trim()
+                    if (value.isNotBlank() && !value.startsWith("--")) {
+                        return value
+                    }
+                }
+            }
+            return null
         }
 
         fun computeSha1Hex(file: File): String? {
@@ -539,30 +582,176 @@ class VersionManager(
         fun detectModLoader(
             versionId: String,
             mainClass: String,
-            libraries: List<String>
+            libraries: List<String>,
+            gameArguments: List<String> = emptyList(),
+            rootJson: JSONObject? = null
         ): Pair<ModLoaderType, String?> {
             val lowerId = versionId.lowercase()
             val lowerMain = mainClass.lowercase()
-            return when {
-                lowerId.contains("lwjgl3ify") || libraries.any { it.contains("lwjgl3ify", ignoreCase = true) } ->
-                    ModLoaderType.LWJGL3IFY to extractVersionSegment(libraries, "lwjgl3ify")
-                lowerId.contains("neoforge") || libraries.any { it.contains("net.neoforged", ignoreCase = true) } ->
-                    ModLoaderType.NEOFORGE to extractVersionSegment(libraries, "neoforge")
-                lowerId.contains("quilt") || lowerMain.contains("quiltmc") ||
-                    libraries.any { it.contains("org.quiltmc:quilt-loader", ignoreCase = true) } ->
-                    ModLoaderType.QUILT to extractVersionSegment(libraries, "quilt-loader")
-                lowerId.contains("fabric") || lowerMain.contains("fabricmc") ||
-                    libraries.any { it.contains("net.fabricmc:fabric-loader", ignoreCase = true) } ->
-                    ModLoaderType.FABRIC to extractVersionSegment(libraries, "fabric-loader")
-                lowerId.contains("forge") || libraries.any { it.contains("net.minecraftforge:forge", ignoreCase = true) } ->
-                    ModLoaderType.FORGE to extractVersionSegment(libraries, "forge")
-                else -> ModLoaderType.VANILLA to null
+
+            // 1. Check explicit loader metadata object if present in manifest
+            val loaderMeta = rootJson?.optJSONObject("starLoaderMetadata") ?: rootJson?.optJSONObject("loader")
+            if (loaderMeta != null) {
+                val metaTypeRaw = loaderMeta.optString("loaderType").ifBlank { loaderMeta.optString("type") }.lowercase()
+                val metaVer = loaderMeta.optString("loaderVersion").ifBlank { loaderMeta.optString("version") }.ifBlank { null }
+                when (metaTypeRaw) {
+                    "neoforge" -> return ModLoaderType.NEOFORGE to (metaVer ?: extractNeoForgeVersion(libraries, gameArguments, versionId))
+                    "forge" -> return ModLoaderType.FORGE to (metaVer ?: extractForgeVersion(libraries, gameArguments, versionId))
+                    "fabric" -> return ModLoaderType.FABRIC to (metaVer ?: extractVersionSegment(libraries, "net.fabricmc:fabric-loader"))
+                    "quilt" -> return ModLoaderType.QUILT to (metaVer ?: extractVersionSegment(libraries, "org.quiltmc:quilt-loader"))
+                }
             }
+
+            // 2. Check FML / ModLauncher / TweakClass game arguments (authoritative for Forge & NeoForge)
+            val neoForgeArgVer = findArgValue(gameArguments, "--fml.neoForgeVersion")
+            val forgeArgVer = findArgValue(gameArguments, "--fml.forgeVersion")
+            val forgeGroupArg = findArgValue(gameArguments, "--fml.forgeGroup")?.lowercase()
+            val launchTargetArg = findArgValue(gameArguments, "--launchTarget")?.lowercase()
+            val tweakClassArgs = buildList {
+                for (i in 0 until gameArguments.size - 1) {
+                    if (gameArguments[i].equals("--tweakClass", ignoreCase = true)) {
+                        add(gameArguments[i + 1].lowercase())
+                    }
+                }
+            }
+
+            if (libraries.any { it.contains("lwjgl3ify", ignoreCase = true) } || lowerId.contains("lwjgl3ify")) {
+                return ModLoaderType.LWJGL3IFY to extractVersionSegment(libraries, "lwjgl3ify")
+            }
+
+            // Quilt check (must precede Fabric since Quilt profiles also include net.fabricmc:intermediary)
+            if (lowerMain.contains("quiltmc") ||
+                libraries.any { it.contains("org.quiltmc:quilt-loader", ignoreCase = true) } ||
+                tweakClassArgs.any { it.contains("quiltmc") } ||
+                lowerId.contains("quilt")
+            ) {
+                val ver = extractVersionSegment(libraries, "org.quiltmc:quilt-loader")
+                    ?: extractVersionSegment(libraries, "quilt-loader")
+                    ?: Regex("""^quilt-loader-([^-]+)-""", RegexOption.IGNORE_CASE).find(versionId)?.groupValues?.get(1)
+                return ModLoaderType.QUILT to ver
+            }
+
+            // Fabric check
+            if (lowerMain.contains("fabricmc") ||
+                libraries.any { it.contains("net.fabricmc:fabric-loader", ignoreCase = true) } ||
+                tweakClassArgs.any { it.contains("fabricmc") } ||
+                lowerId.contains("fabric")
+            ) {
+                val ver = extractVersionSegment(libraries, "net.fabricmc:fabric-loader")
+                    ?: extractVersionSegment(libraries, "fabric-loader")
+                    ?: Regex("""^fabric-loader-([^-]+)-""", RegexOption.IGNORE_CASE).find(versionId)?.groupValues?.get(1)
+                return ModLoaderType.FABRIC to ver
+            }
+
+            // NeoForge check
+            if (neoForgeArgVer != null ||
+                forgeGroupArg == "net.neoforged" ||
+                launchTargetArg?.contains("neoforge") == true ||
+                lowerMain.contains("neoforged") ||
+                libraries.any { it.startsWith("net.neoforged:", ignoreCase = true) || it.startsWith("net.neoforged.", ignoreCase = true) } ||
+                lowerId.contains("neoforge")
+            ) {
+                return ModLoaderType.NEOFORGE to extractNeoForgeVersion(libraries, gameArguments, versionId)
+            }
+
+            // Forge check
+            val hasForgeLibrary = libraries.any {
+                it.startsWith("net.minecraftforge:forge:", ignoreCase = true) ||
+                    it.startsWith("net.minecraftforge:fmlloader:", ignoreCase = true) ||
+                    it.startsWith("net.minecraftforge:fmlcore:", ignoreCase = true) ||
+                    it.startsWith("net.minecraftforge:javafmllanguage:", ignoreCase = true) ||
+                    it.startsWith("net.minecraftforge:minecraftforge:", ignoreCase = true)
+            }
+            if (forgeArgVer != null ||
+                forgeGroupArg == "net.minecraftforge" ||
+                launchTargetArg?.startsWith("forge") == true ||
+                lowerMain.contains("minecraftforge") ||
+                tweakClassArgs.any { it.contains("minecraftforge") || it.contains("fmltweaker") } ||
+                hasForgeLibrary ||
+                lowerId.contains("forge")
+            ) {
+                return ModLoaderType.FORGE to extractForgeVersion(libraries, gameArguments, versionId)
+            }
+
+            return ModLoaderType.VANILLA to null
+        }
+
+        private fun extractNeoForgeVersion(
+            libraries: List<String>,
+            gameArguments: List<String>,
+            versionId: String
+        ): String? {
+            findArgValue(gameArguments, "--fml.neoForgeVersion")?.let { return it }
+            extractVersionSegment(libraries, "net.neoforged:neoforge:")?.let { return it }
+            extractVersionSegment(libraries, "net.neoforged:forge:")?.let { coordVer ->
+                return coordVer.substringAfter('-', coordVer)
+            }
+            Regex("""^neoforge-(.+)$""", RegexOption.IGNORE_CASE).find(versionId)?.groupValues?.get(1)?.let { return it }
+            return extractVersionSegment(libraries, "net.neoforged")
+        }
+
+        private fun extractForgeVersion(
+            libraries: List<String>,
+            gameArguments: List<String>,
+            versionId: String
+        ): String? {
+            findArgValue(gameArguments, "--fml.forgeVersion")?.let { return it }
+            val forgeCoord = extractVersionSegment(libraries, "net.minecraftforge:forge:")
+                ?: extractVersionSegment(libraries, "net.minecraftforge:fmlloader:")
+                ?: extractVersionSegment(libraries, "net.minecraftforge:fmlcore:")
+                ?: extractVersionSegment(libraries, "forge")
+            if (forgeCoord != null) return forgeCoord
+            return Regex("""^\d+\.\d+(?:\.\d+)?-forge-(.+)$""", RegexOption.IGNORE_CASE)
+                .find(versionId)?.groupValues?.get(1)
+        }
+
+        private fun extractDetectedMinecraftVersion(
+            root: JSONObject,
+            id: String,
+            inheritsFrom: String?,
+            loaderType: ModLoaderType,
+            loaderVersion: String?,
+            libraries: List<String>,
+            gameArguments: List<String>
+        ): String? {
+            val mcRegex = Regex("""^\d+\.\d+(?:\.\d+)?$""")
+            if (!inheritsFrom.isNullOrBlank() && mcRegex.matches(inheritsFrom.trim())) {
+                return inheritsFrom.trim()
+            }
+            findArgValue(gameArguments, "--fml.mcVersion")?.takeIf { it.isNotBlank() }?.let { return it }
+            val loaderMeta = root.optJSONObject("starLoaderMetadata") ?: root.optJSONObject("loader")
+            loaderMeta?.optString("minecraftVersion")?.takeIf { it.isNotBlank() }?.let { return it }
+            root.optString("minecraftVersion").takeIf { it.isNotBlank() }?.let { return it }
+            root.optString("clientVersion").takeIf { it.isNotBlank() }?.let { return it }
+
+            extractVersionSegment(libraries, "net.fabricmc:intermediary:")?.let { return it }
+            extractVersionSegment(libraries, "org.quiltmc:hashed:")?.let { return it }
+            extractVersionSegment(libraries, "net.minecraft:client:")?.let { clientVer ->
+                val clean = clientVer.substringBefore('-')
+                if (mcRegex.matches(clean)) return clean
+            }
+            val forgeLibVer = extractVersionSegment(libraries, "net.minecraftforge:forge:")
+                ?: extractVersionSegment(libraries, "net.minecraftforge:fmlloader:")
+                ?: extractVersionSegment(libraries, "net.neoforged:forge:")
+            if (forgeLibVer != null && forgeLibVer.contains('-')) {
+                val candidateMc = forgeLibVer.substringBefore('-')
+                if (mcRegex.matches(candidateMc)) return candidateMc
+            }
+            if (!inheritsFrom.isNullOrBlank()) return inheritsFrom.trim()
+            if (loaderType == ModLoaderType.NEOFORGE && !loaderVersion.isNullOrBlank()) {
+                val parts = loaderVersion.split(".")
+                val major = parts.getOrNull(0)?.toIntOrNull()
+                val minor = parts.getOrNull(1)?.toIntOrNull()
+                if (major != null && minor != null && major >= 20) {
+                    return if (minor == 0) "1.$major" else "1.$major.$minor"
+                }
+            }
+            return if (loaderType == ModLoaderType.VANILLA) id.takeIf { it.isNotBlank() } else null
         }
 
         private fun extractVersionSegment(libraries: List<String>, needle: String): String? {
             val coord = libraries.firstOrNull { it.contains(needle, ignoreCase = true) } ?: return null
-            return coord.split(":").getOrNull(2)
+            return coord.split(":").getOrNull(2)?.substringBefore('@')?.trim()?.takeIf { it.isNotEmpty() }
         }
 
         private fun detectLwjglMajor(

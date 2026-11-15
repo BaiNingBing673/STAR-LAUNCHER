@@ -1,90 +1,56 @@
-# License & Dependency Audit (`M0.1` / `M0.2`)
+# Third-Party Licenses, Prebuilt Binaries & Attribution Audit
 
-> **Scope**: Root repository, Git submodules, Gradle dependencies, prebuilt `.aar`/`.jar`/`.so` binaries, and reference repository boundary.
+**Date:** `2026-11-15`  
+**Repository:** `STAR-LAUNCHER` (`com.star.launcher`, branch `v3_openjdk`)  
+**Root License:** GNU Lesser General Public License v3.0 ([`LICENSE`](../LICENSE))
+
+> **Compliance Notice:** STAR Launcher retains upstream attribution and notice files intact. Because several inherited binaries and dependencies below lack complete source provenance or contain non-standard/field-of-use license terms, **full downstream license compliance cannot be claimed until the unresolved items in Section 3 are resolved.**
 
 ---
 
-## 1. Root & Reference Licenses
+## 1. Upstream Launcher Lineage & Core Submodules
 
-| Project | License | Notes |
+| Component | Path / Origin | License / Notice Status |
 |---|---|---|
-| **Amethyst-Android** (`LICENSE`) | **GNU Lesser General Public License v3.0 (LGPLv3)** | Upstream fork of PojavLauncher (`v3_openjdk`) |
-| **PojavLauncher** (Upstream ancestor, `about_en.txt` L4) | **GNU GPLv3** / LGPLv3 | Note: `about_en.txt` still states GNU GPLv3 while root `LICENSE` is LGPLv3 |
-| **ZalithLauncher2** (External Reference Only) | **GNU GPLv3** | **Do NOT copy source code** into STAR Launcher |
+| Root Launcher Application | `app_pojavlauncher/` (derived from PojavLauncher & AngelAuraMC Amethyst `v3_openjdk`) | **LGPL-3.0** (`LICENSE`); retains upstream notices and headers. |
+| `androidnsbypass` | `androidnsbypass/` submodule | **BSD-2-Clause** (`androidnsbypass/LICENSE`, `androidnsbypass/LICENSE-BSD-2-Clause`). |
+| `arc_dns_injector` | `arc_dns_injector/` | Java agent source present in repo under root project license unless otherwise noted. |
+| `forge_installer` | `forge_installer/` (`git.artdeell.installer_agent`) | Java agent source present in repo; **flags `org.json:json:20230618`** (see Section 3). |
+| `jre_lwjgl3glfw` | `jre_lwjgl3glfw/` (`lwjgl-3.3.3`, `lwjgl-3.4.1`) | Java GLFW compatibility bridge; references prebuilt `lwjgl-lwjglx.jar` (see Section 3). |
+| `ANGLE` notice | `app_pojavlauncher/src/main/assets/licenses/ANGLE_LICENSE` | Preserved intact in assets. |
+| Font notice | `app_pojavlauncher/src/main/assets/font/LICENSE_OFL.txt` | **SIL Open Font License** preserved intact. |
 
 ---
 
-## 2. Submodules & `.gitmodules` Discrepancy
+## 2. Maven / Gradle Dependencies Reviewed
 
-`git ls-files --stage` shows **only 2 active Git submodules** (`160000` gitlinks):
-1. **`MioLibPatcher`** (`https://github.com/AngelAuraMC/MioLibPatcher.git`, commit `9a1f807f`): **NO `LICENSE` file** in the submodule repository. Runtime dependency `org.javassist:javassist:3.29.2-GA` (triple-licensed MPL 1.1 / LGPL 2.1 / Apache 2.0).
-2. **`androidnsbypass`** (`https://github.com/alexytomi/androidnsbypass.git`, commit `9f57982a`): Dual-notice **`MIT`** (`LICENSE`, Copyright 2026 alexytomi) + **`BSD-2-Clause`** (`LICENSE-BSD-2-Clause`, Copyright 2021 Billy Laws).
-
-**Orphaned `.gitmodules` Entries**:
-`.gitmodules` (L1–L9) declares `MobileGlues`, `SDL`, and `sdl2-compat`, **none of which have gitlink entries in the Git index**. Instead, these are consumed as prebuilt `.aar` binaries inside `app_pojavlauncher/libs/`.
+- **AndroidX, Jetpack Compose BOM (`2025.08.00`), Room (`2.7.2`), Coroutines (`1.10.2`), Material 3:** Apache-2.0.
+- **ByteHook (`1.0.10`), XZ (`1.8`), Commons Codec (`1.15`), JNA (`5.14.0`), Exp4j (`0.4.9-SNAPSHOT`):** Permissive (MIT / Apache-2.0 / Public Domain / LGPL-2.1).
+- **Javassist (`3.29.2-GA` in `MioLibPatcher`):** MPL-1.1 / LGPL-2.1 / Apache-2.0 tri-license.
+- **`org.json:json:20230618` (`forge_installer/build.gradle:11`):** **JSON License** — contains the field-of-use restriction *"The Software shall be used for Good, not Evil"*, which is non-FSF/non-OSI compatible and conflicts with copyleft redistribution unless replaced cleanly (e.g., with `gson` or Android `org.json` / Apache-2.0 clean-room JSON).
 
 ---
 
-## 3. Gradle Maven / JitPack Dependencies (`app_pojavlauncher/build.gradle` & `forge_installer/build.gradle`)
+## 3. Unresolved Items Requiring Maintainer Action Before Broad Distribution
 
-| Coordinate | Version | License | Notes |
+The following inherited C files, prebuilt archives, submodules, and dependencies require provenance verification, source restoration, or replacement:
+
+| Item | Location | Finding / Risk | Recommended Action |
 |---|---|---|---|
-| `javax.annotation:javax.annotation-api` | `1.3.2` | CDDL-1.0 / GPLv2+CE | Compile/runtime annotations |
-| `commons-codec:commons-codec` | `1.15` | Apache-2.0 | Hashing & encoding |
-| `androidx.preference:preference` | `1.2.0` | Apache-2.0 | XML preference UI |
-| `androidx.drawerlayout:drawerlayout` | `1.2.0` | Apache-2.0 | In-game drawer |
-| `androidx.viewpager2:viewpager2` | `1.1.0-beta01` | Apache-2.0 | Pager UI |
-| `androidx.annotation:annotation` | `1.5.0` | Apache-2.0 | AndroidX annotations |
-| `androidx.constraintlayout:constraintlayout` | `2.1.4` | Apache-2.0 | XML layout constraints |
-| `com.github.duanhong169:checkerboarddrawable` | `1.0.2` | Apache-2.0 | Color picker UI |
-| `com.github.PojavLauncherTeam:portrait-sdp` | `ed33e89cbc` | MIT / Apache-2.0 (verify) | JitPack commit pin |
-| `com.github.PojavLauncherTeam:portrait-ssp` | `6c02fd739b` | MIT / Apache-2.0 (verify) | JitPack commit pin |
-| `com.github.Mathias-Boulay:ExtendedView` | `1.0.0` | Apache-2.0 / MIT (verify) | Custom control views |
-| `com.github.Mathias-Boulay:android_gamepad_remapper` | `2.0.3` | LGPLv3 / Apache-2.0 (verify) | Gamepad remapper |
-| `com.github.Mathias-Boulay:virtual-joystick-android` | `1.14` | Apache-2.0 / MIT (verify) | On-screen joystick |
-| `org.tukaani:xz` | `1.8` | Public Domain (0BSD/Unlicense) | `.tar.xz` JRE decompression |
-| `net.sourceforge.htmlcleaner:htmlcleaner` | `2.6.1` | BSD-3-Clause | HTML parsing |
-| `com.bytedance:bytehook` | `1.0.10` | **MIT** | Native PLT hooking (`libbytehook.so`); lacks x86/x86_64 prefab |
-| `top.fifthlight.touchcontroller:proxy-client-android` | `0.0.4` | LGPLv3 / MIT (verify) | TouchController proxy client |
-| `net.java.dev.jna:jna` | `5.14.0@aar` | LGPL-2.1+ / Apache-2.0 | JNA native bridge |
-| `org.json:json` (`forge_installer`) | `20230618` | JSON License ("Good, not Evil") | **Note**: JSON License is FSF-classified non-free; consider replacing in future cleanup if strict FSF compliance is needed |
+| **`bigcoreaffinity.c`** | `app_pojavlauncher/src/main/jni/bigcoreaffinity.c` | C source sets big-core affinity (`sys/syscall.h` / `sched_setaffinity`), inherited from upstream PojavLauncher/forks with no explicit SPDX/license header inside the file. | Verify upstream commit attribution and add an accurate copyright/license header or rewrite cleanly. |
+| **`SimpleFPEWrapper-release.aar`** | `app_pojavlauncher/libs/SimpleFPEWrapper-release.aar` (8.45 MB) | Prebuilt binary AAR with no accompanying source tree or `LICENSE` file in `app_pojavlauncher/libs/` or `assets/licenses/`. | Obtain upstream source link + license text and bundle its required notice in `assets/licenses/`, or replace from source. |
+| **`ExagearApacheCommons.jar`** | `app_pojavlauncher/libs/ExagearApacheCommons.jar` (474 KB) | Prebuilt repackaged JAR (`org.apache.commons` / ExaGear naming) with no standalone `NOTICE`/`LICENSE` or build source in repo. | Replace with standard Maven Central Apache Commons coordinates (`Apache-2.0`) or document exact source + Apache-2.0 `NOTICE`. |
+| **`lwjgl-lwjglx.jar`** | Referenced in `jre_lwjgl3glfw/lwjgl-3.3.3/build.gradle` & `lwjgl-3.4.1/build.gradle` | Prebuilt compatibility bridge archive without accompanying source repository commit or license file in `STAR-LAUNCHER`. | Add upstream repository URL, commit pin, and BSD-3-Clause/MIT notice, or build from source. |
+| **`libtwitchsdk.so`** | `app_pojavlauncher/src/main/jniLibs/armeabi-v7a/libtwitchsdk.so` (5,096 B) | Legacy stub shared library inherited from older PojavLauncher 32-bit compatibility paths without an accompanying license/notice file in `assets/licenses/`. | Confirm stub origin / MIT-or-LGPL reimplementation status and add notice file (or remove only after verifying older MC 1.7.10/1.8 compatibility does not `dlopen` it). |
+| **`MioLibPatcher` & STAR overlay** | Submodule `MioLibPatcher/` (`AngelAuraMC/MioLibPatcher@9a1f807`) + `patches/miolibpatcher-star.patch` | Upstream `MioLibPatcher` repository root does not include a `LICENSE` file (`README.md` / `README_EN.md` only), and STAR adds 5 graphics/lifecycle transformers via `patches/miolibpatcher-star.patch`. | Confirm upstream license with `AngelAuraMC/MioLibPatcher` authors and mirror/fork or keep patch attribution explicit. |
+| **`org.json:json:20230618`** | `forge_installer/build.gradle:11` | Field-of-use restriction (*"Good, not Evil"*). | Migrate `forge_installer` JSON parsing away from `org.json:json` (e.g. `com.google.code.gson:gson` or minimal clean-room parser). |
+
+Other prebuilt `.aar` files in `app_pojavlauncher/libs/` (`angle-release.aar`, `imgui-java-release.aar`, `kopper-zink-release.aar`, `lwjgl-3.3.3-natives-release.aar`, `lwjgl-3.4.1-natives-release.aar`, `MobileGlues-release.aar`, `openal-soft-release.aar`, `SDL-release.aar`, `spirv-cross-natives.aar`, `zstd-jni-release.aar`) and `arm64-v8a/libvulkan_freedreno.so` / `libVkLayer_khronos_timeline_semaphore.so` / `libunpack200.so` likewise require keeping pinned upstream source tags & license notices synced under `assets/licenses/`.
 
 ---
 
-## 4. Bundled Binaries (`app_pojavlauncher/libs/`, `jniLibs/`, `assets/`)
+## 4. Repository Preservation Rules
 
-| Artifact | Embedded License File / Origin | License | Risk / Action |
-|---|---|---|---|
-| `MobileGlues-release.aar` | `mobileglues-lgplv2.1-license.txt` | **LGPL-2.1** | Compatible; retain notice & source link |
-| `SDL-release.aar` | `sdl2-compat-zlib-license.txt`, `sdl3-zlib-license.txt` | **zlib** | Compatible; retain notices |
-| `angle-release.aar` | `angle-arr-license.txt` & `assets/licenses/ANGLE_LICENSE` | **BSD-3-Clause** (labeled ARR in `README.md` due to line 2 wording) | Retain ANGLE copyright & BSD-3 notice |
-| `imgui-java-release.aar` | `imgui-java-mit-license.txt` | **MIT** | Retain notice |
-| `kopper-zink-release.aar` | `mesa-licenses.rst` | **MIT / X11 / Khronos (Mesa)** | Retain Mesa license notice |
-| `lwjgl-3.3.3-natives-release.aar`, `lwjgl-3.4.1-natives-release.aar` | `blendish_license.txt`, `freetype_license.txt`, `glfw_license.txt` (+ LWJGL BSD-3) | **BSD-3 / MIT / FTL / zlib** | Retain notices |
-| `openal-soft-release.aar` | `OPENAL-SOFT_GPL2` *(actually **LGPL v2**, mislabeled GPLv2 in `README.md`)*, `OBOE_APACHE2`, `PFFFT_LICENSE` | **LGPL-2.0 + Apache-2.0 + BSD-like (FFTPACK)** | Fix mislabeling in STAR notices; LGPLv2 is compatible |
-| `zstd-jni-release.aar` | `zstd-gplv2-license.txt` + `zstd-jni-bsd2-license.txt` | **BSD-2-Clause** (JNI) + **BSD-3 / GPLv2 dual** (zstd) | Document explicit election of BSD-3 for zstd under dual license |
-| `SimpleFPEWrapper-release.aar` | **NONE in AAR** | **UNRESOLVED** | **Flagged**: Identify upstream repo/license before public distribution |
-| `spirv-cross-natives.aar` | **NONE in AAR** | Apache-2.0 / MIT (KhronosGroup/SPIRV-Cross upstream), but **missing in AAR** | Bundle Apache-2.0/MIT notice explicitly |
-| `ExagearApacheCommons.jar` | **NONE in JAR** | Apache-2.0 (expected), **unverified binary provenance** | Audit contents & bundle Apache-2.0 `NOTICE`/`LICENSE` or replace with Maven Commons |
-| `exp4j-0.4.9-SNAPSHOT.jar` | Fork at `PojavLauncherTeam/exp4j` | Apache-2.0 | Retain notice |
-| `gson-2.8.6.jar` | Google Gson | Apache-2.0 | Retain notice |
-| `libvulkan_freedreno.so` + `libVkLayer_khronos_timeline_semaphore.so` | Mesa Turnip / Khronos | MIT / Apache-2.0 | Retain Mesa & Khronos notices |
-| `libunpack200.so` / OpenJDK JREs | OpenJDK | **GPLv2 + Classpath Exception** | Source offer / upstream repo link required on redistribution |
-| `libtwitchsdk.so` | Legacy stub (`armeabi-v7a`) | **UNRESOLVED** | Audit origin or remove if obsolete |
-| `caciocavallo` / `caciocavallo17` | OpenJDK Caciocavallo fork | **GPLv2 + Classpath Exception** | Retain attribution & source pointer |
-| `lwjgl-lwjglx.jar` | `AngelAuraMC/lwjglx` (`README.md` L142: *"unknown license"*) | **UNRESOLVED** | **Flagged**: Must audit upstream `lwjglx` license before release |
-
----
-
-## 5. Critical License Concerns Requiring Action Before Public Distribution
-
-1. **`bigcoreaffinity.c` GPLv3 Conflict (`app_pojavlauncher/src/main/jni/bigcoreaffinity.c:5`)**:
-   - Line 5 states `#define _GNU_SOURCE // we are GNU GPLv3`, and this file is compiled directly into `libpojavexec.so`, while the repository root `LICENSE` is **GNU LGPLv3**.
-   - **Impact**: Linking GPLv3 code directly into `libpojavexec.so` may obligate the combined binary/app to **GPLv3** unless upstream relicenses or separates it. Must be verified with legal/upstream review before deciding STAR's distribution license (LGPLv3 vs GPLv3).
-2. **Missing Provenance & Unresolved Binaries**:
-   - `SimpleFPEWrapper-release.aar`, `ExagearApacheCommons.jar`, `lwjgl-lwjglx.jar`, `MioLibPatcher`, `forge_installer`, `arc_dns_injector`, and `libtwitchsdk.so` lack clear in-repo license texts.
-3. **`org.json:json` License (`forge_installer`)**:
-   - Uses the JSON License ("The Software shall be used for Good, not Evil"), which is incompatible with strict GPL/FSF distributions if packaged into the APK without review.
-4. **Source-Offer & Attribution Requirements**:
-   - Distributing an APK built from LGPLv3 / LGPLv2.1 (`MobileGlues`) / LGPLv2 (`OpenAL-Soft`) / GPLv2+CE (`OpenJDK`, `Caciocavallo`) requires preserving all upstream copyright notices, including full license texts in-app (About/Licenses screen), and providing matching source-code access for all copyleft components.
-5. **Preservation Rule**: Keep all existing copyright headers, `about_*.txt`, and `assets/licenses/*` intact.
+1. Do **not** strip upstream copyright notices, headers, `ANGLE_LICENSE`, or `LICENSE_OFL.txt`.
+2. Keep STAR Launcher's original Kotlin/Compose UI, HUD (`StarTouchHudOverlay`), and Live Lyrics assets clearly distinct from upstream modules.
+3. Exclude legacy upstream `aamc_upload.jks` from STAR production signing (`STAR_*` credentials only).

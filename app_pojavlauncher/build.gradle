@@ -7,10 +7,15 @@ plugins {
 
 static def getDate() { return new Date().format('yyyyMMdd') }
 
+ext {
+    starVersionCode = 10000002
+    starVersionName = "3.0.1"
+}
+
 def getVersionName = {
     // Get the last version tag, as well as the short head of the last commit
     String TAG = ""
-    String semVer = "3.0.0"
+    String semVer = project.ext.starVersionName
     // Used by the fallback for github actions
     String TAG_PART_COMMIT = ""
     String TAG_STRING
@@ -57,9 +62,26 @@ def getVersionName = {
     }
 }
 
+def readLocalProperty = { String propName ->
+    File localPropsFile = rootProject.file("local.properties")
+    if (localPropsFile.canRead() && localPropsFile.isFile()) {
+        Properties props = new Properties()
+        localPropsFile.withInputStream { props.load(it) }
+        String val = props.getProperty(propName)
+        if (val != null && !val.trim().isEmpty()) return val.trim()
+    }
+    if (project.hasProperty(propName)) {
+        String propVal = String.valueOf(project.property(propName)).trim()
+        if (!propVal.isEmpty()) return propVal
+    }
+    return null
+}
+
 def getCFApiKey = {
     String key = System.getenv("CURSEFORGE_API_KEY");
     if(key != null && !key.trim().isEmpty()) return key.trim();
+    String localKey = readLocalProperty("CURSEFORGE_API_KEY")
+    if(localKey != null && !localKey.isEmpty()) return localKey
     File curseforgeKeyFile = new File("$projectDir/curseforge_key.txt");
     if(curseforgeKeyFile.canRead() && curseforgeKeyFile.isFile()) {
         String fileKey = curseforgeKeyFile.text.trim();
@@ -67,6 +89,28 @@ def getCFApiKey = {
     }
     logger.warn('BUILD: You have no CurseForge key, the curseforge api will get disabled !');
     return "DUMMY";
+}
+
+def getCFProxyUrl = {
+    String envUrl = System.getenv("STAR_CURSEFORGE_PROXY_URL") ?: System.getenv("CURSEFORGE_PROXY_URL")
+    if (envUrl != null && !envUrl.trim().isEmpty()) return envUrl.trim()
+    String localUrl = readLocalProperty("STAR_CURSEFORGE_PROXY_URL") ?: readLocalProperty("CURSEFORGE_PROXY_URL")
+    if (localUrl != null && !localUrl.isEmpty()) return localUrl
+    return ""
+}
+
+def resolveSigningProp = { String key ->
+    def envVal = System.getenv(key)
+    if (envVal != null && !envVal.trim().isEmpty()) return envVal.trim()
+    return readLocalProperty(key)
+}
+
+def resolveKeystoreFile = { String rawPath ->
+    if (rawPath == null || rawPath.trim().isEmpty()) return null
+    def direct = new File(rawPath.trim())
+    if (direct.isAbsolute()) return direct
+    def fromRoot = rootProject.file(rawPath.trim())
+    return fromRoot.isFile() ? fromRoot : file(rawPath.trim())
 }
 
 configurations {
@@ -82,6 +126,20 @@ android {
     compileSdk = 37
 
 
+    def starVersionCode = project.ext.starVersionCode
+    def starVersionName = project.ext.starVersionName
+
+    def starKeystorePath = resolveSigningProp("STAR_KEYSTORE_FILE")
+    def starKeystorePassword = resolveSigningProp("STAR_KEYSTORE_PASSWORD")
+    def starKeyAlias = resolveSigningProp("STAR_KEY_ALIAS")
+    def starKeyPassword = resolveSigningProp("STAR_KEY_PASSWORD")
+    def starKeystoreFileObj = resolveKeystoreFile(starKeystorePath)
+    def hasProductionSigning = starKeystoreFileObj != null &&
+        starKeystoreFileObj.isFile() &&
+        starKeystorePassword != null &&
+        starKeyAlias != null &&
+        starKeyPassword != null
+
     signingConfigs {
         customDebug {
             storeFile file("debug.keystore")
@@ -90,10 +148,12 @@ android {
             keyPassword "android"
         }
         customRelease {
-            storeFile file("aamc_upload.jks")
-            storePassword System.getenv("GPLAY_KEYSTORE_PASSWORD")
-            keyAlias "android_github_release"
-            keyPassword System.getenv("GPLAY_KEYSTORE_PASSWORD")
+            if (starKeystoreFileObj != null) {
+                storeFile starKeystoreFileObj
+            }
+            storePassword starKeystorePassword
+            keyAlias starKeyAlias
+            keyPassword starKeyPassword
         }
         googlePlayBuild {
             storeFile file("upload.jks")
@@ -107,10 +167,11 @@ android {
         applicationId "com.star.launcher"
         minSdkVersion 21
         targetSdkVersion 34
-        versionCode 10000001
-        versionName "3.0.0"
+        versionCode starVersionCode
+        versionName starVersionName
         multiDexEnabled true //important
         resValue 'string', 'curseforge_api_key', getCFApiKey()
+        resValue 'string', 'curseforge_default_proxy_url', getCFProxyUrl()
         externalNativeBuild {
             ndkBuild {
                 // Fix for Windows command line length limit
@@ -146,8 +207,7 @@ android {
             // Don't set to true or java.awt will be a.a or something similar.
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            def releaseStorePass = System.getenv("GPLAY_KEYSTORE_PASSWORD")
-            signingConfig((releaseStorePass != null && !releaseStorePass.trim().isEmpty()) ? signingConfigs.customRelease : signingConfigs.customDebug)
+            signingConfig(hasProductionSigning ? signingConfigs.customRelease : null)
             // defaultConfig already set
             // multiDexEnabled = true
             // debuggable = true
@@ -243,6 +303,50 @@ afterEvaluate {
     // Needed or else the release builds complain about undeclared dependencies
     tasks.matching { it.name.toLowerCase().contains("lint") }.configureEach { t ->
         t.dependsOn(componentJars)
+    }
+
+    def releaseGuard = { String buildTypeLabel, List<String> missingItems ->
+        if (!missingItems.isEmpty()) {
+            throw new GradleException(
+                "STAR Launcher ${buildTypeLabel} build aborted: production signing credentials are missing or invalid (${missingItems.join(', ')}). " +
+                "Release builds never fall back to debug.keystore. Provide the existing STAR production keystore via environment variables, Gradle properties, or local.properties."
+            )
+        }
+    }
+
+    tasks.matching { t ->
+        t.name in ["preReleaseBuild", "assembleRelease", "packageRelease", "bundleRelease", "signReleaseBundle"]
+    }.configureEach { t ->
+        t.doFirst {
+            def missing = []
+            def ksPath = resolveSigningProp("STAR_KEYSTORE_FILE")
+            if (!ksPath) {
+                missing << "STAR_KEYSTORE_FILE"
+            } else if (!resolveKeystoreFile(ksPath)?.isFile()) {
+                missing << "STAR_KEYSTORE_FILE (file not found at configured path)"
+            }
+            ["STAR_KEYSTORE_PASSWORD", "STAR_KEY_ALIAS", "STAR_KEY_PASSWORD"].each { key ->
+                if (!resolveSigningProp(key)) {
+                    missing << key
+                }
+            }
+            releaseGuard("release", missing)
+        }
+    }
+
+    tasks.matching { t ->
+        t.name in ["preGplayBuild", "assembleGplay", "packageGplay", "bundleGplay", "signGplayBundle"]
+    }.configureEach { t ->
+        t.doFirst {
+            def missing = []
+            if (!file("upload.jks").isFile()) {
+                missing << "app_pojavlauncher/upload.jks"
+            }
+            if (!(System.getenv("GPLAY_KEYSTORE_PASSWORD")?.trim())) {
+                missing << "GPLAY_KEYSTORE_PASSWORD"
+            }
+            releaseGuard("gplay", missing)
+        }
     }
 }
 

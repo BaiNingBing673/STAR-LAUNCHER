@@ -19,7 +19,9 @@ data class ModCompatibilityAssessment(
     val reasons: List<String>,
     val apiFacts: List<String>,
     val starInferences: List<String>,
-    val canInstall: Boolean
+    val canInstall: Boolean,
+    val requiresModLoaderInstall: Boolean = false,
+    val suggestedModLoader: ModLoaderType? = null
 )
 
 /**
@@ -111,14 +113,25 @@ class ModCompatibilityEngine {
 
         // Loader check: Vanilla instances cannot run Forge/NeoForge/Fabric/Quilt mods
         if (!environment.isModdedLoader) {
+            val suggested = suggestLoaderFromFileOrMod(file.declaredLoaders, mod?.supportedLoadersFromLatest.orEmpty())
+            val loaderHint = if (file.declaredLoaders.isNotEmpty()) {
+                file.declaredLoaders.joinToString(" / ") { it.displayName }
+            } else if (mod != null && mod.supportedLoadersFromLatest.isNotEmpty()) {
+                mod.supportedLoadersFromLatest.joinToString(" / ") { it.displayName }
+            } else {
+                "Forge, NeoForge, Fabric, or Quilt"
+            }
             reasons += "Instance '${environment.instanceName}' uses ${environment.loaderType.name} (no mod loader detected)."
+            reasons += "Install $loaderHint on Minecraft $targetMc to enable mod support."
             return ModCompatibilityAssessment(
                 level = ModCompatibilityLevel.INCOMPATIBLE,
                 summary = "Incompatible loader: instance has no Forge, NeoForge, Fabric, or Quilt loader.",
                 reasons = reasons,
                 apiFacts = apiFacts,
                 starInferences = starInferences,
-                canInstall = false
+                canInstall = false,
+                requiresModLoaderInstall = true,
+                suggestedModLoader = suggested
             )
         }
 
@@ -252,14 +265,22 @@ class ModCompatibilityEngine {
                 mod.supportedMinecraftVersionsFromLatest
             )
             return when {
-                !environment.isModdedLoader -> ModCompatibilityAssessment(
-                    level = ModCompatibilityLevel.INCOMPATIBLE,
-                    summary = "Instance runs ${environment.loaderType.name}; a mod loader is required.",
-                    reasons = listOf("Vanilla instances cannot load mods."),
-                    apiFacts = emptyList(),
-                    starInferences = listOf("No latestFiles returned in search payload."),
-                    canInstall = false
-                )
+                !environment.isModdedLoader -> {
+                    val suggested = suggestLoaderFromFileOrMod(emptySet(), mod.supportedLoadersFromLatest)
+                    ModCompatibilityAssessment(
+                        level = ModCompatibilityLevel.INCOMPATIBLE,
+                        summary = "Instance runs ${environment.loaderType.name}; a mod loader is required.",
+                        reasons = listOf(
+                            "Vanilla instances cannot load mods.",
+                            "Install a compatible mod loader (${suggested.name}) to install mods."
+                        ),
+                        apiFacts = emptyList(),
+                        starInferences = listOf("No latestFiles returned in search payload."),
+                        canInstall = false,
+                        requiresModLoaderInstall = true,
+                        suggestedModLoader = suggested
+                    )
+                }
                 loaderMatch == LoaderMatch.MISMATCH || mcMatch == McMatch.MISMATCH -> ModCompatibilityAssessment(
                     level = ModCompatibilityLevel.INCOMPATIBLE,
                     summary = "Latest indexed files do not match ${environment.baseMinecraftVersion} (${environment.curseForgeLoader.displayName}).",
@@ -288,6 +309,20 @@ class ModCompatibilityEngine {
 
     private enum class LoaderMatch { EXACT, QUILT_FABRIC_BRIDGE, PROJECT_INFERRED_ONLY, UNKNOWN, MISMATCH }
     private enum class McMatch { EXACT, MINOR_FAMILY, UNKNOWN, MISMATCH }
+
+    private fun suggestLoaderFromFileOrMod(
+        fileLoaders: Set<CurseForgeModLoader>,
+        projectLoaders: Set<CurseForgeModLoader>
+    ): ModLoaderType {
+        val candidates = if (fileLoaders.isNotEmpty()) fileLoaders else projectLoaders
+        return when {
+            CurseForgeModLoader.FABRIC in candidates -> ModLoaderType.FABRIC
+            CurseForgeModLoader.FORGE in candidates -> ModLoaderType.FORGE
+            CurseForgeModLoader.NEOFORGE in candidates -> ModLoaderType.NEOFORGE
+            CurseForgeModLoader.QUILT in candidates -> ModLoaderType.QUILT
+            else -> ModLoaderType.FABRIC
+        }
+    }
 
     private fun evaluateLoaderMatch(
         instanceLoader: CurseForgeModLoader,

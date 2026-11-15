@@ -62,6 +62,7 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
     @Nullable private String mActiveLeaseId = null;
     private boolean mIsPressed = false;
     private boolean mIsToggled = false;
+    private boolean mToggledOnDuringCurrentTouch = false;
     private boolean mAttachedToManager = false;
 
     public StarHudButtonView(@NonNull Context context, @NonNull StarHudElementId elementId) {
@@ -174,14 +175,16 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
                 || next.getCustomKeycode() != mButtonConfig.getCustomKeycode()
                 || next.getInteractionMode() != mButtonConfig.getInteractionMode()
                 || !next.getVisible();
-        if (bindingChanged) {
-            releaseActiveLease("config_changed");
-        }
         float clampedScale = Math.max(0.65f, Math.min(1.50f, globalScale));
         float clampedOpacity = Math.max(0.20f, Math.min(1.0f, globalOpacity));
         boolean sizeChanged = Math.abs(next.getWidthDp() - mButtonConfig.getWidthDp()) > 0.01f
                 || Math.abs(next.getHeightDp() - mButtonConfig.getHeightDp()) > 0.01f
                 || Math.abs(clampedScale - mGlobalScale) > 0.005f;
+        boolean positionChanged = Math.abs(next.getXFraction() - mButtonConfig.getXFraction()) > 0.0005f
+                || Math.abs(next.getYFraction() - mButtonConfig.getYFraction()) > 0.0005f;
+        if (bindingChanged || sizeChanged || positionChanged) {
+            releaseActiveLease("config_changed");
+        }
         mButtonConfig = next;
         mGlobalScale = clampedScale;
         mGlobalOpacity = clampedOpacity;
@@ -287,16 +290,32 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
     }
 
     @Override
+    public void setEnabled(boolean enabled) {
+        super.setEnabled(enabled);
+        if (!enabled) {
+            forceReleaseWithReason("disabled");
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (!hasWindowFocus) {
+            forceReleaseWithReason("window_focus_lost");
+        }
+    }
+
+    @Override
     protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
         super.onVisibilityChanged(changedView, visibility);
         if (visibility != VISIBLE) {
-            releaseActiveLease("visibility_hidden");
+            forceReleaseWithReason("visibility_hidden");
         }
     }
 
     @Override
     protected void onDetachedFromWindow() {
-        releaseActiveLease("detached");
+        forceReleaseWithReason("detached");
         if (mAttachedToManager) {
             StarHudInputManager.getInstance().unregisterResetParticipant(this);
             mAttachedToManager = false;
@@ -310,6 +329,7 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         mActiveLeaseId = null;
         mIsPressed = false;
         mIsToggled = false;
+        mToggledOnDuringCurrentTouch = false;
         invalidate();
     }
 
@@ -436,6 +456,15 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         return lbl.isEmpty() ? null : lbl;
     }
 
+    private boolean isPointInHitbox(float localX, float localY) {
+        int w = getWidth();
+        int h = getHeight();
+        if (w <= 0 || h <= 0) {
+            return true;
+        }
+        return localX >= 0f && localX <= w && localY >= 0f && localY <= h;
+    }
+
     @Override
     public boolean onTouchEvent(@NonNull MotionEvent event) {
         if (mCustomizeHighlight || !isEnabled() || getVisibility() != VISIBLE) {
@@ -445,35 +474,79 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         switch (action) {
             case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_POINTER_DOWN: {
+                int idx = event.getActionIndex();
+                if (idx < 0 || idx >= event.getPointerCount()) {
+                    return false;
+                }
+                int pointerId = event.getPointerId(idx);
+                if (pointerId == MotionEvent.INVALID_POINTER_ID) {
+                    return false;
+                }
+                if (!isPointInHitbox(event.getX(idx), event.getY(idx))) {
+                    return false;
+                }
                 if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
+                    // Already held by an active finger: never duplicate DOWN or transfer ownership mid-hold.
                     return true;
                 }
-                int idx = event.getActionIndex();
-                mActivePointerId = event.getPointerId(idx);
-                onPointerPressed(mActivePointerId);
+                if (mActiveLeaseId != null && mButtonConfig.getInteractionMode() == StarHudInteractionMode.HOLD) {
+                    releaseActiveLease("stale_lease_cleanup");
+                }
+                mActivePointerId = pointerId;
+                onPointerPressed(pointerId);
                 return true;
             }
             case MotionEvent.ACTION_MOVE: {
                 if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
-                if (event.findPointerIndex(mActivePointerId) < 0) {
-                    onPointerReleased(true);
+                int idx = event.findPointerIndex(mActivePointerId);
+                if (idx < 0) {
+                    onPointerReleased(true, "pointer_missing");
+                    return true;
+                }
+                if (mSpecialAction == ACTION_ELEMENT
+                        && mButtonConfig.getInteractionMode() == StarHudInteractionMode.HOLD
+                        && !isPointInHitbox(event.getX(idx), event.getY(idx))) {
+                    onPointerReleased(true, "pointer_left_hitbox");
                     return true;
                 }
                 return true;
             }
             case MotionEvent.ACTION_POINTER_UP: {
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
                 int idx = event.getActionIndex();
-                if (event.getPointerId(idx) == mActivePointerId) {
-                    onPointerReleased(false);
+                if (idx >= 0 && idx < event.getPointerCount() && event.getPointerId(idx) == mActivePointerId) {
+                    onPointerReleased(false, "action_pointer_up");
                     return true;
                 }
                 return false;
             }
-            case MotionEvent.ACTION_UP:
-                onPointerReleased(false);
-                return true;
+            case MotionEvent.ACTION_UP: {
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) {
+                    if (mActiveLeaseId != null && mButtonConfig.getInteractionMode() == StarHudInteractionMode.HOLD) {
+                        releaseActiveLease("up_orphan_cleanup");
+                        invalidate();
+                    }
+                    return false;
+                }
+                int idx = event.getActionIndex();
+                int pointerId = (idx >= 0 && idx < event.getPointerCount())
+                        ? event.getPointerId(idx)
+                        : MotionEvent.INVALID_POINTER_ID;
+                if (pointerId == mActivePointerId) {
+                    onPointerReleased(false, "action_up");
+                    return true;
+                }
+                return false;
+            }
             case MotionEvent.ACTION_CANCEL:
-                onPointerReleased(true);
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) {
+                    if (mActiveLeaseId != null && mButtonConfig.getInteractionMode() == StarHudInteractionMode.HOLD) {
+                        releaseActiveLease("cancel_orphan_cleanup");
+                        invalidate();
+                    }
+                    return false;
+                }
+                onPointerReleased(true, "action_cancel");
                 return true;
             default:
                 return false;
@@ -482,6 +555,7 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
 
     private void onPointerPressed(int pointerId) {
         mIsPressed = true;
+        mToggledOnDuringCurrentTouch = false;
         try {
             if (mSpecialAction == ACTION_KEYBOARD) {
                 MainActivity.switchKeyboardState();
@@ -504,9 +578,14 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
             } else if (mode == StarHudInteractionMode.TOGGLE) {
                 mIsToggled = !mIsToggled;
                 if (mIsToggled) {
+                    mToggledOnDuringCurrentTouch = true;
                     acquireButtonLease(manager, action, customKeycode, pointerId);
+                    if (!mIsToggled) {
+                        mToggledOnDuringCurrentTouch = false;
+                    }
                 } else {
-                    releaseActiveLease("toggle_off");
+                    mIsToggled = false;
+                    releaseLeaseOnly("toggle_off");
                 }
             } else {
                 // HOLD mode
@@ -515,22 +594,29 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         } catch (Throwable t) {
             mIsPressed = false;
             mIsToggled = false;
+            mToggledOnDuringCurrentTouch = false;
             releaseActiveLease("press_exception");
         }
         invalidate();
     }
 
-    private void onPointerReleased(boolean cancelled) {
+    private void onPointerReleased(boolean cancelled, @NonNull String reason) {
         mActivePointerId = MotionEvent.INVALID_POINTER_ID;
         mIsPressed = false;
+        boolean toggledThisTouch = mToggledOnDuringCurrentTouch;
+        mToggledOnDuringCurrentTouch = false;
         try {
             if (mSpecialAction == ACTION_ELEMENT) {
                 StarHudInteractionMode mode = mButtonConfig.getInteractionMode();
                 if (mode == StarHudInteractionMode.HOLD) {
-                    releaseActiveLease(cancelled ? "action_cancel" : "action_up");
+                    releaseActiveLease(reason);
+                } else if (mode == StarHudInteractionMode.TOGGLE && cancelled && toggledThisTouch) {
+                    mIsToggled = false;
+                    releaseActiveLease(reason + "_toggle");
                 }
             }
         } catch (Throwable t) {
+            mIsToggled = false;
             releaseActiveLease("release_exception");
         }
         invalidate();
@@ -590,14 +676,7 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         }
     }
 
-    private void releaseActiveLease(String reason) {
-        mActivePointerId = MotionEvent.INVALID_POINTER_ID;
-        mIsPressed = false;
-        if (mButtonConfig.getInteractionMode() != StarHudInteractionMode.TOGGLE || "toggle_off".equals(reason)
-                || "visibility_hidden".equals(reason) || "detached".equals(reason) || "config_changed".equals(reason)
-                || "force_release".equals(reason) || "toggle_mode_disabled".equals(reason)) {
-            mIsToggled = false;
-        }
+    private void releaseLeaseOnly(String reason) {
         String leaseId = mActiveLeaseId;
         mActiveLeaseId = null;
         if (leaseId != null) {
@@ -605,13 +684,36 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         }
     }
 
+    private void releaseActiveLease(String reason) {
+        mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+        mIsPressed = false;
+        mToggledOnDuringCurrentTouch = false;
+        if (mButtonConfig.getInteractionMode() != StarHudInteractionMode.TOGGLE
+                || "toggle_off".equals(reason)
+                || "visibility_hidden".equals(reason)
+                || "detached".equals(reason)
+                || "config_changed".equals(reason)
+                || "force_release".equals(reason)
+                || "disabled".equals(reason)
+                || "window_focus_lost".equals(reason)
+                || "toggle_mode_disabled".equals(reason)
+                || reason.endsWith("_toggle")) {
+            mIsToggled = false;
+        }
+        releaseLeaseOnly(reason);
+    }
+
+    private void forceReleaseWithReason(@NonNull String reason) {
+        mIsToggled = false;
+        releaseActiveLease(reason);
+        invalidate();
+    }
+
     public void releaseOnGuiTransition() {
         forceReleaseAll();
     }
 
     public void forceReleaseAll() {
-        mIsToggled = false;
-        releaseActiveLease("force_release");
-        invalidate();
+        forceReleaseWithReason("force_release");
     }
 }

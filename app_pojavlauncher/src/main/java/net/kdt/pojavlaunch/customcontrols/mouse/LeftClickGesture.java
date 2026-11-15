@@ -34,17 +34,19 @@ public class LeftClickGesture extends ValidatorGesture {
 
     @Override
     public boolean checkAndTrigger() {
+        if (!StarHudInputManager.getInstance().getInputBridge().isGrabbing()) {
+            return true;
+        }
         boolean fingerStill = LeftClickGesture.isFingerStill(mGestureStartX, mGestureStartY, mGestureEndX, mGestureEndY, FINGER_STILL_THRESHOLD);
         // If the finger is still, fire the gesture using reference-counted lease.
         if(fingerStill) {
-            StarHudInputManager.getInstance().acquireMouseLease(
+            mMouseActivated = StarHudInputManager.getInstance().acquireMouseLease(
                     "gesture:left_click",
                     "gesture_lmb",
                     -1,
                     "GESTURE_LMB",
                     LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_LEFT
             );
-            mMouseActivated = true;
         }
         // Otherwise, don't click but still keep it active
         return true;
@@ -53,8 +55,8 @@ public class LeftClickGesture extends ValidatorGesture {
     @Override
     public void onGestureCancelled(boolean isSwitching) {
         if(mMouseActivated) {
-            StarHudInputManager.getInstance().releaseLease("gesture:left_click", isSwitching ? "gesture_switch" : "gesture_cancel");
             mMouseActivated = false;
+            StarHudInputManager.getInstance().releaseLeaseIfPresent("gesture:left_click", isSwitching ? "gesture_switch" : "gesture_cancel");
         }
     }
 

@@ -1,10 +1,13 @@
 package com.star.launcher.mods.ui
 
 import com.star.launcher.data.db.entity.GameInstanceEntity
+import com.star.launcher.data.db.model.ModLoaderType
 import com.star.launcher.mods.api.CurseForgeApiException
 import com.star.launcher.mods.api.CurseForgeCategory
+import com.star.launcher.mods.api.CurseForgeConnectionState
 import com.star.launcher.mods.api.CurseForgeCredentialProvider
 import com.star.launcher.mods.api.CurseForgeCredentialStatus
+import com.star.launcher.mods.api.CurseForgeErrorCategory
 import com.star.launcher.mods.api.CurseForgeFile
 import com.star.launcher.mods.api.CurseForgeMod
 import com.star.launcher.mods.api.CurseForgeModLoader
@@ -25,6 +28,10 @@ import com.star.launcher.mods.download.ModInstallOutcome
 import com.star.launcher.mods.inventory.InstalledModInventoryItem
 import com.star.launcher.mods.inventory.InstalledModInventoryReport
 import com.star.launcher.mods.inventory.InstalledModManager
+import com.star.launcher.mods.loader.ModLoaderCandidate
+import com.star.launcher.mods.loader.ModLoaderInstallOutcome
+import com.star.launcher.mods.loader.ModLoaderInstallProgress
+import com.star.launcher.mods.loader.ModLoaderInstaller
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -96,6 +103,10 @@ data class ModsUiState(
     val availableInstances: List<GameInstanceEntity> = emptyList(),
     val instanceEnvironment: InstanceEnvironment? = null,
     val credentialStatus: CurseForgeCredentialStatus = CurseForgeCredentialStatus.UNCONFIGURED,
+    val connectionState: CurseForgeConnectionState = CurseForgeConnectionState.CONFIGURATION_REQUIRED,
+    val connectionMessage: String? = null,
+    val connectionErrorCategory: CurseForgeErrorCategory = CurseForgeErrorCategory.MISSING_CONFIGURATION,
+    val isTestingConnection: Boolean = false,
 
     // Discover filters & query
     val searchQuery: String = "",
@@ -137,7 +148,19 @@ data class ModsUiState(
 
     // Credential config sheet
     val showCredentialConfigDialog: Boolean = false,
-    val credentialConfigError: String? = null
+    val credentialConfigError: String? = null,
+
+    // Mod Loader installation dialog & progress
+    val showInstallLoaderDialog: Boolean = false,
+    val installLoaderSelectedType: ModLoaderType = ModLoaderType.FABRIC,
+    val installLoaderCandidates: List<ModLoaderCandidate> = emptyList(),
+    val installLoaderSelectedCandidate: ModLoaderCandidate? = null,
+    val isLoadingLoaderCandidates: Boolean = false,
+    val loaderCandidatesError: String? = null,
+    val isInstallingModLoader: Boolean = false,
+    val modLoaderInstallProgress: ModLoaderInstallProgress? = null,
+    val modLoaderInstallError: String? = null,
+    val pendingGuiInstaller: ModLoaderInstallOutcome.RequiresGuiInstaller? = null
 ) {
     @delegate:Transient
     val filteredInventoryMods: List<InstalledModInventoryItem> by lazy(LazyThreadSafetyMode.PUBLICATION) {
@@ -164,7 +187,8 @@ class ModsController(
     private val downloadInstaller: ModDownloadInstaller,
     private val installedModManager: InstalledModManager,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    private val modLoaderInstaller: ModLoaderInstaller? = null
 ) {
     private val _uiState = MutableStateFlow(ModsUiState())
     val uiState: StateFlow<ModsUiState> = _uiState.asStateFlow()
@@ -175,6 +199,8 @@ class ModsController(
     private var detailJob: Job? = null
     private var planJob: Job? = null
     private var installJob: Job? = null
+    private var loaderCandidatesJob: Job? = null
+    private var loaderInstallJob: Job? = null
     private var lastSyncedInstanceId: String? = null
     private var lastSyncedInstanceVersionId: String? = null
     private var lastSyncedInstanceGameDir: String? = null
@@ -254,15 +280,36 @@ class ModsController(
             val status = runCatching {
                 withContext(ioDispatcher) { credentialProvider.getCredentialStatus() }
             }.getOrDefault(CurseForgeCredentialStatus.UNCONFIGURED)
-            _uiState.update { it.copy(credentialStatus = status) }
+            val initialConnState = when (status) {
+                CurseForgeCredentialStatus.UNCONFIGURED -> CurseForgeConnectionState.CONFIGURATION_REQUIRED
+                else -> repository.lastConnectionResult?.state ?: CurseForgeConnectionState.CONNECTED
+            }
+            val initialConnMsg = when (status) {
+                CurseForgeCredentialStatus.UNCONFIGURED -> CurseForgeApiException.NotConfigured().message
+                else -> repository.lastConnectionResult?.message ?: "CurseForge API credentials configured"
+            }
+            val initialConnCategory = when (status) {
+                CurseForgeCredentialStatus.UNCONFIGURED -> CurseForgeErrorCategory.MISSING_CONFIGURATION
+                else -> repository.lastConnectionResult?.errorCategory ?: CurseForgeErrorCategory.NONE
+            }
+            _uiState.update {
+                it.copy(
+                    credentialStatus = status,
+                    connectionState = initialConnState,
+                    connectionMessage = initialConnMsg,
+                    connectionErrorCategory = initialConnCategory
+                )
+            }
             if (status == CurseForgeCredentialStatus.UNCONFIGURED && !repository.enablePublicFallback) {
                 _uiState.update {
                     it.copy(
                         isLoadingSearch = false,
                         isLoadingFeatured = false,
+                        connectionState = CurseForgeConnectionState.CONFIGURATION_REQUIRED,
+                        connectionErrorCategory = CurseForgeErrorCategory.MISSING_CONFIGURATION,
                         discoverError = ModsUiError(
                             kind = ModsErrorKind.UNCONFIGURED,
-                            title = "CurseForge API Credentials Required",
+                            title = "Configuration Required",
                             message = "Configure a STAR backend proxy or store a developer CurseForge API key in Keystore Vault to browse and download mods."
                         )
                     )
@@ -274,7 +321,20 @@ class ModsController(
             }
             launch {
                 runCatching { loadMetadataCatalogs() }
+                syncConnectionStateFromRepository()
             }
+        }
+    }
+
+    private fun syncConnectionStateFromRepository() {
+        val last = repository.lastConnectionResult ?: return
+        _uiState.update {
+            it.copy(
+                credentialStatus = last.credentialStatus,
+                connectionState = last.state,
+                connectionMessage = last.message,
+                connectionErrorCategory = last.errorCategory
+            )
         }
     }
 
@@ -430,6 +490,7 @@ class ModsController(
                     mod.id to compatibilityEngine.evaluateModOverview(env, mod, installedIds)
                 }
                 val featured = featuredResult?.getOrNull()?.mods ?: _uiState.value.featuredMods
+                val lastConn = repository.lastConnectionResult
                 _uiState.update {
                     it.copy(
                         featuredMods = featured,
@@ -439,16 +500,27 @@ class ModsController(
                         pagination = response.pagination,
                         isLoadingSearch = false,
                         isLoadingMore = false,
-                        discoverError = null
+                        discoverError = null,
+                        connectionState = lastConn?.state ?: it.connectionState,
+                        connectionMessage = lastConn?.message ?: it.connectionMessage,
+                        connectionErrorCategory = lastConn?.errorCategory ?: it.connectionErrorCategory
                     )
                 }
             }.onFailure { err ->
+                val lastConn = repository.lastConnectionResult
                 _uiState.update {
                     it.copy(
                         isLoadingSearch = false,
                         isLoadingFeatured = false,
                         isLoadingMore = false,
-                        discoverError = mapApiError(err)
+                        discoverError = mapApiError(err),
+                        connectionState = lastConn?.state ?: if (status == CurseForgeCredentialStatus.UNCONFIGURED) {
+                            CurseForgeConnectionState.CONFIGURATION_REQUIRED
+                        } else {
+                            CurseForgeConnectionState.CONNECTION_FAILED
+                        },
+                        connectionMessage = lastConn?.message ?: err.message,
+                        connectionErrorCategory = lastConn?.errorCategory ?: CurseForgeErrorCategory.SERVICE_ERROR
                     )
                 }
             }
@@ -892,8 +964,15 @@ class ModsController(
         scope.launch {
             runCatching { credentialProvider.saveDeveloperApiKey(rawKey) }
                 .onSuccess {
+                    repository.clearCaches()
                     _uiState.update {
-                        it.copy(showCredentialConfigDialog = false, credentialConfigError = null)
+                        it.copy(
+                            showCredentialConfigDialog = false,
+                            credentialConfigError = null,
+                            connectionState = CurseForgeConnectionState.CONNECTED,
+                            connectionErrorCategory = CurseForgeErrorCategory.NONE,
+                            connectionMessage = "Connected to CurseForge API"
+                        )
                     }
                     refreshCredentialStatusAndMetadata(initialLoad = true)
                 }
@@ -909,8 +988,15 @@ class ModsController(
         scope.launch {
             runCatching { credentialProvider.saveProxyConfig(baseUrl, clientToken) }
                 .onSuccess {
+                    repository.clearCaches()
                     _uiState.update {
-                        it.copy(showCredentialConfigDialog = false, credentialConfigError = null)
+                        it.copy(
+                            showCredentialConfigDialog = false,
+                            credentialConfigError = null,
+                            connectionState = CurseForgeConnectionState.CONNECTED,
+                            connectionErrorCategory = CurseForgeErrorCategory.NONE,
+                            connectionMessage = "Connected via Backend Proxy"
+                        )
                     }
                     refreshCredentialStatusAndMetadata(initialLoad = true)
                 }
@@ -925,15 +1011,279 @@ class ModsController(
     fun clearCredentials() {
         scope.launch {
             credentialProvider.clearCredentials()
+            repository.clearCaches()
             _uiState.update {
                 it.copy(
                     showCredentialConfigDialog = false,
                     credentialConfigError = null,
+                    connectionState = CurseForgeConnectionState.CONFIGURATION_REQUIRED,
+                    connectionErrorCategory = CurseForgeErrorCategory.MISSING_CONFIGURATION,
+                    connectionMessage = CurseForgeApiException.NotConfigured().message,
                     searchResults = emptyList(),
                     featuredMods = emptyList()
                 )
             }
             refreshCredentialStatusAndMetadata()
+        }
+    }
+
+    fun testApiConnection() {
+        scope.launch {
+            _uiState.update {
+                it.copy(
+                    isTestingConnection = true,
+                    connectionState = CurseForgeConnectionState.CHECKING,
+                    credentialConfigError = null
+                )
+            }
+            val result = withContext(ioDispatcher) { repository.testConnection() }
+            _uiState.update {
+                it.copy(
+                    isTestingConnection = false,
+                    credentialStatus = result.credentialStatus,
+                    connectionState = result.state,
+                    connectionMessage = result.message,
+                    connectionErrorCategory = result.errorCategory,
+                    credentialConfigError = if (result.state != CurseForgeConnectionState.CONNECTED) {
+                        result.message
+                    } else {
+                        null
+                    }
+                )
+            }
+        }
+    }
+
+    fun openInstallLoaderDialog(preferredLoader: ModLoaderType? = null) {
+        val env = _uiState.value.instanceEnvironment
+        val initialType = preferredLoader?.takeIf { it in ModLoaderInstaller.SUPPORTED_INSTALL_LOADERS }
+            ?: env?.loaderType?.takeIf { it in ModLoaderInstaller.SUPPORTED_INSTALL_LOADERS }
+            ?: ModLoaderType.FABRIC
+        _uiState.update {
+            it.copy(
+                showInstallLoaderDialog = true,
+                installLoaderSelectedType = initialType,
+                modLoaderInstallError = null,
+                loaderCandidatesError = null
+            )
+        }
+        loadCompatibleLoaderCandidates(initialType)
+    }
+
+    fun dismissInstallLoaderDialog() {
+        if (_uiState.value.isInstallingModLoader) return
+        loaderCandidatesJob?.cancel()
+        _uiState.update {
+            it.copy(
+                showInstallLoaderDialog = false,
+                modLoaderInstallError = null,
+                loaderCandidatesError = null
+            )
+        }
+    }
+
+    fun selectInstallLoaderType(loaderType: ModLoaderType) {
+        if (_uiState.value.isInstallingModLoader) return
+        if (loaderType !in ModLoaderInstaller.SUPPORTED_INSTALL_LOADERS) return
+        _uiState.update {
+            it.copy(
+                installLoaderSelectedType = loaderType,
+                installLoaderCandidates = emptyList(),
+                installLoaderSelectedCandidate = null,
+                loaderCandidatesError = null,
+                modLoaderInstallError = null
+            )
+        }
+        loadCompatibleLoaderCandidates(loaderType)
+    }
+
+    fun selectInstallLoaderCandidate(candidate: ModLoaderCandidate) {
+        if (_uiState.value.isInstallingModLoader) return
+        _uiState.update {
+            it.copy(
+                installLoaderSelectedCandidate = candidate,
+                modLoaderInstallError = null
+            )
+        }
+    }
+
+    fun refreshInstallLoaderCandidates() {
+        loadCompatibleLoaderCandidates(_uiState.value.installLoaderSelectedType, forceRefresh = true)
+    }
+
+    private fun loadCompatibleLoaderCandidates(
+        loaderType: ModLoaderType,
+        forceRefresh: Boolean = false
+    ) {
+        val installer = modLoaderInstaller
+        val mcVersion = _uiState.value.instanceEnvironment?.baseMinecraftVersion
+        if (mcVersion.isNullOrBlank()) {
+            _uiState.update {
+                it.copy(
+                    isLoadingLoaderCandidates = false,
+                    installLoaderCandidates = emptyList(),
+                    installLoaderSelectedCandidate = null,
+                    loaderCandidatesError = "Selected instance does not have a valid Minecraft version configured."
+                )
+            }
+            return
+        }
+        if (installer == null) {
+            _uiState.update {
+                it.copy(
+                    isLoadingLoaderCandidates = false,
+                    installLoaderCandidates = emptyList(),
+                    installLoaderSelectedCandidate = null,
+                    loaderCandidatesError = "Mod loader installer service is not initialized."
+                )
+            }
+            return
+        }
+
+        loaderCandidatesJob?.cancel()
+        loaderCandidatesJob = scope.launch {
+            _uiState.update {
+                it.copy(
+                    isLoadingLoaderCandidates = true,
+                    loaderCandidatesError = null
+                )
+            }
+            val res = withContext(ioDispatcher) {
+                installer.fetchCompatibleVersions(mcVersion, loaderType, forceRefresh = forceRefresh)
+            }
+            res.onSuccess { list ->
+                val recommended = list.firstOrNull { it.isRecommended } ?: list.firstOrNull()
+                _uiState.update {
+                    it.copy(
+                        isLoadingLoaderCandidates = false,
+                        installLoaderCandidates = list,
+                        installLoaderSelectedCandidate = recommended,
+                        loaderCandidatesError = if (list.isEmpty()) {
+                            "No compatible ${loaderType.name} versions found for Minecraft $mcVersion."
+                        } else {
+                            null
+                        }
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isLoadingLoaderCandidates = false,
+                        installLoaderCandidates = emptyList(),
+                        installLoaderSelectedCandidate = null,
+                        loaderCandidatesError = err.message ?: "Unable to fetch ${loaderType.name} versions for Minecraft $mcVersion."
+                    )
+                }
+            }
+        }
+    }
+
+    fun startModLoaderInstall() {
+        val installer = modLoaderInstaller ?: return
+        val instance = _uiState.value.selectedInstance ?: return
+        val candidate = _uiState.value.installLoaderSelectedCandidate ?: return
+        if (_uiState.value.isInstallingModLoader) return
+
+        loaderInstallJob?.cancel()
+        loaderInstallJob = scope.launch {
+            _uiState.update {
+                it.copy(
+                    isInstallingModLoader = true,
+                    modLoaderInstallError = null,
+                    modLoaderInstallProgress = null
+                )
+            }
+            val outcome = withContext(ioDispatcher) {
+                installer.installModLoader(
+                    instance = instance,
+                    candidate = candidate,
+                    onProgress = { progress ->
+                        _uiState.update { state ->
+                            state.copy(modLoaderInstallProgress = progress)
+                        }
+                    }
+                )
+            }
+            when (outcome) {
+                is ModLoaderInstallOutcome.Success -> {
+                    val updatedInst = instance.copy(versionId = outcome.installedVersionId)
+                    lastSyncedInstanceVersionId = outcome.installedVersionId
+                    val updatedList = _uiState.value.availableInstances.map {
+                        if (it.instanceId == updatedInst.instanceId) updatedInst else it
+                    }
+                    _uiState.update { state ->
+                        state.copy(
+                            isInstallingModLoader = false,
+                            modLoaderInstallProgress = null,
+                            modLoaderInstallError = null,
+                            showInstallLoaderDialog = false,
+                            selectedInstance = updatedInst,
+                            availableInstances = updatedList,
+                            instanceEnvironment = outcome.environment,
+                            filterMcVersion = outcome.minecraftVersion,
+                            filterLoader = outcome.environment.curseForgeLoader,
+                            installStatusBanner = "Installed ${outcome.loaderType.name} ${outcome.loaderVersion} for Minecraft ${outcome.minecraftVersion} on '${outcome.environment.instanceName}'."
+                        )
+                    }
+                    reEvaluateLoadedCompatibility()
+                    refreshInstalledInventory()
+                    val pending = _uiState.value.pendingPlanDialog
+                    if (pending != null) {
+                        prepareInstall(
+                            mod = pending.rootMod,
+                            file = pending.rootFile,
+                            replacingOldFileName = pending.replacingOldFileName
+                        )
+                    } else {
+                        loadSearchAndFeatured(resetPage = true)
+                    }
+                }
+                is ModLoaderInstallOutcome.RequiresGuiInstaller -> {
+                    _uiState.update {
+                        it.copy(
+                            isInstallingModLoader = false,
+                            modLoaderInstallProgress = null,
+                            modLoaderInstallError = null,
+                            showInstallLoaderDialog = false,
+                            pendingGuiInstaller = outcome,
+                            installStatusBanner = "Launching interactive ${outcome.loaderType.name} ${outcome.loaderVersion} installer. Once it finishes, tap Refresh to detect the installed loader."
+                        )
+                    }
+                }
+                ModLoaderInstallOutcome.Cancelled -> {
+                    _uiState.update {
+                        it.copy(
+                            isInstallingModLoader = false,
+                            modLoaderInstallProgress = null,
+                            modLoaderInstallError = "Mod loader installation was cancelled."
+                        )
+                    }
+                }
+                is ModLoaderInstallOutcome.Failure -> {
+                    _uiState.update {
+                        it.copy(
+                            isInstallingModLoader = false,
+                            modLoaderInstallProgress = null,
+                            modLoaderInstallError = outcome.message
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun consumePendingGuiInstaller() {
+        _uiState.update { it.copy(pendingGuiInstaller = null) }
+    }
+
+    fun cancelModLoaderInstall() {
+        loaderInstallJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isInstallingModLoader = false,
+                modLoaderInstallProgress = null,
+                modLoaderInstallError = "Mod loader installation was cancelled."
+            )
         }
     }
 

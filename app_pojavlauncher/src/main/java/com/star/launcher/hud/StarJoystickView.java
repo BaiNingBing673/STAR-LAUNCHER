@@ -196,6 +196,22 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
     }
 
     @Override
+    public void setEnabled(boolean enabled) {
+        super.setEnabled(enabled);
+        if (!enabled) {
+            releaseAllKeys();
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (!hasWindowFocus) {
+            releaseAllKeys();
+        }
+    }
+
+    @Override
     protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
         super.onVisibilityChanged(changedView, visibility);
         if (visibility != VISIBLE) {
@@ -302,7 +318,14 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
                     return true;
                 }
                 int idx = event.getActionIndex();
-                mActivePointerId = event.getPointerId(idx);
+                if (idx < 0 || idx >= event.getPointerCount()) {
+                    return false;
+                }
+                int pointerId = event.getPointerId(idx);
+                if (pointerId == MotionEvent.INVALID_POINTER_ID) {
+                    return false;
+                }
+                mActivePointerId = pointerId;
                 mTracking = true;
                 updateVectorFromLocalCoords(event.getX(idx), event.getY(idx));
                 invalidate();
@@ -313,19 +336,34 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
                 int idx = event.findPointerIndex(mActivePointerId);
                 if (idx >= 0) {
                     updateVectorFromLocalCoords(event.getX(idx), event.getY(idx));
+                } else {
+                    releaseAllKeys();
                 }
                 return true;
             }
             case MotionEvent.ACTION_POINTER_UP: {
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
                 int idx = event.getActionIndex();
-                if (event.getPointerId(idx) == mActivePointerId) {
+                if (idx >= 0 && idx < event.getPointerCount() && event.getPointerId(idx) == mActivePointerId) {
                     releaseAllKeys();
                     return true;
                 }
                 return false;
             }
-            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_UP: {
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
+                int idx = event.getActionIndex();
+                int pointerId = (idx >= 0 && idx < event.getPointerCount())
+                        ? event.getPointerId(idx)
+                        : MotionEvent.INVALID_POINTER_ID;
+                if (pointerId == mActivePointerId) {
+                    releaseAllKeys();
+                    return true;
+                }
+                return false;
+            }
             case MotionEvent.ACTION_CANCEL:
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
                 releaseAllKeys();
                 return true;
             default:
@@ -450,20 +488,16 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
 
     private void setDirectionStates(boolean forward, boolean backward, boolean left, boolean right) {
         if (mKeyForward != forward) {
-            mKeyForward = forward;
-            dispatchKey(LwjglGlfwKeycode.GLFW_KEY_W, forward);
+            mKeyForward = dispatchKey(LwjglGlfwKeycode.GLFW_KEY_W, forward) && forward;
         }
         if (mKeyBackward != backward) {
-            mKeyBackward = backward;
-            dispatchKey(LwjglGlfwKeycode.GLFW_KEY_S, backward);
+            mKeyBackward = dispatchKey(LwjglGlfwKeycode.GLFW_KEY_S, backward) && backward;
         }
         if (mKeyLeft != left) {
-            mKeyLeft = left;
-            dispatchKey(LwjglGlfwKeycode.GLFW_KEY_A, left);
+            mKeyLeft = dispatchKey(LwjglGlfwKeycode.GLFW_KEY_A, left) && left;
         }
         if (mKeyRight != right) {
-            mKeyRight = right;
-            dispatchKey(LwjglGlfwKeycode.GLFW_KEY_D, right);
+            mKeyRight = dispatchKey(LwjglGlfwKeycode.GLFW_KEY_D, right) && right;
         }
     }
 
@@ -480,10 +514,10 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
         invalidate();
     }
 
-    private void dispatchKey(int keycode, boolean isDown) {
+    private boolean dispatchKey(int keycode, boolean isDown) {
         String leaseId = "joystick:" + keycode;
         if (isDown) {
-            StarHudInputManager.getInstance().acquireKeyLease(
+            return StarHudInputManager.getInstance().acquireKeyLease(
                     leaseId,
                     "joystick",
                     mActivePointerId,
@@ -492,7 +526,8 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
                     false
             );
         } else {
-            StarHudInputManager.getInstance().releaseLease(leaseId, "joystick_release");
+            StarHudInputManager.getInstance().releaseLeaseIfPresent(leaseId, "joystick_release");
+            return false;
         }
     }
 

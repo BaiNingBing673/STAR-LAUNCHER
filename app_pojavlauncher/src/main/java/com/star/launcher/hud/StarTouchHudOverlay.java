@@ -8,6 +8,7 @@ import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Looper;
 import android.text.InputFilter;
 import android.util.AttributeSet;
 import android.util.TypedValue;
@@ -273,10 +274,34 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
         mHudActive = active;
         if (!active) {
             setCustomizeMode(false);
-            releaseAllInputs();
+            releaseAllInputsWithReason("hud_disabled");
         }
         updateChildVisibilities();
         relayoutElements();
+    }
+
+    @Override
+    public void setEnabled(boolean enabled) {
+        super.setEnabled(enabled);
+        if (!enabled) {
+            releaseAllInputsWithReason("overlay_disabled");
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (!hasWindowFocus) {
+            releaseAllInputsWithReason("overlay_focus_lost");
+        }
+    }
+
+    @Override
+    protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (visibility != VISIBLE) {
+            releaseAllInputsWithReason("overlay_visibility_hidden");
+        }
     }
 
     public boolean isHudActive() {
@@ -484,7 +509,12 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
     }
 
     public void setConfig(@NonNull StarHudConfig config) {
-        mConfig = config.sanitized();
+        StarHudConfig sanitized = config.sanitized();
+        boolean changed = !sanitized.equals(mConfig);
+        if (changed) {
+            releaseAllInputsWithReason("layout_switched");
+        }
+        mConfig = sanitized;
         if (!mCustomizeMode) {
             applyActiveConfigToViews();
         }
@@ -503,6 +533,14 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
         applyHotbarConfig(cfg);
         updateChildVisibilities();
         relayoutElements();
+    }
+
+    private static boolean isInputGrabbing() {
+        try {
+            return StarHudInputManager.getInstance().getInputBridge().isGrabbing();
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private void applyHotbarConfig(@NonNull StarHudConfig cfg) {
@@ -574,7 +612,14 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
     }
 
     public void releaseAllInputs() {
-        StarHudInputManager.getInstance().releaseAllInputs("overlay_release_all");
+        releaseAllInputsWithReason("overlay_release_all");
+    }
+
+    private void releaseAllInputsWithReason(@NonNull String reason) {
+        StarHudInputManager.getInstance().releaseAllInputs(reason);
+        if (mDynamicZoneView != null) {
+            mDynamicZoneView.resetPointerState();
+        }
         if (mJoystickView != null) {
             mJoystickView.releaseAllKeys();
         }
@@ -612,8 +657,12 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
         }
         attachHudChildrenIfReady();
         if (!mGrabAttached) {
-            CallbackBridge.addGrabListener(this);
-            mGrabAttached = true;
+            try {
+                CallbackBridge.addGrabListener(this);
+                mGrabAttached = true;
+            } catch (UnsatisfiedLinkError | NoClassDefFoundError ignored) {
+                // Native bridge library is unavailable in JVM unit tests.
+            }
         }
         relayoutElements();
     }
@@ -622,7 +671,10 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
     protected void onDetachedFromWindow() {
         releaseAllInputs();
         if (mGrabAttached) {
-            CallbackBridge.removeGrabListener(this);
+            try {
+                CallbackBridge.removeGrabListener(this);
+            } catch (UnsatisfiedLinkError | NoClassDefFoundError ignored) {
+            }
             mGrabAttached = false;
         }
         detachHudChildren();
@@ -663,6 +715,7 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
 
     private void detachHudChildren() {
         if (!mChildrenAttached) return;
+        releaseAllInputsWithReason("detach_hud_children");
         removeFromParent(mDynamicZoneView);
         removeFromParent(mJoystickView);
         for (StarHudButtonView btn : mDynamicButtons.values()) {
@@ -681,24 +734,26 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
 
     @Override
     public void onGrabState(boolean isGrabbing) {
-        post(() -> {
+        Runnable task = () -> {
             if (!isGrabbing) {
-                StarHudInputManager.getInstance().releaseAllInputs("grab_state_lost");
-                if (mJoystickView != null) {
-                    mJoystickView.releaseAllKeys();
-                }
+                releaseAllInputsWithReason("grab_state_lost");
                 for (StarHudButtonView btn : mDynamicButtons.values()) {
                     btn.releaseOnGuiTransition();
                 }
             }
             updateChildVisibilities();
-        });
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            task.run();
+        } else {
+            post(task);
+        }
     }
 
     private void updateChildVisibilities() {
         StarHudConfig cfg = activeConfig();
         boolean showHud = mHudActive && (cfg.getUseStarHud() || mCustomizeMode);
-        boolean grabbing = CallbackBridge.isGrabbing();
+        boolean grabbing = isInputGrabbing();
         boolean worldMode = showHud && (grabbing || mCustomizeMode);
         boolean menuMode = showHud && !grabbing && !mCustomizeMode;
 
@@ -1426,6 +1481,7 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
                 })
                 .setPositiveButton("+ New Layout", (dialog, which) -> promptNewLayoutName())
                 .setNeutralButton("Restore Default", (dialog, which) -> {
+                    releaseAllInputsWithReason("layout_restore_default");
                     StarHudConfig def = StarHudConfigStore.restoreDefaultLayout(ctx);
                     mDraftConfig = def.sanitized();
                     applyActiveConfigToViews();
@@ -1453,6 +1509,7 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
                     if ("Switch to Layout".equals(choice)) {
                         StarHudConfig switched = StarHudConfigStore.switchLayout(ctx, summary.getLayoutId());
                         if (switched != null) {
+                            releaseAllInputsWithReason("layout_switched");
                             mConfig = switched;
                             mDraftConfig = switched;
                             mSelectedButtonId = switched.getButtons().isEmpty()
@@ -1472,6 +1529,7 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
                     } else if ("Delete Layout".equals(choice)) {
                         StarHudConfig after = StarHudConfigStore.deleteLayout(ctx, summary.getLayoutId());
                         if (after != null) {
+                            releaseAllInputsWithReason("layout_deleted");
                             mConfig = after;
                             mDraftConfig = after;
                             applyActiveConfigToViews();
@@ -1494,6 +1552,7 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
                 .setView(input)
                 .setPositiveButton("Create", (d, w) -> {
                     String name = input.getText().toString().trim();
+                    releaseAllInputsWithReason("layout_created");
                     StarHudConfig created = StarHudConfigStore.createLayout(ctx, name, activeConfig());
                     mConfig = created;
                     mDraftConfig = created;
@@ -1554,8 +1613,9 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
      * Bounded invisible activation zone on the left screen edge for dynamic joystick placement.
      * Kept separate from open center/right screen space so camera rotation stays completely unobstructed.
      */
-    private final class DynamicJoystickZoneView extends View {
+    private final class DynamicJoystickZoneView extends View implements StarHudInputManager.ResetParticipant {
         private int mPointerId = MotionEvent.INVALID_POINTER_ID;
+        private boolean mAttachedToManager = false;
 
         DynamicJoystickZoneView(Context context) {
             super(context);
@@ -1565,10 +1625,70 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
             setTranslationZ(3f * context.getResources().getDisplayMetrics().density);
         }
 
+        void resetPointerState() {
+            mPointerId = MotionEvent.INVALID_POINTER_ID;
+        }
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            if (!mAttachedToManager) {
+                StarHudInputManager.getInstance().registerResetParticipant(this);
+                mAttachedToManager = true;
+            }
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            endSessionAndClearPointer();
+            if (mAttachedToManager) {
+                StarHudInputManager.getInstance().unregisterResetParticipant(this);
+                mAttachedToManager = false;
+            }
+            super.onDetachedFromWindow();
+        }
+
+        @Override
+        public void setEnabled(boolean enabled) {
+            super.setEnabled(enabled);
+            if (!enabled) {
+                endSessionAndClearPointer();
+            }
+        }
+
+        @Override
+        public void onWindowFocusChanged(boolean hasWindowFocus) {
+            super.onWindowFocusChanged(hasWindowFocus);
+            if (!hasWindowFocus) {
+                endSessionAndClearPointer();
+            }
+        }
+
+        @Override
+        protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
+            super.onVisibilityChanged(changedView, visibility);
+            if (visibility != VISIBLE) {
+                endSessionAndClearPointer();
+            }
+        }
+
+        @Override
+        public void onGlobalInputReset(@NonNull String reason) {
+            mPointerId = MotionEvent.INVALID_POINTER_ID;
+        }
+
+        private void endSessionAndClearPointer() {
+            if (mPointerId != MotionEvent.INVALID_POINTER_ID) {
+                mPointerId = MotionEvent.INVALID_POINTER_ID;
+                mJoystickView.endDynamicSession();
+            }
+        }
+
         @Override
         public boolean onTouchEvent(MotionEvent event) {
             StarHudConfig cfg = activeConfig();
-            if (mCustomizeMode || !CallbackBridge.isGrabbing()
+            if (mCustomizeMode || !isEnabled() || getVisibility() != VISIBLE
+                    || !isInputGrabbing()
                     || !cfg.getJoystickDynamic()
                     || !cfg.isElementEnabled(StarHudElementId.JOYSTICK)) {
                 return false;
@@ -1577,11 +1697,25 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
             switch (action) {
                 case MotionEvent.ACTION_DOWN:
                 case MotionEvent.ACTION_POINTER_DOWN: {
-                    if (mPointerId != MotionEvent.INVALID_POINTER_ID || mJoystickView.isTracking()) {
+                    if (mPointerId != MotionEvent.INVALID_POINTER_ID) {
+                        if (mJoystickView.isTracking()) {
+                            return false;
+                        }
+                        // Recover stale pointer lock if joystick was reset externally.
+                        mPointerId = MotionEvent.INVALID_POINTER_ID;
+                    }
+                    if (mJoystickView.isTracking()) {
                         return false;
                     }
                     int idx = event.getActionIndex();
-                    mPointerId = event.getPointerId(idx);
+                    if (idx < 0 || idx >= event.getPointerCount()) {
+                        return false;
+                    }
+                    int pointerId = event.getPointerId(idx);
+                    if (pointerId == MotionEvent.INVALID_POINTER_ID) {
+                        return false;
+                    }
+                    mPointerId = pointerId;
                     float overlayX = getLeft() + event.getX(idx);
                     float overlayY = getTop() + event.getY(idx);
                     mJoystickView.beginDynamicSession(mPointerId, overlayX, overlayY, mDynamicZoneBounds);
@@ -1595,24 +1729,34 @@ public class StarTouchHudOverlay extends FrameLayout implements GrabListener {
                         float overlayY = getTop() + event.getY(idx);
                         mJoystickView.moveDynamicSession(overlayX, overlayY);
                     } else {
-                        mPointerId = MotionEvent.INVALID_POINTER_ID;
-                        mJoystickView.endDynamicSession();
+                        endSessionAndClearPointer();
                     }
                     return true;
                 }
                 case MotionEvent.ACTION_POINTER_UP: {
+                    if (mPointerId == MotionEvent.INVALID_POINTER_ID) return false;
                     int idx = event.getActionIndex();
-                    if (event.getPointerId(idx) == mPointerId) {
-                        mPointerId = MotionEvent.INVALID_POINTER_ID;
-                        mJoystickView.endDynamicSession();
+                    if (idx >= 0 && idx < event.getPointerCount() && event.getPointerId(idx) == mPointerId) {
+                        endSessionAndClearPointer();
                         return true;
                     }
                     return false;
                 }
-                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_UP: {
+                    if (mPointerId == MotionEvent.INVALID_POINTER_ID) return false;
+                    int idx = event.getActionIndex();
+                    int pointerId = (idx >= 0 && idx < event.getPointerCount())
+                            ? event.getPointerId(idx)
+                            : MotionEvent.INVALID_POINTER_ID;
+                    if (pointerId == mPointerId) {
+                        endSessionAndClearPointer();
+                        return true;
+                    }
+                    return false;
+                }
                 case MotionEvent.ACTION_CANCEL:
-                    mPointerId = MotionEvent.INVALID_POINTER_ID;
-                    mJoystickView.endDynamicSession();
+                    if (mPointerId == MotionEvent.INVALID_POINTER_ID) return false;
+                    endSessionAndClearPointer();
                     return true;
                 default:
                     return false;

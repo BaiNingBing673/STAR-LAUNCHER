@@ -2,6 +2,8 @@ package net.kdt.pojavlaunch.customcontrols.mouse;
 
 import android.os.Handler;
 
+import com.star.launcher.hud.StarHudInputManager;
+
 import net.kdt.pojavlaunch.LwjglGlfwKeycode;
 
 import org.lwjgl.glfw.CallbackBridge;
@@ -52,7 +54,11 @@ public class RightClickGesture extends ValidatorGesture {
         boolean fingerStill = LeftClickGesture.isFingerStill(mGestureStartX, mGestureStartY, mGestureEndX, mGestureEndY, LeftClickGesture.FINGER_STILL_THRESHOLD);
         System.out.println("Right click: " + fingerStill);
         if(!fingerStill) return;
-        CallbackBridge.sendMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT, true);
-        CallbackBridge.sendMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT, false);
+        StarHudInputManager.getInstance().tapMouseButton(
+                "gesture_rmb",
+                -1,
+                "GESTURE_RMB",
+                LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT
+        );
     }
 }

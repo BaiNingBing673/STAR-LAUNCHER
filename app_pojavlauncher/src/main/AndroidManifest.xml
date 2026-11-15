@@ -30,6 +30,9 @@
     <application
         android:name=".PojavApplication"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        tools:targetApi="s"
         android:allowNativeHeapPointerTagging="false"
         android:appCategory="game"
         android:hasFragileUserData="true"

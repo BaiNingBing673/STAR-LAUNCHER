@@ -261,7 +261,8 @@ class AetherDashboardStateViewModel(
             dependencyResolver = container.modDependencyResolver,
             downloadInstaller = container.modDownloadInstaller,
             installedModManager = container.installedModManager,
-            scope = viewModelScope
+            scope = viewModelScope,
+            modLoaderInstaller = container.modLoaderInstaller
         )
     }
 

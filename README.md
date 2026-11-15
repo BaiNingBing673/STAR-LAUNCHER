@@ -75,8 +75,8 @@ All capabilities below are verified directly against the codebase (full breakdow
 
 - **6-Tab Material 3 Compose Hub (`AetherDashboardActivity` internal Activity)**: `Home`, `Library`, `Versions`, `Mods`, `Community`, and `Settings` with adaptive `NavigationBar`/`NavigationRail`, `UiPerformanceProfileManager` tier scaling, and `SavedStateHandle` navigation stack persistence.
 - **Isolated Instance Management (`InstanceManager`, `LibraryScreen`, `InstanceDetailScreen`)**: Per-instance `.minecraft` directories (under the preserved internal directory `aether_instances/<id>/.minecraft`), per-instance RAM allocation, custom JVM arguments, runtime & renderer bindings, featured instance pinning, and legacy `.minecraft` profile import.
-- **Version Catalog & Installer (`VersionCatalogService`, `VersionInstallCoordinator`)**: Syncs Mojang `version_manifest_v2.json` (releases, snapshots, historical betas/alphas), installs Fabric, Quilt, Forge, and NeoForge loader profiles, tracks byte/file progress, validates SHA-1 hashes, and cleans interrupted `.aetherpart` downloads.
-- **In-App Mods Hub (`ModsScreen`, `ModDetailScreen`, `ModsController`, `CurseForgeRepository`, `ModrinthFallbackCatalog`)**: Browse, filter, and install mods directly into isolated instance `mods/` directories with CurseForge API integration, automatic Modrinth fallback catalog support, dependency resolution (`ModDependencyResolver`), compatibility checks (`ModCompatibilityEngine`), and local `.jar` metadata inspection (`JarModMetadataParser`, `InstalledModManager`).
+- **Version Catalog & Installer (`VersionCatalogService`, `VersionInstallCoordinator`, `ModLoaderInstaller`)**: Syncs Mojang `version_manifest_v2.json` (releases, snapshots, historical betas/alphas), installs Fabric, Quilt, and legacy Forge profiles headlessly (and hands off processor-based Forge 1.13+ / NeoForge installers to `:gui_installer`), tracks byte/file progress, validates SHA-1 hashes, and cleans interrupted `.aetherpart` downloads.
+- **In-App Mods Hub (`ModsScreen`, `ModDetailScreen`, `ModsController`, `CurseForgeRepository`, `ModrinthFallbackCatalog`)**: Browse, filter, and install mods directly into isolated instance `mods/` directories with CurseForge API integration, automatic keyless Modrinth v2 fallback catalog support, dependency resolution (`ModDependencyResolver`), compatibility checks (`ModCompatibilityEngine`), in-app mod-loader installation, and local `.jar` metadata inspection (`JarModMetadataParser`, `InstalledModManager`).
 - **OpenJDK Runtime Manager (`RuntimeManagementScreen`, `MultiRTUtils`, `NewJREUtil`)**: Validates `libjvm.so` and ABI match, downloads External OpenJDK **8, 17, 21, and 25** builds (where device ABI supports them), or imports local `.tar.xz` archives.
 - **Renderer Filtering, Adaptive Graphics & MobileGlues Tuning (`EnginePreferencesScreen`, `PojavRendererFacade`, `AdaptiveGraphicsManager`)**: Probes hardware support before listing renderers, tunes settings by device capability tier, and exposes MobileGlues controls (GLSL cache size, ANGLE backend toggle, AMD FSR 1 upscaling, experimental GL extension flags).
 - **Accounts & Hardware-Backed Encryption (`AccountRepository`, `TokenVault`, `MicrosoftAuthScreen`)**: Microsoft OAuth2 + Xbox Live WebView login, offline local profiles (3–16 chars), and AES-GCM secret mirroring via Android Keystore (`aether_token_vault_v1`).
@@ -87,8 +87,9 @@ All capabilities below are verified directly against the codebase (full breakdow
 ### Partially Implemented / Planned
 
 - **Compatibility Passport**: Capability probing (`DETECTED`), rule evaluation (`THEORETICAL`), and real-run verification (`VERIFIED_RUNTIME`) are **implemented** in backend + `Settings` / `InstanceDetail` badges; curated `TESTED` matrix data (`EmptyTestedMatrixProvider` stub) and a dedicated full-screen Passport browser are **planned**.
-- **STAR Doctor**: Automated log redaction, native library checks (`verifyEngineLibrariesPresent`), crash report coordination (`CrashReportCoordinator`), and support report export are **implemented**; interactive one-tap remediation cards are **planned**.
-- **STAR Pulse**: Local session/exit recording (`GameSessions` + `CrossProcessSpoolBridge`) and live in-app performance monitor overlay (`PerformanceMonitorOverlay`) are **implemented**; opt-in cloud compatibility telemetry is **planned**.
+- **STAR Doctor**: Automated log redaction, native library checks (`verifyEngineLibrariesPresent`), crash report coordination (`CrashReportCoordinator`), and support report export (`SettingsScreen`) are **implemented**; interactive one-tap remediation cards are **planned**.
+- **STAR Pulse**: Local session/exit recording (`GameSessions` + `CrossProcessSpoolBridge`) is **implemented**; `PerformanceMonitorOverlay` currently runs in **Debug builds only** inside the launcher process (`AetherDashboardActivity`), while production/in-game overlay metrics and opt-in telemetry are **planned**.
+- **Gamepad Mapper**: Compose `GamepadMapperScreen` provides controller preset inspection (`android_gamepad_remapper` / `Gamepad` handle physical input in the engine); interactive Compose physical-button capture is **planned**.
 
 ---
 
@@ -135,7 +136,14 @@ Verified from [`app_pojavlauncher/build.gradle`](app_pojavlauncher/build.gradle)
 
 ## Installation & First-Time Setup
 
-Download the latest universal APK (`STAR-Launcher-v3.0.0.apk`) from [GitHub Releases](https://github.com/BaiNingBing673/STAR-LAUNCHER/releases) and verify its `.sha256` checksum before installing on your Android device (Android 5.0+ / API 21+), or build from source (see [Building from Source](#building-from-source)).
+Download the latest universal release APK (`STAR-Launcher-v3.0.1.apk`, `versionCode 10000002`) from [GitHub Releases](https://github.com/BaiNingBing673/STAR-LAUNCHER/releases), verify its `.sha256` checksum and signing certificate before installing on your Android device (**Android 5.0+ / API 21+**), or build from source (see [`docs/BUILDING.md`](docs/BUILDING.md)).
+
+```bash
+sha256sum -c STAR-Launcher-v3.0.1.apk.sha256
+apksigner verify --print-certs --verbose STAR-Launcher-v3.0.1.apk
+```
+
+> **Updating from `v3.0.0` (`versionCode 10000001`)**: `v3.0.0` was mistakenly signed with `debug.keystore` due to an upstream fallback fixed in `3.0.1`. Back up your worlds (`saves/`), mods, and configs and perform a clean reinstall when moving from `v3.0.0` to a production-signed `3.0.1+` build.
 
 ### First-Time Setup Guide
 
@@ -147,7 +155,7 @@ Download the latest universal APK (`STAR-Launcher-v3.0.0.apk`) from [GitHub Rele
    - Download OpenJDK **8**, **17**, **21**, or **25** appropriate for your device ABI and target Minecraft version, or import a `.tar.xz` JRE package.
    - *(General mapping: MC `<= 1.16.5` -> Java 8; MC `1.17–1.20.4` -> Java 17; MC `1.20.5+` -> Java 21+.)*
 4. **Install a Minecraft Version (`Versions`)**:
-   - Sync the Mojang catalog and install a release or snapshot, or install a **Fabric** / **Quilt** profile.
+   - Sync the Mojang catalog and install a release or snapshot, or install a **Fabric** / **Quilt** / **Forge** / **NeoForge** loader profile (via `Mods` or `Versions`).
 5. **Create an Instance (`Library -> New`)**:
    - Name your instance, assign its installed version, choose RAM allocation and renderer, then tap **Play**.
 
@@ -215,17 +223,22 @@ Full verified guide: [`docs/BUILDING.md`](docs/BUILDING.md).
 ### Build & Test Commands
 
 ```bash
-git clone --recursive <repository-url> STAR-Launcher
+git clone --recursive https://github.com/BaiNingBing673/STAR-LAUNCHER.git STAR-Launcher
 cd STAR-Launcher
 
-# Run unit & Robolectric tests under app_pojavlauncher/src/test/
-./gradlew :app_pojavlauncher:testDebugUnitTest --console=plain
+# Ensure STAR's custom MioLibPatcher transformers are applied on fresh clones
+if [ ! -f MioLibPatcher/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java ]; then
+  git -C MioLibPatcher apply ../patches/miolibpatcher-star.patch
+fi
+
+# Run MioLibPatcher + Android JVM/Robolectric tests
+./gradlew :MioLibPatcher:test :app_pojavlauncher:testDebugUnitTest --console=plain
 
 # Assemble debug APK -> app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk
 ./gradlew :app_pojavlauncher:assembleDebug --console=plain
 ```
 
-*(Note: Pre-built JRE 8 binaries under `app_pojavlauncher/src/main/assets/components/jre/` are not committed to Git. You can still build and install the APK without them and download OpenJDK 8/17/21/25 in-app via Runtime Management.)*
+*(Note: Production release builds via `:app_pojavlauncher:assembleRelease` require `STAR_KEYSTORE_FILE`, `STAR_KEYSTORE_PASSWORD`, `STAR_KEY_ALIAS`, and `STAR_KEY_PASSWORD`; Gradle fails cleanly rather than falling back to `debug.keystore`. Pre-built JRE 8 binaries under `app_pojavlauncher/src/main/assets/components/jre/` are not committed to Git—you can build without them and download OpenJDK 8/17/21/25 in-app via Runtime Management.)*
 
 ---
 
@@ -262,12 +275,12 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/ENGINE_DEPENDENCY_MAP
 
 ## Roadmap
 
-Based on currently incomplete items verified in [`docs/FEATURE_STATUS.md`](docs/FEATURE_STATUS.md):
+Based on currently incomplete items verified in [`docs/FEATURE_STATUS.md`](docs/FEATURE_STATUS.md) and [`CHANGELOG.md`](CHANGELOG.md):
 
 - Populate a curated read-only `TESTED` **Compatibility Passport** matrix (`TestedMatrixProvider`) covering verified SoC/GPU/API/renderer combinations.
-- Build dedicated **STAR Lab** UI screens (interactive Compatibility Passport details, automated **STAR Doctor** crash-pattern advisor, and **STAR Pulse** performance metrics/opt-in telemetry).
-- Expand native Compose version/modpack workflows (online Modrinth/CurseForge browsing & dedicated Forge/NeoForge/OptiFine UI selectors).
-- Automate on-device UI/launch regression testing and capture official screenshots.
+- Build dedicated **STAR Lab** UI screens (interactive Compatibility Passport details, automated **STAR Doctor** crash-pattern advisor, and release-enabled **STAR Pulse** performance metrics).
+- Expand native Compose version/modpack workflows (dedicated Modrinth search/filter tab alongside `ModrinthFallbackCatalog`, interactive Forge/OptiFine progress feedback).
+- Run physical Android UI/launch regression verification and capture official hardware screenshots.
 
 ---
 

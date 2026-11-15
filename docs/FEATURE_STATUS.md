@@ -1,54 +1,39 @@
-# STAR Launcher — Feature Implementation Status
+# STAR Launcher Feature Verification & Status Matrix
 
-> **Policy**: Every entry below has been verified directly against the current repository source code (`app_pojavlauncher/src/main/kotlin/com/star/launcher/...`, `app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/...`, and `app_pojavlauncher/src/main/jni/`).  
-> Features are explicitly separated into **IMPLEMENTED**, **PARTIALLY IMPLEMENTED**, and **PLANNED**.
+Every capability listed below has been audited directly against source files in `app_pojavlauncher/src/` and test suites in `app_pojavlauncher/src/test/` and `MioLibPatcher/src/test/` as of `3.0.1` (`versionCode = 10000002`).
 
----
-
-## 1. Core Launcher, Instances & Versions
-
-| Feature | Status | Verified Implementation Evidence | Limitations / Notes |
-| --- | --- | --- | --- |
-| **Unified 5-Tab Compose UI (`Home`, `Library`, `Versions`, `Community`, `Settings`)** | **IMPLEMENTED** | `AetherDashboardActivity.kt`, `AetherNavRoutes.kt`, `HomeScreen.kt`, `LibraryScreen.kt`, `VersionsScreen.kt`, `CommunityScreen.kt`, `SettingsScreen.kt` (internal Compose UI symbols) | Uses responsive `NavigationBar` / `NavigationRail` and `SavedStateHandle` back-stack persistence |
-| **Isolated Multi-Instance Profiles** | **IMPLEMENTED** | `InstanceManager.kt`, `AetherStorageManager.kt`, `GameInstanceDao` | Each instance gets internal storage `<game_home>/aether_instances/<id>/.minecraft` (preserved directory name) with dedicated RAM, JVM args, runtime, and renderer IDs |
-| **Legacy `.minecraft` Profile Import** | **IMPLEMENTED** | `LibraryScreen.kt` ("Import Legacy"), `InstanceManager.kt` | Reads existing `launcher_profiles.json` entries cleanly |
-| **Per-Instance Mod Inspection & Toggle** | **IMPLEMENTED** | `InstanceContentManager.kt`, `InstanceDetailScreen.kt` | Lists `.jar` / `.jar.disabled` mods, toggles without deletion, counts resource packs, shader packs, and saves (`level.dat`) |
-| **Mojang Version Catalog (`version_manifest_v2.json`)** | **IMPLEMENTED** | `VersionCatalogService.kt`, `VersionsScreen.kt`, `VersionInstallScreen.kt` | Syncs releases, snapshots, and `old_beta`/`old_alpha`; supports search, filter, sort, cancel, and `.aetherpart` crash cleanup |
-| **Fabric & Quilt Profile Installation (Compose UI)** | **IMPLEMENTED** | `VersionCatalogService.kt` (`installFabricOrQuiltProfile`), `FabriclikeUtils.java` | Fetches Fabric/Quilt loader versions and installs version JSON profiles |
-| **Local `.jar` Mod Installer & `.zip`/`.mrpack` Modpack Import** | **IMPLEMENTED** | `ModImportAdapter.kt`, `JavaGUILauncherActivity.java`, `CommonApi.java` | SAF picker (`OpenDocumentWithExtension`) launches `.jar` Swing installers or imports `.zip`/`.mrpack` packs |
-| **Forge, NeoForge, OptiFine, BTA & LWJGL3ify Installers** | **IMPLEMENTED** (Engine / `.jar`) / **PARTIALLY IMPLEMENTED** (Native Compose UI) | `modloaders/*DownloadTask.java`, `JavaGUILauncherActivity.java`, `:forge_installer` | Full Java/Swing/headless engine installers exist in `net.kdt.pojavlaunch.modloaders` and run via `Install .jar`; dedicated Compose picker dialogs in `VersionsScreen` currently target Vanilla + Fabric/Quilt |
-| **Built-In Online Mod / Modpack Store Search (Modrinth / CurseForge in Compose UI)** | **PLANNED** | `ModrinthApi.java` / `CurseforgeApi.java` exist in legacy Java layer (`CURSEFORGE_API_KEY` defaults to `"DUMMY"` if unset) | Compose UI currently supports local `.mrpack`/`.zip` import rather than an interactive online store browser |
+> **Important Honesty Note:** Automated JVM and Robolectric unit tests verify core business logic, Room persistence, JSON/LRC parsing, dependency resolution, and mock installer flows. **Physical Android device testing (end-to-end live game launch, OpenGL/Vulkan rendering, touch gameplay, media notification listener, and hardware Keystore tests) is NOT VERIFIED in this environment.**
 
 ---
 
-## 2. Java Runtimes, Graphics Renderers & Launch Pipeline
+## Classification Key
 
-| Feature | Status | Verified Implementation Evidence | Limitations / Notes |
-| --- | --- | --- | --- |
-| **OpenJDK Multi-Runtime Management (Java 8, 17, 21, 25)** | **IMPLEMENTED** | `RuntimeManagementScreen.kt`, `RuntimeDetailScreen.kt`, `PojavRuntimeFacade`, `MultiRTUtils.java`, `NewJREUtil.java` | Validates `libjvm.so` & ABI match; downloads External JRE builds or imports `.tar.xz`; 32-bit `x86` cannot provision JRE 21/25 |
-| **Renderer Discovery & Selection** | **IMPLEMENTED** | `Tools.getCompatibleRenderers`, `headings_array.xml`, `PojavRendererFacade`, `EnginePreferencesScreen.kt` | Filters by GLES major version, Vulkan support, and `.so` binary presence (`opengles2` Krypton Wrapper, `opengles_mobileglues`, `opengles3_desktopgl_zink_kopper`, `vulkan_zink`, `opengles3_ltw`) |
-| **MobileGlues Renderer Tuning** | **IMPLEMENTED** | `EnginePreferencesScreen.kt`, `LauncherPreferences.java`, `strings.xml` | Configures GLSL cache size, ANGLE toggle, error filtering, AMD FSR 1 upscaling, and experimental GL extensions |
-| **Adreno Turnip Injection & Linker Namespace Bypass** | **IMPLEMENTED** | `libvulkan_freedreno.so` (`arm64-v8a`), `liblinkerhook.so`, `:androidnsbypass` | Applies to `arm64-v8a` devices; Mali/Xclipse/PowerVR rely on system Vulkan/GLES drivers |
-| **Three-Process Isolation (`:launcher`, `:game`, `:gui_installer`)** | **IMPLEMENTED** | `AndroidManifest.xml`, `PojavApplication.java`, `ContextAwareDoneListener.java`, `PojavLaunchBridge.kt`, `MainActivity.java`, `GameService.java`, `JavaGUILauncherActivity.java` | `PojavApplication` runs per process; `:launcher` flushes Room WAL checkpoints and exits before `:game` (`MainActivity`, `GameService`) initializes OpenJDK/LWJGL; `:gui_installer` isolates `JavaGUILauncherActivity` |
-
----
-
-## 3. Accounts, Security & Storage
-
-| Feature | Status | Verified Implementation Evidence | Limitations / Notes |
-| --- | --- | --- | --- |
-| **Microsoft OAuth2 + Xbox Live Authentication** | **IMPLEMENTED** | `MicrosoftAuthScreen.kt`, `AuthAdapter.kt`, `MicrosoftBackgroundLogin.java` | Embedded WebView OAuth2 flow + 5-step Xbox/Minecraft authorization progress |
-| **Local Offline Accounts** | **IMPLEMENTED** | `AccountRepository.kt`, `SettingsScreen.kt` | Supports 3–16 character local profiles |
-| **Android Keystore AES-GCM Token Vault** | **IMPLEMENTED** | `TokenVault.kt`, `AccountRepository.kt` | Encrypts sensitive `accessToken` and `msaRefreshToken` under Keystore alias `aether_token_vault_v1` |
-| **Scoped Storage & `DocumentsProvider`** | **IMPLEMENTED** | `FolderProvider.java`, `AndroidManifest.xml`, `TestStorageActivity.java` | Exposes scoped files under `com.star.launcher.scoped.gamefolder[.debug]` (`API >= 29`) or legacy storage (`API < 29`) |
-| **Custom On-Screen Controls & Gamepad Remapper** | **IMPLEMENTED** | `CustomControlsActivity.java`, `GamepadMapperScreen.kt`, `ImportControlActivity.java` | Interactive button/joystick layout editor, JSON import/export, TouchController proxy, SDL/DirectGamepad remapping |
+1. **Fully implemented and verified** *(implemented in UI + backend; verified by compilation/static audit and JVM/Robolectric tests where available)*
+2. **Implemented but partially functional** *(working core path with known gaps, debug-only gating, or secondary flows incomplete)*
+3. **UI implemented, backend incomplete**
+4. **Backend implemented, UI incomplete**
+5. **Planned / not implemented**
+6. **Unable to verify** *(implementation exists, but runtime behavior on physical Android hardware could not be tested here)*
 
 ---
 
-## 4. STAR Lab (`Compatibility Passport`, `STAR Doctor`, `STAR Pulse`)
+## Feature Matrix
 
-| Module | Status | What Exists in Code Today | What Is Not Yet Built |
-| --- | --- | --- | --- |
-| **Compatibility Passport** | **PARTIALLY IMPLEMENTED** (Backend & Badges Ready) | `AndroidDeviceCapabilityProbe.kt` (ABI, 64-bit, RAM, EGL/GLES, Vulkan, Adreno KGSL), `CompatibilityEvaluator.kt` (4 strict tiers: `DETECTED`, `THEORETICAL`, `TESTED`, `VERIFIED_RUNTIME`), `CompatibilityTierBadge` in `SettingsScreen.kt` & `InstanceDetailScreen.kt` | `EmptyTestedMatrixProvider` is currently a stub with no bundled QA/community `TESTED` matrix data; no dedicated full-screen Passport explorer UI yet |
-| **STAR Doctor** | **PARTIALLY IMPLEMENTED** (Diagnostics Backend & Exporter Ready) | `DiagnosticsManager.kt`, `SensitiveLogRedactor.kt` (strips JWTs, Bearer tokens, `--accessToken`, `--uuid`), `DiagnosticExporter.kt` (`star-support-*.txt` redacted export), `PojavNativeEngineAdapter.verifyEngineLibrariesPresent()`, `MultiRTUtils.inspectRuntime()` | No dedicated interactive "STAR Doctor" automated crash-cause wizard / one-tap fix advisor screen yet |
-| **STAR Pulse** | **PARTIALLY IMPLEMENTED** (Local Session Spool Only) / **PLANNED** (Telemetry & Performance HUD) | `CrossProcessSpoolBridge.kt`, `GameSessionEntity`, `DiagnosticLogEntity` capture local launch/exit/crash & GL init records safely across `:game` -> `:launcher` | Live in-game performance overlay, frame-time metrics dashboard, and opt-in anonymized compatibility telemetry sync are planned |
+| Feature | Classification | Code Evidence | Notes & Limitations |
+|---|---|---|---|
+| **6-Tab Compose Hub & Navigation** | **1 — Fully implemented and verified** *(on-device visual QA: 6)* | `AetherDashboardActivity.kt`, `AetherNavRoutes.kt`, `AetherNavigation.kt`, `AetherDashboardViewModel.kt` | `Home`, `Library`, `Versions`, `Mods`, `Community`, `Settings` tabs with `SavedStateHandle` back-stack persistence. |
+| **Instance Management** | **1 — Fully implemented and verified** | `InstanceManager.kt`, `InstanceContentManager.kt`, `LibraryScreen.kt`, `InstanceDetailScreen.kt` | Isolated `aether_instances/<id>/.minecraft/` folders, non-destructive `launcher_profiles.json` import, RAM/JVM/runtime/renderer bindings, single-flight prep lock. |
+| **Minecraft Version Installation** | **1 — Fully implemented and verified** *(live download/launch: 6)* | `VersionCatalogService.kt`, `VersionInstallCoordinator.kt`, `VersionManager.kt`, `VersionInstallScreen.kt` | Mojang `version_manifest_v2.json` sync, SHA-1 verification, `.aetherpart` staging cleanup, parent inheritance chain checks. |
+| **Mods Hub (Discover & My Mods)** | **1 — Fully implemented and verified** *(live API/device UI: 6)* | `ModsScreen.kt`, `ModDetailScreen.kt`, `ModsController.kt`, `ModDependencyResolver.kt`, `ModDownloadInstaller.kt`, `InstalledModManager.kt`, `ModLoaderInstaller.kt` | Browse/filter/search, dependency resolution, SHA verification, `.jar` enable/disable/delete/update checks, and Fabric/Quilt/legacy-Forge/processor-based Forge/NeoForge loader handoff (`JavaGUILauncherActivity`). |
+| **CurseForge Integration** | **1 — Fully implemented and verified** *(live key test depends on user/CI key)* | `CurseForgeCredentialProvider.kt`, `CurseForgeRepository.kt`, `TokenVault.kt` | AES-GCM encrypted key/proxy storage, `BuildConfig.CURSEFORGE_API_KEY` optional injection, rate-limit & distribution-restriction handling, zero dummy keys. |
+| **Modrinth Integration** | **2 — Implemented but partially functional** | `ModrinthFallbackCatalog.kt`, `ModrinthApi.java`, `CommonApi.java`, `ModImportAdapter.kt` | Keyless Modrinth v2 fallback catalog automatically powers Mods Hub when CurseForge credentials are absent or rejected, and `.mrpack` modpacks import via `CommunityScreen` / `ModpackInstaller`. Dedicated standalone Modrinth filter/sort tab in Compose Discover is not separate from the fallback flow. |
+| **Mod & Modpack Management** | **1 — Fully implemented and verified** *(device `.jar`/`.mrpack` execution: 6)* | `ModImportAdapter.kt`, `ModpackInstaller.java`, `CommunityScreen.kt`, `InstalledModManager.kt` | `.jar` mod installer handoff, CurseForge `.zip` & Modrinth `.mrpack` import, and `My Mods` inventory scanning (`JarModMetadataParser`). |
+| **Runtime Management (OpenJDK)** | **1 — Fully implemented and verified** *(device execution: 6)* | `RuntimeManagementScreen.kt`, `RuntimeDetailScreen.kt`, `MultiRTUtils.java`, `NewJREUtil.java` | Multi-runtime validation (`libjvm.so` + ABI check), OpenJDK 8/17/21/25 download & local `.tar.xz` SAF import. |
+| **Account & Token Security** | **1 — Fully implemented and verified** *(hardware Keystore ops: 6)* | `TokenVault.kt`, `AccountRepository.kt`, `MicrosoftAuthScreen.kt`, `AndroidManifest.xml`, `backup_rules.xml`, `data_extraction_rules.xml` | Android Keystore AES-256-GCM vault (`noBackupFilesDir`), offline & Microsoft auth, token redaction in `DiagnosticExporter`, Auto Backup exclusions added in `3.0.1`. |
+| **STAR Touch HUD** | **1 — Fully implemented and verified** *(live gameplay touch: 6)* | `StarTouchHudOverlay.java`, `StarJoystickView.kt`, `StarHudButtonView.kt`, `StarHudInputManager.kt` | Native floating joystick, dynamic left zone, custom multi-button overlay, GrabListener camera/GUI awareness. |
+| **Custom HUD Layout Persistence** | **1 — Fully implemented and verified** | `StarHudConfig.kt`, `StarHudConfigStore.kt`, `StarHudLayoutSolver.kt`, `HudCustomizationScreen.kt` | Versioned JSON profiles, named layout save/load/reset, snap-to-grid/guide solver, staged gameplay Edit Controller (`mDraftConfig`). |
+| **STAR Live Lyrics** | **1 — Fully implemented and verified** *(device playback/listener: 6)* | `StarLiveLyricsOverlay.kt`, `LiveLyricsController.kt`, `LrcParser.kt`, `LrcLibClient.kt`, `StarMusicPlayerService.kt`, `StarMediaNotificationListener.kt`, `LiveLyricsSettingsScreen.kt` | Activity-owned Dynamic Island inside `MainActivity` (no `SYSTEM_ALERT_WINDOW`), LRC/ELRC parser, built-in foreground media service (hardened in `3.0.1`), and notification session listener. |
+| **Gamepad Mapper** | **2 — Implemented but partially functional** | `GamepadMapperScreen.kt`, upstream `Gamepad.java`, `CustomControlsActivity.java` | Compose `GamepadMapperScreen` previews controller preset/axis mappings; full interactive live physical-controller remapping relies on upstream engine input handling. |
+| **STAR Pulse / Performance Overlay** | **2 — Implemented but partially functional** | `CrossProcessSpoolBridge.kt`, `DiagnosticsManager.kt`, `PerformanceMonitorOverlay.kt`, `PerformanceTelemetryTracker.kt` | `:game` -> `:launcher` JSON session/crash spooling is always active. `PerformanceMonitorOverlay` is **Debug-only** (`BuildConfig.DEBUG`) in the launcher process (`AetherDashboardActivity`), not active in release builds or inside `:game` (`MainActivity`). Cloud telemetry sync is **5 — Planned**. |
+| **STAR Doctor (Diagnostics & Repair)** | **2 — Implemented but partially functional** (`Backend`: 1 / `Interactive Repair UI`: 5) | `DiagnosticExporter.kt`, `DiagnosticsManager.kt`, `CrashReportCoordinator.kt`, `SettingsScreen.kt` | Redacted `star-support-*.txt` export, missing native `.so` audit, and `latestlog.txt` sharing work from `SettingsScreen`; guided one-tap repair advisor UI is **Planned**. |
+| **Compatibility Passport** | **2 — Implemented but partially functional** | `DeviceCapabilityProbe.kt`, `CompatibilityEvaluator.kt`, `TestedMatrixProvider.kt`, `StatusBadges.kt` | Live hardware probing (`DETECTED`), rule evaluation (`THEORETICAL`), and runtime verification (`VERIFIED_RUNTIME`) work; `TestedMatrixProvider` uses `EmptyTestedMatrixProvider` stub (`TESTED` curated database is **5 — Planned**). |

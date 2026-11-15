@@ -55,6 +55,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.star.launcher.data.db.model.ModLoaderType
+import com.star.launcher.mods.api.CurseForgeConnectionState
 import com.star.launcher.mods.api.CurseForgeCredentialStatus
 import com.star.launcher.mods.api.CurseForgeMod
 import com.star.launcher.mods.api.CurseForgeModLoader
@@ -66,6 +68,8 @@ import com.star.launcher.mods.compat.ModCompatibilityLevel
 import com.star.launcher.mods.download.ModDownloadPhase
 import com.star.launcher.mods.download.ModDownloadProgressItem
 import com.star.launcher.mods.inventory.InstalledModInventoryItem
+import com.star.launcher.mods.loader.ModLoaderCandidate
+import com.star.launcher.mods.loader.ModLoaderInstaller
 import com.star.launcher.mods.ui.ModsErrorKind
 import com.star.launcher.mods.ui.ModsSubTab
 import com.star.launcher.mods.ui.ModsUiState
@@ -127,6 +131,14 @@ fun ModsScreen(
     onSaveDeveloperKey: (String) -> Unit,
     onSaveProxyConfig: (String, String?) -> Unit,
     onClearCredentials: () -> Unit,
+    onTestApiConnection: () -> Unit = {},
+    onOpenInstallLoader: (ModLoaderType?) -> Unit = {},
+    onDismissInstallLoader: () -> Unit = {},
+    onSelectInstallLoaderType: (ModLoaderType) -> Unit = {},
+    onSelectInstallLoaderCandidate: (ModLoaderCandidate) -> Unit = {},
+    onRefreshInstallLoaderCandidates: () -> Unit = {},
+    onStartModLoaderInstall: () -> Unit = {},
+    onCancelModLoaderInstall: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showInstancePicker by remember { mutableStateOf(false) }
@@ -143,7 +155,8 @@ fun ModsScreen(
                 onSwitchInstanceClick = { showInstancePicker = true },
                 onCreateInstanceClick = onOpenCreateInstance,
                 onMatchFilters = onMatchFiltersToInstance,
-                onOpenApiConfig = onOpenCredentialConfig
+                onOpenApiConfig = onOpenCredentialConfig,
+                onOpenInstallLoader = { onOpenInstallLoader(null) }
             )
         }
 
@@ -489,7 +502,11 @@ fun ModsScreen(
         ModInstallPlanDialog(
             dialogState = pendingPlan,
             onConfirm = onConfirmPlanInstall,
-            onDismiss = onDismissPlanDialog
+            onDismiss = onDismissPlanDialog,
+            onInstallModLoader = { preferred ->
+                onDismissPlanDialog()
+                onOpenInstallLoader(preferred)
+            }
         )
     }
 
@@ -561,11 +578,28 @@ fun ModsScreen(
     if (state.showCredentialConfigDialog) {
         CurseForgeCredentialDialog(
             status = state.credentialStatus,
+            connectionState = state.connectionState,
+            connectionMessage = state.connectionMessage,
+            isTestingConnection = state.isTestingConnection,
             errorMessage = state.credentialConfigError,
             onSaveDeveloperKey = onSaveDeveloperKey,
             onSaveProxyConfig = onSaveProxyConfig,
             onClearCredentials = onClearCredentials,
+            onTestConnection = onTestApiConnection,
             onDismiss = onDismissCredentialConfig
+        )
+    }
+
+    // Install Mod Loader Dialog
+    if (state.showInstallLoaderDialog) {
+        InstallModLoaderDialog(
+            state = state,
+            onSelectLoaderType = onSelectInstallLoaderType,
+            onSelectCandidate = onSelectInstallLoaderCandidate,
+            onRefreshCandidates = onRefreshInstallLoaderCandidates,
+            onStartInstall = onStartModLoaderInstall,
+            onCancelInstall = onCancelModLoaderInstall,
+            onDismiss = onDismissInstallLoader
         )
     }
 }
@@ -577,7 +611,8 @@ private fun SelectedInstanceModsBanner(
     onSwitchInstanceClick: () -> Unit,
     onCreateInstanceClick: () -> Unit,
     onMatchFilters: () -> Unit,
-    onOpenApiConfig: () -> Unit
+    onOpenApiConfig: () -> Unit,
+    onOpenInstallLoader: () -> Unit = {}
 ) {
     val instance = state.selectedInstance
     val env = state.instanceEnvironment
@@ -604,6 +639,7 @@ private fun SelectedInstanceModsBanner(
             }
             CredentialStatusChip(
                 status = state.credentialStatus,
+                connectionState = state.connectionState,
                 onClick = onOpenApiConfig
             )
         }
@@ -665,7 +701,7 @@ private fun SelectedInstanceModsBanner(
 
             if (!env.isModdedLoader) {
                 Text(
-                    text = "This instance is detected as ${env.loaderType.name}. Installing Forge/NeoForge/Fabric/Quilt mods is blocked until a mod loader is installed.",
+                    text = "This instance is detected as ${env.loaderType.name}. Install a compatible mod loader (Forge, NeoForge, Fabric, or Quilt) to enable mod installations.",
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherColors.TierTestedFg
                 )
@@ -679,7 +715,22 @@ private fun SelectedInstanceModsBanner(
                 overflow = TextOverflow.Ellipsis
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
+                verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+            ) {
+                if (!env.isModdedLoader) {
+                    AetherPrimaryButton(
+                        text = "Install Mod Loader",
+                        onClick = onOpenInstallLoader,
+                        icon = AetherIcons.Download
+                    )
+                } else {
+                    AetherOutlinedButton(
+                        text = "Change Mod Loader",
+                        onClick = onOpenInstallLoader
+                    )
+                }
                 AetherOutlinedButton(
                     text = "Switch Instance",
                     onClick = onSwitchInstanceClick
@@ -700,15 +751,21 @@ private fun SelectedInstanceModsBanner(
 @Composable
 private fun CredentialStatusChip(
     status: CurseForgeCredentialStatus,
+    connectionState: CurseForgeConnectionState = when (status) {
+        CurseForgeCredentialStatus.UNCONFIGURED -> CurseForgeConnectionState.CONFIGURATION_REQUIRED
+        else -> CurseForgeConnectionState.CONNECTED
+    },
     onClick: () -> Unit
 ) {
-    val (label, fg, bg) = when (status) {
-        CurseForgeCredentialStatus.BACKEND_PROXY_CONFIGURED ->
-            Triple("Proxy Active", AetherColors.TierVerifiedFg, AetherColors.TierVerifiedBg)
-        CurseForgeCredentialStatus.DEVELOPER_VAULT_KEY_CONFIGURED ->
-            Triple("Vault Key", AetherColors.AccentCyan, AetherColors.PrimaryContainerDark)
-        CurseForgeCredentialStatus.UNCONFIGURED ->
-            Triple("API Unconfigured", AetherColors.TierTestedFg, AetherColors.TierTestedBg)
+    val (label, fg, bg) = when (connectionState) {
+        CurseForgeConnectionState.CONNECTED ->
+            Triple("Connected", AetherColors.TierVerifiedFg, AetherColors.TierVerifiedBg)
+        CurseForgeConnectionState.CONFIGURATION_REQUIRED ->
+            Triple("Configuration Required", AetherColors.TierTestedFg, AetherColors.TierTestedBg)
+        CurseForgeConnectionState.CONNECTION_FAILED ->
+            Triple("Connection Failed", AetherColors.TierBlockedFg, AetherColors.TierBlockedBg)
+        CurseForgeConnectionState.CHECKING ->
+            Triple("Checking...", AetherColors.AccentCyan, AetherColors.PrimaryContainerDark)
     }
     Surface(
         onClick = onClick,
@@ -1151,7 +1208,8 @@ private fun MyModsToolbarCard(
                     text = if (state.isCheckingUpdates) "Checking..." else "Check Updates",
                     onClick = onCheckUpdates,
                     enabled = !state.isCheckingUpdates &&
-                        state.credentialStatus != CurseForgeCredentialStatus.UNCONFIGURED,
+                        (state.credentialStatus != CurseForgeCredentialStatus.UNCONFIGURED ||
+                            state.connectionState == CurseForgeConnectionState.CONNECTED),
                     containerColor = AetherColors.PrimaryContainerDark,
                     contentColor = AetherColors.OnPrimaryContainerDark
                 )
@@ -1431,7 +1489,8 @@ fun InfoBadgePill(
 fun ModInstallPlanDialog(
     dialogState: PendingPlanDialogState,
     onConfirm: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onInstallModLoader: ((ModLoaderType?) -> Unit)? = null
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1478,6 +1537,13 @@ fun ModInstallPlanDialog(
                             style = MaterialTheme.typography.bodySmall,
                             color = if (item.compatibility.canInstall) AetherColors.OnSurfaceDark else AetherColors.TierBlockedFg
                         )
+                        item.compatibility.reasons.forEach { reason ->
+                            Text(
+                                text = "  ↳ $reason",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (item.compatibility.canInstall) AetherColors.OnSurfaceVariantDark else AetherColors.TierTestedFg
+                            )
+                        }
                     }
 
                     if (plan.alreadyInstalledDependencies.isNotEmpty()) {
@@ -1534,14 +1600,26 @@ fun ModInstallPlanDialog(
         },
         confirmButton = {
             val plan = dialogState.plan
-            TextButton(
-                onClick = onConfirm,
-                enabled = !dialogState.isBuilding && plan != null && plan.canProceed
-            ) {
-                Text(
-                    text = if (dialogState.requiresOverwriteConfirmation) "Confirm Replace & Install" else "Download & Install",
-                    color = AetherColors.AccentCyan
-                )
+            val rootAssessment = plan?.rootItem?.compatibility
+            if (rootAssessment?.requiresModLoaderInstall == true && onInstallModLoader != null) {
+                TextButton(
+                    onClick = { onInstallModLoader(rootAssessment.suggestedModLoader) }
+                ) {
+                    Text(
+                        text = "Install Mod Loader",
+                        color = AetherColors.AccentCyan
+                    )
+                }
+            } else {
+                TextButton(
+                    onClick = onConfirm,
+                    enabled = !dialogState.isBuilding && plan != null && plan.canProceed
+                ) {
+                    Text(
+                        text = if (dialogState.requiresOverwriteConfirmation) "Confirm Replace & Install" else "Download & Install",
+                        color = AetherColors.AccentCyan
+                    )
+                }
             }
         },
         dismissButton = {
@@ -1654,10 +1732,14 @@ private fun InstanceSelectorDialog(
 @Composable
 private fun CurseForgeCredentialDialog(
     status: CurseForgeCredentialStatus,
+    connectionState: CurseForgeConnectionState = CurseForgeConnectionState.CONFIGURATION_REQUIRED,
+    connectionMessage: String? = null,
+    isTestingConnection: Boolean = false,
     errorMessage: String?,
     onSaveDeveloperKey: (String) -> Unit,
     onSaveProxyConfig: (String, String?) -> Unit,
     onClearCredentials: () -> Unit,
+    onTestConnection: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     var useProxyMode by remember(status) {
@@ -1669,12 +1751,46 @@ private fun CurseForgeCredentialDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("CurseForge API Credentials") },
+        title = { Text("CurseForge API Configuration") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)
             ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Status: ${connectionState.displayLabel}",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        color = when (connectionState) {
+                            CurseForgeConnectionState.CONNECTED -> AetherColors.TierVerifiedFg
+                            CurseForgeConnectionState.CONFIGURATION_REQUIRED -> AetherColors.TierTestedFg
+                            CurseForgeConnectionState.CONNECTION_FAILED -> AetherColors.TierBlockedFg
+                            CurseForgeConnectionState.CHECKING -> AetherColors.AccentCyan
+                        }
+                    )
+                    TextButton(
+                        onClick = onTestConnection,
+                        enabled = !isTestingConnection
+                    ) {
+                        Text(
+                            text = if (isTestingConnection) "Testing..." else "Test Connection",
+                            color = AetherColors.AccentCyan
+                        )
+                    }
+                }
+
+                if (!connectionMessage.isNullOrBlank()) {
+                    Text(
+                        text = connectionMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AetherColors.OnSurfaceVariantDark
+                    )
+                }
+
                 Text(
                     text = "Secrets are stored exclusively inside Android Keystore Vault (AES-256-GCM) and never logged or bundled into APK assets.",
                     style = MaterialTheme.typography.bodySmall,
@@ -1716,7 +1832,7 @@ private fun CurseForgeCredentialDialog(
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         label = { Text("CurseForge Developer API Key") },
-                        placeholder = { Text("$2a$10$...") }
+                        placeholder = { Text("\$2a\$10\$...") }
                     )
                 }
 
@@ -1751,6 +1867,178 @@ private fun CurseForgeCredentialDialog(
                 }
                 TextButton(onClick = onDismiss) {
                     Text("Cancel")
+                }
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun InstallModLoaderDialog(
+    state: ModsUiState,
+    onSelectLoaderType: (ModLoaderType) -> Unit,
+    onSelectCandidate: (ModLoaderCandidate) -> Unit,
+    onRefreshCandidates: () -> Unit,
+    onStartInstall: () -> Unit,
+    onCancelInstall: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val env = state.instanceEnvironment
+    val mcVersion = env?.baseMinecraftVersion ?: "Unknown"
+    val progress = state.modLoaderInstallProgress
+
+    AlertDialog(
+        onDismissRequest = { if (!state.isInstallingModLoader) onDismiss() },
+        title = {
+            Text("Install Mod Loader")
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)
+            ) {
+                Text(
+                    text = "Instance: ${env?.instanceName ?: "None"} • Minecraft $mcVersion",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                    color = AetherColors.AccentCyan
+                )
+                Text(
+                    text = "Existing worlds, saves, resource packs, and configurations in '${env?.instanceName ?: "instance"}' will be preserved.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherColors.OnSurfaceVariantDark
+                )
+
+                Text(
+                    text = "Select Mod Loader",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = AetherColors.OnSurfaceDark
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Xs),
+                    verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+                ) {
+                    ModLoaderInstaller.SUPPORTED_INSTALL_LOADERS.forEach { loader ->
+                        FilterChip(
+                            selected = state.installLoaderSelectedType == loader,
+                            onClick = { onSelectLoaderType(loader) },
+                            enabled = !state.isInstallingModLoader,
+                            label = { Text(loader.name) }
+                        )
+                    }
+                }
+
+                if (state.isInstallingModLoader && progress != null) {
+                    AetherSurfaceCard(
+                        containerColor = AetherColors.SurfaceElevatedDark
+                    ) {
+                        Text(
+                            text = progress.stage.displayTitle,
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = AetherColors.AccentCyan
+                        )
+                        LinearProgressIndicator(
+                            progress = { progress.fraction },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = AetherColors.AccentCyan
+                        )
+                        if (!progress.currentItem.isNullOrBlank()) {
+                            Text(
+                                text = progress.currentItem,
+                                style = AetherMonoStyle,
+                                color = AetherColors.OnSurfaceVariantDark
+                            )
+                        }
+                    }
+                } else if (state.isLoadingLoaderCandidates) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), color = AetherColors.AccentCyan)
+                        Text(
+                            text = "Fetching compatible ${state.installLoaderSelectedType.name} versions for Minecraft $mcVersion...",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                } else if (!state.loaderCandidatesError.isNullOrBlank()) {
+                    Text(
+                        text = state.loaderCandidatesError,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AetherColors.TierBlockedFg
+                    )
+                    AetherOutlinedButton(
+                        text = "Retry Fetching Versions",
+                        onClick = onRefreshCandidates
+                    )
+                } else {
+                    Text(
+                        text = "Compatible ${state.installLoaderSelectedType.name} Versions (${state.installLoaderCandidates.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = AetherColors.OnSurfaceDark
+                    )
+                    state.installLoaderCandidates.take(15).forEach { candidate ->
+                        val isSelected = state.installLoaderSelectedCandidate?.loaderVersion == candidate.loaderVersion
+                        AetherSurfaceCard(
+                            onClick = { onSelectCandidate(candidate) },
+                            borderColor = if (isSelected) AetherColors.AccentCyan else AetherColors.OutlineVariantDark
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = candidate.displayLabel,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    ),
+                                    color = if (isSelected) AetherColors.AccentCyan else AetherColors.OnSurfaceDark
+                                )
+                                if (candidate.isRecommended) {
+                                    InfoBadgePill(
+                                        text = "Recommended",
+                                        fg = AetherColors.TierVerifiedFg,
+                                        bg = AetherColors.TierVerifiedBg
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!state.modLoaderInstallError.isNullOrBlank()) {
+                    Text(
+                        text = state.modLoaderInstallError,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AetherColors.TierBlockedFg
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (!state.isInstallingModLoader) {
+                TextButton(
+                    onClick = onStartInstall,
+                    enabled = state.installLoaderSelectedCandidate != null && !state.isLoadingLoaderCandidates
+                ) {
+                    Text(
+                        text = "Install ${state.installLoaderSelectedType.name}",
+                        color = AetherColors.AccentCyan
+                    )
+                }
+            }
+        },
+        dismissButton = {
+            if (state.isInstallingModLoader) {
+                TextButton(onClick = onCancelInstall) {
+                    Text("Cancel Installation", color = AetherColors.TierBlockedFg)
+                }
+            } else {
+                TextButton(onClick = onDismiss) {
+                    Text("Close")
                 }
             }
         }
