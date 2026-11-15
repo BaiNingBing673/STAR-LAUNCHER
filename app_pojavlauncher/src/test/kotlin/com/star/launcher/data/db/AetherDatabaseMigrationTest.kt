@@ -35,6 +35,8 @@ class AetherDatabaseMigrationTest {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_runtime_registry_majorVersion_arch` ON `runtime_registry` (`majorVersion`, `arch`)")
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_runtime_registry_installPath` ON `runtime_registry` (`installPath`)")
                 db.execSQL("CREATE TABLE IF NOT EXISTS `renderer_profiles` (`profileId` TEXT NOT NULL, `rendererId` TEXT NOT NULL, `displayName` TEXT NOT NULL, `backendConfigJson` TEXT NOT NULL, `useAngle` INTEGER NOT NULL, `preferSystemDriver` INTEGER NOT NULL, `isDefault` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`profileId`))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_renderer_profiles_rendererId` ON `renderer_profiles` (`rendererId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_renderer_profiles_isDefault` ON `renderer_profiles` (`isDefault`)")
                 db.execSQL("CREATE TABLE IF NOT EXISTS `game_versions` (`versionId` TEXT NOT NULL, `inheritsFrom` TEXT, `versionType` TEXT NOT NULL, `modLoaderType` TEXT NOT NULL, `modLoaderVersion` TEXT, `requiredJavaMajor` INTEGER NOT NULL, `lwjglMajor` INTEGER NOT NULL, `manifestPath` TEXT NOT NULL, `isInstalled` INTEGER NOT NULL, `releaseTimeEpochMs` INTEGER NOT NULL, PRIMARY KEY(`versionId`))")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_game_versions_inheritsFrom` ON `game_versions` (`inheritsFrom`)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_game_versions_modLoaderType_isInstalled` ON `game_versions` (`modLoaderType`, `isInstalled`)")

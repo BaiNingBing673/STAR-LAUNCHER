@@ -81,8 +81,9 @@ jobs:
                           err = tc.find('error')
                       if err is not None:
                           found = True
-                          msg = (err.attrib.get('message') or '').replace('\n', ' ')[:500]
-                          print(f"::error file={path}::{tc.attrib.get('classname')}.{tc.attrib.get('name')}: {msg}")
+                          msg = (err.attrib.get('message') or '').replace('\n', ' ')[:300]
+                          stack_head = " | ".join(line.strip() for line in (err.text or "").splitlines()[:10] if line.strip())[:700]
+                          print(f"::error file={path}::{tc.attrib.get('classname')}.{tc.attrib.get('name')}: {msg} || {stack_head}")
                           if err.text:
                               print(err.text[:1500])
               except Exception as exc:
