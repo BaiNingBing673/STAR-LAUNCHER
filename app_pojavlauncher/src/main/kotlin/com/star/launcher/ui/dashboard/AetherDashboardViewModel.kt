@@ -50,6 +50,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -759,6 +760,7 @@ class AetherDashboardController(
                 val runtimes = runCatching { runtimeFacade?.listInstalledRuntimes().orEmpty() }.getOrDefault(emptyList())
                 val renderers = runCatching { rendererFacade?.listSupportedRenderers().orEmpty() }.getOrDefault(emptyList())
                 runCatching { instanceManager.syncRuntimesAndRenderers(runtimes, renderers) }
+                ensureActive()
 
                 val capabilities = capabilityProbe.probe()
                 val missingLibs = nativeEngineAdapter.verifyEngineLibrariesPresent()
@@ -983,6 +985,7 @@ class AetherDashboardController(
 
     fun evaluateInstanceCompatibility(instance: GameInstanceEntity) {
         scope.launch(ioDispatcher) {
+            ensureActive()
             val capabilities = capabilityProbe.probe()
             val version = instance.versionId?.let { versionManager.getVersion(it) }
             val runtime = uiState.value.runtimes.firstOrNull { it.runtimeId == instance.runtimeId }

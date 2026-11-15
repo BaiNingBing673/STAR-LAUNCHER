@@ -199,5 +199,15 @@ class AetherContainer(context: Context) {
             val current = instance ?: return
             CrossProcessSpoolBridge.flushDatabaseWal(current.database)
         }
+
+        @JvmStatic
+        @androidx.annotation.VisibleForTesting
+        fun resetForTesting() {
+            synchronized(this) {
+                instance = null
+                instanceContext = null
+            }
+            com.star.launcher.data.db.AetherDatabase.closeAndResetForTesting()
+        }
     }
 }

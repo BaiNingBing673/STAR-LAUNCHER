@@ -90,7 +90,9 @@ import com.star.launcher.version.VersionFilter
 import com.star.launcher.version.VersionSort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
@@ -110,6 +112,7 @@ import java.io.File
 class AetherDashboardActivity : ComponentActivity() {
     val stateViewModel: AetherDashboardStateViewModel by viewModels()
     private var installTracker: ModloaderInstallTracker? = null
+    private var firstLaunchGraphicsJob: Job? = null
 
     private val modInstallerLauncher = registerForActivityResult(
         OpenDocumentWithExtension("jar")
@@ -399,17 +402,27 @@ class AetherDashboardActivity : ComponentActivity() {
         installTracker?.attach()
         if (!firstLaunchGraphicsChecked) {
             firstLaunchGraphicsChecked = true
-            lifecycleScope.launch(Dispatchers.IO) {
+            val appContext = applicationContext ?: this
+            firstLaunchGraphicsJob = lifecycleScope.launch(Dispatchers.IO) {
                 runCatching {
-                    val container = AetherContainer.get(this@AetherDashboardActivity)
+                    val container = AetherContainer.get(appContext)
+                    ensureActive()
+                    val snapshot = container.capabilityProbe.probe()
+                    ensureActive()
                     com.star.launcher.compat.AdaptiveGraphicsManager.initializeDefaultsOnFirstLaunch(
-                        this@AetherDashboardActivity,
-                        container.capabilityProbe.probe()
+                        appContext,
+                        snapshot
                     )
                 }
             }
         }
         stateViewModel.controller.refreshEnvironmentAndSpools()
+    }
+
+    override fun onDestroy() {
+        firstLaunchGraphicsJob?.cancel()
+        firstLaunchGraphicsJob = null
+        super.onDestroy()
     }
 
     override fun onTrimMemory(level: Int) {
@@ -575,6 +588,11 @@ class AetherDashboardActivity : ComponentActivity() {
 
         @Volatile
         private var firstLaunchGraphicsChecked = false
+
+        @androidx.annotation.VisibleForTesting
+        internal fun resetForTesting() {
+            firstLaunchGraphicsChecked = false
+        }
 
         @JvmStatic
         fun createIntent(context: Context): Intent =

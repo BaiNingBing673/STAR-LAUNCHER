@@ -2,8 +2,11 @@ package com.star.launcher.ui.navigation
 
 import android.content.Context
 import android.os.Looper
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.star.launcher.core.AetherContainer
 import com.star.launcher.core.AetherSettingsRepository
 import com.star.launcher.core.AetherStorageManager
 import com.star.launcher.data.db.AetherDatabase
@@ -25,9 +28,13 @@ import com.star.launcher.mods.ui.ModsErrorKind
 import com.star.launcher.ui.dashboard.AetherDashboardActivity
 import com.star.launcher.ui.dashboard.DashboardTab
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -38,6 +45,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows
+import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -46,6 +54,44 @@ class ModsNavigationAndUiTest {
 
     @get:Rule
     val tempFolder = TemporaryFolder()
+
+    private val trackedControllers = mutableListOf<ActivityController<AetherDashboardActivity>>()
+    private val trackedJobs = mutableListOf<Job>()
+
+    private fun trackDashboard(
+        controller: ActivityController<AetherDashboardActivity>
+    ): AetherDashboardActivity {
+        if (controller !in trackedControllers) {
+            trackedControllers += controller
+        }
+        val activity = controller.get()
+        trackedJobs += activity.lifecycleScope.coroutineContext.job
+        trackedJobs += activity.stateViewModel.viewModelScope.coroutineContext.job
+        return activity
+    }
+
+    @After
+    fun tearDown() {
+        trackedControllers.forEach { controller ->
+            if (!controller.get().isDestroyed) {
+                runCatching { controller.pause().stop().destroy() }
+            }
+        }
+        trackedControllers.clear()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        runBlocking {
+            withTimeoutOrNull(10_000) {
+                trackedJobs.forEach { job ->
+                    job.cancel()
+                    job.join()
+                }
+            }
+        }
+        trackedJobs.clear()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        AetherDashboardActivity.resetForTesting()
+        AetherContainer.resetForTesting()
+    }
 
     @Test
     fun `mods tab and mod detail route navigate and restore across recreation`() {
@@ -59,7 +105,7 @@ class ModsNavigationAndUiTest {
             .create()
             .start()
             .resume()
-        val activity = controller.get()
+        val activity = trackDashboard(controller)
 
         activity.stateViewModel.onTabSelected(DashboardTab.MODS)
         assertEquals(AetherRoute.Tab(DashboardTab.MODS), activity.stateViewModel.navigation.currentRoute)
@@ -71,7 +117,7 @@ class ModsNavigationAndUiTest {
         assertEquals(DashboardTab.MODS, activity.stateViewModel.controller.uiState.value.selectedTab)
 
         controller.recreate()
-        val recreated = controller.get()
+        val recreated = trackDashboard(controller)
         assertEquals(AetherRoute.ModDetail(394468L), recreated.stateViewModel.navigation.currentRoute)
 
         recreated.onBackPressedDispatcher.onBackPressed()

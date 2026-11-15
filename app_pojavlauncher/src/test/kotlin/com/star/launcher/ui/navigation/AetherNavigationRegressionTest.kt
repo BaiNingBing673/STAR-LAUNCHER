@@ -1,12 +1,16 @@
 package com.star.launcher.ui.navigation
 
-import androidx.appcompat.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.Looper
+import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewModelScope
 import androidx.test.core.app.ApplicationProvider
+import com.star.launcher.core.AetherContainer
 import com.star.launcher.engine.adapter.AetherLaunchPayload
 import com.star.launcher.engine.adapter.AuthAdapter
 import com.star.launcher.engine.adapter.EnginePreferencesAdapter
@@ -23,6 +27,11 @@ import net.kdt.pojavlaunch.LauncherActivity
 import net.kdt.pojavlaunch.MainActivity
 import net.kdt.pojavlaunch.TestStorageActivity
 import net.kdt.pojavlaunch.lifecycle.ContextAwareDoneListener
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.job
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -34,6 +43,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows
+import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowAlertDialog
 
@@ -41,13 +51,57 @@ import org.robolectric.shadows.ShadowAlertDialog
 @Config(sdk = [34])
 class AetherNavigationRegressionTest {
 
-    @Test
-    fun `flow 1 launch app home settings home stays exclusively in AetherDashboardActivity`() {
+    private val trackedControllers = mutableListOf<ActivityController<out ComponentActivity>>()
+    private val trackedJobs = mutableListOf<Job>()
+
+    private fun launchDashboard(
+        savedInstanceState: Bundle? = null
+    ): Pair<ActivityController<AetherDashboardActivity>, AetherDashboardActivity> {
         val controller = Robolectric.buildActivity(AetherDashboardActivity::class.java)
-            .create()
+            .create(savedInstanceState)
             .start()
             .resume()
+        return controller to trackDashboard(controller)
+    }
+
+    private fun trackDashboard(
+        controller: ActivityController<AetherDashboardActivity>
+    ): AetherDashboardActivity {
+        if (controller !in trackedControllers) {
+            trackedControllers += controller
+        }
         val activity = controller.get()
+        trackedJobs += activity.lifecycleScope.coroutineContext.job
+        trackedJobs += activity.stateViewModel.viewModelScope.coroutineContext.job
+        return activity
+    }
+
+    @After
+    fun tearDown() {
+        trackedControllers.forEach { controller ->
+            if (!controller.get().isDestroyed) {
+                runCatching { controller.pause().stop().destroy() }
+            }
+        }
+        trackedControllers.clear()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        runBlocking {
+            withTimeoutOrNull(10_000) {
+                trackedJobs.forEach { job ->
+                    job.cancel()
+                    job.join()
+                }
+            }
+        }
+        trackedJobs.clear()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        AetherDashboardActivity.resetForTesting()
+        AetherContainer.resetForTesting()
+    }
+
+    @Test
+    fun `flow 1 launch app home settings home stays exclusively in AetherDashboardActivity`() {
+        val (controller, activity) = launchDashboard()
 
         assertEquals(AetherRoute.Tab(DashboardTab.HOME), activity.stateViewModel.navigation.currentRoute)
         assertEquals(DashboardTab.HOME, activity.stateViewModel.controller.uiState.value.selectedTab)
@@ -73,11 +127,7 @@ class AetherNavigationRegressionTest {
 
     @Test
     fun `flow 2 home library instance details back preserves stack cleanly`() {
-        val controller = Robolectric.buildActivity(AetherDashboardActivity::class.java)
-            .create()
-            .start()
-            .resume()
-        val activity = controller.get()
+        val (controller, activity) = launchDashboard()
 
         activity.stateViewModel.onTabSelected(DashboardTab.LIBRARY)
         activity.stateViewModel.navigation.push(AetherRoute.InstanceDetail("survival-world"))
@@ -97,11 +147,7 @@ class AetherNavigationRegressionTest {
 
     @Test
     fun `flow 3 home versions install progress back and modpack notification stay in Aether`() {
-        val controller = Robolectric.buildActivity(AetherDashboardActivity::class.java)
-            .create()
-            .start()
-            .resume()
-        val activity = controller.get()
+        val (controller, activity) = launchDashboard()
 
         activity.stateViewModel.onTabSelected(DashboardTab.VERSIONS)
         activity.stateViewModel.navigation.push(
@@ -133,11 +179,7 @@ class AetherNavigationRegressionTest {
 
     @Test
     fun `flow 4 runtime management runtime details back and settings subscreens stay in Aether`() {
-        val controller = Robolectric.buildActivity(AetherDashboardActivity::class.java)
-            .create()
-            .start()
-            .resume()
-        val activity = controller.get()
+        val (controller, activity) = launchDashboard()
 
         activity.stateViewModel.onTabSelected(DashboardTab.SETTINGS)
         activity.openRuntimeManagement()
@@ -174,11 +216,7 @@ class AetherNavigationRegressionTest {
 
     @Test
     fun `flow 5 community discord external link does not corrupt Aether stack`() {
-        val controller = Robolectric.buildActivity(AetherDashboardActivity::class.java)
-            .create()
-            .start()
-            .resume()
-        val activity = controller.get()
+        val (controller, activity) = launchDashboard()
 
         activity.stateViewModel.onTabSelected(DashboardTab.COMMUNITY)
         val outcome = DiscordLinkHelper.openDiscordInvite(activity, "https://discord.gg/aether-test")
@@ -228,6 +266,7 @@ class AetherNavigationRegressionTest {
             .create()
             .start()
             .resume()
+        trackedControllers += exitController
         val exitActivity = exitController.get()
 
         exitActivity.returnToAether()
@@ -235,6 +274,7 @@ class AetherNavigationRegressionTest {
         assertNotNull(returnedIntent)
         assertEquals(AetherDashboardActivity::class.java.name, returnedIntent.component?.className)
         assertTrue(exitActivity.isFinishing)
+        exitController.pause().stop().destroy()
 
         // Verify FatalErrorActivity Restart button also routes to AetherDashboardActivity, never LauncherActivity
         val errorIntent = Intent(ApplicationProvider.getApplicationContext(), FatalErrorActivity::class.java).apply {
@@ -246,21 +286,19 @@ class AetherNavigationRegressionTest {
             .create()
             .start()
             .resume()
+        trackedControllers += fatalController
         val dialog = ShadowAlertDialog.getLatestDialog() as AlertDialog
         dialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
         Shadows.shadowOf(Looper.getMainLooper()).idle()
         val restartIntent = Shadows.shadowOf(fatalController.get()).nextStartedActivity
         assertNotNull(restartIntent)
         assertEquals(AetherDashboardActivity::class.java.name, restartIntent.component?.className)
+        fatalController.pause().stop().destroy()
     }
 
     @Test
     fun `flow 8 screen rotation preserves active nested Aether route and back stack`() {
-        val controller = Robolectric.buildActivity(AetherDashboardActivity::class.java)
-            .create()
-            .start()
-            .resume()
-        val initial = controller.get()
+        val (controller, initial) = launchDashboard()
 
         initial.stateViewModel.onTabSelected(DashboardTab.SETTINGS)
         initial.openRuntimeManagement()
@@ -268,7 +306,7 @@ class AetherNavigationRegressionTest {
         initial.stateViewModel.syncControllerWithCurrentRoute()
 
         controller.recreate()
-        val rotated = controller.get()
+        val rotated = trackDashboard(controller)
 
         assertEquals(
             AetherRoute.RuntimeDetail("Internal-21"),
@@ -284,11 +322,7 @@ class AetherNavigationRegressionTest {
     @Test
     fun `flow 9 process recreation restores exact Aether destination from SavedStateHandle`() {
         val savedBundle = Bundle()
-        val firstController = Robolectric.buildActivity(AetherDashboardActivity::class.java)
-            .create()
-            .start()
-            .resume()
-        val firstActivity = firstController.get()
+        val (firstController, firstActivity) = launchDashboard()
 
         firstActivity.stateViewModel.onTabSelected(DashboardTab.LIBRARY)
         firstActivity.stateViewModel.navigation.push(AetherRoute.InstanceDetail("modded-fabric"))
@@ -297,11 +331,7 @@ class AetherNavigationRegressionTest {
         firstController.saveInstanceState(savedBundle).pause().stop().destroy()
 
         // Recreate a brand-new Activity instance simulating OS process kill & restart
-        val restoredController = Robolectric.buildActivity(AetherDashboardActivity::class.java)
-            .create(savedBundle)
-            .start()
-            .resume()
-        val restored = restoredController.get()
+        val (restoredController, restored) = launchDashboard(savedBundle)
 
         assertEquals(
             AetherRoute.InstanceDetail("modded-fabric"),

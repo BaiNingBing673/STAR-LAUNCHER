@@ -201,8 +201,8 @@ class AndroidDeviceCapabilityProbe(
             val dm = appContext.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
             val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
             val metrics = appContext.resources.displayMetrics
-            val w = display?.mode?.physicalWidth ?: metrics.widthPixels
-            val h = display?.mode?.physicalHeight ?: metrics.heightPixels
+            val w = display?.mode?.physicalWidth?.takeIf { it > 0 } ?: metrics.widthPixels
+            val h = display?.mode?.physicalHeight?.takeIf { it > 0 } ?: metrics.heightPixels
             val rates = if (display != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 buildList {
                     add(display.mode.refreshRate.toInt())

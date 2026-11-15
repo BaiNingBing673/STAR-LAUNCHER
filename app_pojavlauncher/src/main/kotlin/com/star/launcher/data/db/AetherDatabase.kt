@@ -134,6 +134,16 @@ abstract class AetherDatabase : RoomDatabase() {
             }
         }
 
+        @JvmStatic
+        @androidx.annotation.VisibleForTesting
+        fun closeAndResetForTesting() {
+            synchronized(this) {
+                runCatching { instance?.close() }
+                instance = null
+                instanceContext = null
+            }
+        }
+
         private fun buildDatabase(appContext: Context): AetherDatabase =
             Room.databaseBuilder(
                 appContext,
