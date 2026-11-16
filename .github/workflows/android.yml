@@ -18,6 +18,11 @@ permissions:
 jobs:
   verify-and-debug:
     runs-on: ubuntu-22.04
+    outputs:
+      version_name: ${{ steps.meta.outputs.version_name }}
+      version_code: ${{ steps.meta.outputs.version_code }}
+      apk_sha256: ${{ steps.package.outputs.apk_sha256 }}
+      zip_sha256: ${{ steps.package.outputs.zip_sha256 }}
     steps:
       - name: Checkout repository and submodules
         uses: actions/checkout@v4
@@ -42,6 +47,7 @@ jobs:
       - name: Update language list and read version metadata
         id: meta
         run: |
+          set -euo pipefail
           ./scripts/languagelist_updater.sh
           mkdir -p out logs
           VERSION_NAME=$(grep -m1 'starVersionName\s*=' app_pojavlauncher/build.gradle | sed -E 's/.*"(.*)".*/\1/')
@@ -51,9 +57,10 @@ jobs:
           echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
 
-      - name: Run unit tests
+      - name: Run unit and packaging tests
         run: |
           set -o pipefail
+          python3 -m unittest discover -s scripts -p "test_*.py" -v 2>&1 | tee logs/packaging-tests.log
           ./gradlew :MioLibPatcher:test :app_pojavlauncher:testDebugUnitTest --no-daemon --console=plain 2>&1 | tee logs/unit-tests.log
 
       - name: Report failed test details
@@ -95,20 +102,39 @@ jobs:
           branch: buildjre8
           name: jre8-pojav
 
-      - name: Build Debug APK
+      - name: Build Debug APK and package conservative ZIP
+        id: package
         env:
           CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
         run: |
-          set -o pipefail
+          set -euo pipefail
           ./gradlew :app_pojavlauncher:assembleDebug --no-daemon --console=plain 2>&1 | tee logs/assemble-debug.log
-          APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk"
-          cp app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk "$APK_OUT"
-          (cd out && sha256sum "$(basename "$APK_OUT")" > "$(basename "$APK_OUT").sha256")
+          mkdir -p out/artifact-debug
+          APK_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk"
+          ZIP_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.zip"
+          APK_OUT="out/artifact-debug/$APK_NAME"
+          ZIP_OUT="out/artifact-debug/$ZIP_NAME"
 
-      - name: Verify Debug APK metadata, signature, and ABIs
+          cp app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk "$APK_OUT"
+          (cd out/artifact-debug && sha256sum "$APK_NAME" > "${APK_NAME}.sha256")
+          python3 scripts/package_release_zip.py \
+            --apk "$APK_OUT" \
+            --apk-sha256 "${APK_OUT}.sha256" \
+            --out "$ZIP_OUT" \
+            --compression stored
+
+          APK_SHA256=$(awk '{print tolower($1)}' "${APK_OUT}.sha256")
+          ZIP_SHA256=$(awk '{print tolower($1)}' "${ZIP_OUT}.sha256")
+          echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
+          echo "zip_sha256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Debug APK metadata, signature, ABIs, and conservative ZIP
         run: |
           set -euo pipefail
-          APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk"
+          APK_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk"
+          ZIP_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.zip"
+          APK_OUT="out/artifact-debug/$APK_NAME"
+          ZIP_OUT="out/artifact-debug/$ZIP_NAME"
           SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           BUILD_TOOLS_DIR=$(find "$SDK_DIR/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
           if [ -z "$BUILD_TOOLS_DIR" ]; then
@@ -126,14 +152,20 @@ jobs:
           for abi in arm64-v8a armeabi-v7a x86 x86_64; do
             grep -q "lib/$abi/libpojavexec.so" logs/debug-native-libs.txt
           done
+          python3 scripts/verify_release_package.py \
+            --zip "$ZIP_OUT" \
+            --expected-apk-name "$APK_NAME" \
+            --expected-apk-sha256 "${{ steps.package.outputs.apk_sha256 }}" \
+            --expected-package "com.star.launcher.debug" \
+            --apksigner "$BUILD_TOOLS_DIR/apksigner" \
+            --aapt2 "$BUILD_TOOLS_DIR/aapt2" | tee logs/debug-zip-verify.txt
 
-      - name: Upload Debug APK and SHA-256
+      - name: Upload Debug APK, conservative ZIP, and SHA-256
         uses: actions/upload-artifact@v4
         with:
           name: STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug
-          path: |
-            out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk
-            out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}-debug.apk.sha256
+          path: out/artifact-debug/
+          if-no-files-found: error
 
       - name: Upload Debug & Test Logs
         if: always()
@@ -146,9 +178,13 @@ jobs:
             app_pojavlauncher/build/reports/tests/
 
   release:
-    needs: verify-and-debug
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
+    outputs:
+      version_name: ${{ steps.meta.outputs.version_name }}
+      version_code: ${{ steps.meta.outputs.version_code }}
+      apk_sha256: ${{ steps.package.outputs.apk_sha256 }}
+      zip_sha256: ${{ steps.package.outputs.zip_sha256 }}
     steps:
       - name: Checkout repository and submodules
         uses: actions/checkout@v4
@@ -189,6 +225,11 @@ jobs:
             fi
           fi
 
+      - name: Run packaging verification tests
+        run: |
+          set -o pipefail
+          python3 -m unittest discover -s scripts -p "test_*.py" -v 2>&1 | tee logs/release-packaging-tests.log
+
       - name: Validate production signing secrets and decode keystore
         env:
           STAR_KEYSTORE_BASE64: ${{ secrets.STAR_KEYSTORE_BASE64 }}
@@ -216,7 +257,8 @@ jobs:
           branch: buildjre8
           name: jre8-pojav
 
-      - name: Prepare language list & build signed Release APK
+      - name: Prepare language list, build signed Release APK, and package conservative ZIP
+        id: package
         env:
           STAR_KEYSTORE_FILE: ${{ runner.temp }}/star-release.jks
           STAR_KEYSTORE_PASSWORD: ${{ secrets.STAR_KEYSTORE_PASSWORD }}
@@ -227,9 +269,24 @@ jobs:
           set -euo pipefail
           ./scripts/languagelist_updater.sh
           ./gradlew :app_pojavlauncher:assembleRelease --no-daemon --console=plain 2>&1 | tee logs/assemble-release.log
-          APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          mkdir -p out/artifact-release
+          APK_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          ZIP_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.zip"
+          APK_OUT="out/artifact-release/$APK_NAME"
+          ZIP_OUT="out/artifact-release/$ZIP_NAME"
+
           cp app_pojavlauncher/build/outputs/apk/release/app_pojavlauncher-release.apk "$APK_OUT"
-          (cd out && sha256sum "$(basename "$APK_OUT")" > "$(basename "$APK_OUT").sha256")
+          (cd out/artifact-release && sha256sum "$APK_NAME" > "${APK_NAME}.sha256")
+          python3 scripts/package_release_zip.py \
+            --apk "$APK_OUT" \
+            --apk-sha256 "${APK_OUT}.sha256" \
+            --out "$ZIP_OUT" \
+            --compression stored
+
+          APK_SHA256=$(awk '{print tolower($1)}' "${APK_OUT}.sha256")
+          ZIP_SHA256=$(awk '{print tolower($1)}' "${ZIP_OUT}.sha256")
+          echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
+          echo "zip_sha256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Report failed release build details
         if: failure()
@@ -238,12 +295,15 @@ jobs:
             tail -n 120 logs/assemble-release.log || true
           fi
 
-      - name: Verify Release APK metadata, signature, and ABIs
+      - name: Verify Release APK metadata, signature, ABIs, and conservative ZIP
         env:
           STAR_EXPECTED_CERT_SHA256: ${{ secrets.STAR_EXPECTED_CERT_SHA256 }}
         run: |
           set -euo pipefail
-          APK_OUT="out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          APK_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          ZIP_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.zip"
+          APK_OUT="out/artifact-release/$APK_NAME"
+          ZIP_OUT="out/artifact-release/$ZIP_NAME"
           SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           BUILD_TOOLS_DIR=$(find "$SDK_DIR/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
           if [ -z "$BUILD_TOOLS_DIR" ]; then
@@ -258,7 +318,7 @@ jobs:
           grep -q "targetSdkVersion:'34'" logs/release-badging.txt
           "$BUILD_TOOLS_DIR/apksigner" verify --print-certs --verbose "$APK_OUT" | tee logs/release-apksigner.txt
           ACTUAL_SHA256=$(grep -E -m1 "(Signer #1|V[0-9]+ Signer:) certificate SHA-256 digest:" logs/release-apksigner.txt | awk '{print tolower($NF)}')
-          DEBUG_SHA256="d0d0886a0d7e3486e6627f9b09424530b6d7be14f8c2cc33"
+          DEBUG_SHA256="d0d0886a0d7e3486e6627f9b8011027fe3c6b0fb09424530b6d7be14f8c2cc33"
           if [ -z "$ACTUAL_SHA256" ] || [ "${ACTUAL_SHA256#$DEBUG_SHA256}" != "$ACTUAL_SHA256" ]; then
             echo "::error::Release APK appears unsigned or signed with the debug certificate."
             exit 1
@@ -271,18 +331,26 @@ jobs:
           for abi in arm64-v8a armeabi-v7a x86 x86_64; do
             grep -q "lib/$abi/libpojavexec.so" logs/release-native-libs.txt
           done
+          python3 scripts/verify_release_package.py \
+            --zip "$ZIP_OUT" \
+            --expected-apk-name "$APK_NAME" \
+            --expected-apk-sha256 "${{ steps.package.outputs.apk_sha256 }}" \
+            --expected-package "com.star.launcher" \
+            --apksigner "$BUILD_TOOLS_DIR/apksigner" \
+            --aapt2 "$BUILD_TOOLS_DIR/aapt2" \
+            --forbid-debug-cert \
+            ${STAR_EXPECTED_CERT_SHA256:+--expected-cert-sha256 "$STAR_EXPECTED_CERT_SHA256"} | tee logs/release-zip-verify.txt
 
       - name: Clean up temporary keystore
         if: always()
         run: rm -f "$RUNNER_TEMP/star-release.jks"
 
-      - name: Upload Release APK and SHA-256
+      - name: Upload Release APK, conservative ZIP, and SHA-256
         uses: actions/upload-artifact@v4
         with:
           name: STAR-Launcher-v${{ steps.meta.outputs.version_name }}
-          path: |
-            out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk
-            out/STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk.sha256
+          path: out/artifact-release/
+          if-no-files-found: error
 
       - name: Upload Release Verification Logs
         if: always()
@@ -291,8 +359,101 @@ jobs:
           name: ci-release-logs
           path: logs/
 
+  verify-debug-artifact:
+    needs: verify-and-debug
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Download uploaded Debug artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: STAR-Launcher-v${{ needs.verify-and-debug.outputs.version_name }}-debug
+          path: downloaded
+
+      - name: Verify downloaded Debug artifact matches tested artifact
+        run: |
+          set -euo pipefail
+          APK_NAME="STAR-Launcher-v${{ needs.verify-and-debug.outputs.version_name }}-debug.apk"
+          ZIP_NAME="STAR-Launcher-v${{ needs.verify-and-debug.outputs.version_name }}-debug.zip"
+          (cd downloaded && sha256sum -c "${APK_NAME}.sha256" && sha256sum -c "${ZIP_NAME}.sha256")
+          DL_APK_SHA=$(sha256sum "downloaded/$APK_NAME" | awk '{print tolower($1)}')
+          DL_ZIP_SHA=$(sha256sum "downloaded/$ZIP_NAME" | awk '{print tolower($1)}')
+          test "$DL_APK_SHA" = "${{ needs.verify-and-debug.outputs.apk_sha256 }}"
+          test "$DL_ZIP_SHA" = "${{ needs.verify-and-debug.outputs.zip_sha256 }}"
+
+          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          BUILD_TOOLS_DIR=$(find "$SDK_DIR/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$BUILD_TOOLS_DIR" ]; then
+            yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0" >/dev/null
+            BUILD_TOOLS_DIR="$SDK_DIR/build-tools/34.0.0"
+          fi
+          python3 scripts/verify_release_package.py \
+            --zip "downloaded/$ZIP_NAME" \
+            --expected-apk-name "$APK_NAME" \
+            --expected-apk-sha256 "${{ needs.verify-and-debug.outputs.apk_sha256 }}" \
+            --expected-package "com.star.launcher.debug" \
+            --apksigner "$BUILD_TOOLS_DIR/apksigner" \
+            --aapt2 "$BUILD_TOOLS_DIR/aapt2"
+
+  verify-release-artifact:
+    needs: release
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Download uploaded Release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: STAR-Launcher-v${{ needs.release.outputs.version_name }}
+          path: downloaded
+
+      - name: Verify downloaded Release artifact matches tested artifact
+        env:
+          STAR_EXPECTED_CERT_SHA256: ${{ secrets.STAR_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          APK_NAME="STAR-Launcher-v${{ needs.release.outputs.version_name }}.apk"
+          ZIP_NAME="STAR-Launcher-v${{ needs.release.outputs.version_name }}.zip"
+          (cd downloaded && sha256sum -c "${APK_NAME}.sha256" && sha256sum -c "${ZIP_NAME}.sha256")
+          DL_APK_SHA=$(sha256sum "downloaded/$APK_NAME" | awk '{print tolower($1)}')
+          DL_ZIP_SHA=$(sha256sum "downloaded/$ZIP_NAME" | awk '{print tolower($1)}')
+          test "$DL_APK_SHA" = "${{ needs.release.outputs.apk_sha256 }}"
+          test "$DL_ZIP_SHA" = "${{ needs.release.outputs.zip_sha256 }}"
+
+          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          BUILD_TOOLS_DIR=$(find "$SDK_DIR/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$BUILD_TOOLS_DIR" ]; then
+            yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0" >/dev/null
+            BUILD_TOOLS_DIR="$SDK_DIR/build-tools/34.0.0"
+          fi
+          python3 scripts/verify_release_package.py \
+            --zip "downloaded/$ZIP_NAME" \
+            --expected-apk-name "$APK_NAME" \
+            --expected-apk-sha256 "${{ needs.release.outputs.apk_sha256 }}" \
+            --expected-package "com.star.launcher" \
+            --apksigner "$BUILD_TOOLS_DIR/apksigner" \
+            --aapt2 "$BUILD_TOOLS_DIR/aapt2" \
+            --forbid-debug-cert \
+            ${STAR_EXPECTED_CERT_SHA256:+--expected-cert-sha256 "$STAR_EXPECTED_CERT_SHA256"}
+
   publish-draft-release:
-    needs: [verify-and-debug, release]
+    needs: [verify-and-debug, release, verify-debug-artifact, verify-release-artifact]
     if: github.event_name == 'push' && github.ref_type == 'tag'
     permissions:
       contents: write
@@ -315,13 +476,18 @@ jobs:
           name: STAR-Launcher-v${{ steps.meta.outputs.version_name }}
           path: out
 
-      - name: Verify checksum and prepare release notes
+      - name: Verify checksums and prepare release notes
         id: notes
         run: |
           set -euo pipefail
           APK_FILE="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
-          SHA_FILE="${APK_FILE}.sha256"
-          (cd out && sha256sum -c "$SHA_FILE")
+          APK_SHA_FILE="${APK_FILE}.sha256"
+          ZIP_FILE="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.zip"
+          ZIP_SHA_FILE="${ZIP_FILE}.sha256"
+          (cd out && sha256sum -c "$APK_SHA_FILE" && sha256sum -c "$ZIP_SHA_FILE")
+          test "$(awk '{print tolower($1)}' "out/$APK_SHA_FILE")" = "${{ needs.release.outputs.apk_sha256 }}"
+          test "$(awk '{print tolower($1)}' "out/$ZIP_SHA_FILE")" = "${{ needs.release.outputs.zip_sha256 }}"
+
           NOTES_FILE="$RUNNER_TEMP/release-notes.md"
           TRACKED_NOTES="docs/RELEASE_NOTES_v${{ steps.meta.outputs.version_name }}.md"
           if [ -f "$TRACKED_NOTES" ]; then
@@ -331,14 +497,19 @@ jobs:
           fi
           {
             echo ""
-            echo "### Release Asset Checksum (\`SHA-256\`)"
+            echo "### Release Asset Checksums (\`SHA-256\`)"
             echo '```text'
-            cat "out/$SHA_FILE"
+            cat "out/$APK_SHA_FILE"
+            cat "out/$ZIP_SHA_FILE"
             echo '```'
+            echo ""
+            echo "> **Android Install Note:** Download \`$APK_FILE\` directly on Android, or extract \`$ZIP_FILE\` (conservative \`ZIP_STORED\` archive with no Data Descriptors or ZIP64)."
           } >> "$NOTES_FILE"
           echo "file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
           echo "apk=out/$APK_FILE" >> "$GITHUB_OUTPUT"
-          echo "sha=out/$SHA_FILE" >> "$GITHUB_OUTPUT"
+          echo "apk_sha=out/$APK_SHA_FILE" >> "$GITHUB_OUTPUT"
+          echo "zip=out/$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "zip_sha=out/$ZIP_SHA_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Create or update Draft GitHub Release
         env:
@@ -346,12 +517,19 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${{ steps.notes.outputs.apk }}" "${{ steps.notes.outputs.sha }}" --clobber
+            gh release upload "$GITHUB_REF_NAME" \
+              "${{ steps.notes.outputs.apk }}" \
+              "${{ steps.notes.outputs.apk_sha }}" \
+              "${{ steps.notes.outputs.zip }}" \
+              "${{ steps.notes.outputs.zip_sha }}" \
+              --clobber
             gh release edit "$GITHUB_REF_NAME" --title "STAR Launcher $GITHUB_REF_NAME" --notes-file "${{ steps.notes.outputs.file }}" --draft
           else
             gh release create "$GITHUB_REF_NAME" \
               "${{ steps.notes.outputs.apk }}" \
-              "${{ steps.notes.outputs.sha }}" \
+              "${{ steps.notes.outputs.apk_sha }}" \
+              "${{ steps.notes.outputs.zip }}" \
+              "${{ steps.notes.outputs.zip_sha }}" \
               --draft \
               --verify-tag \
               --title "STAR Launcher $GITHUB_REF_NAME" \
