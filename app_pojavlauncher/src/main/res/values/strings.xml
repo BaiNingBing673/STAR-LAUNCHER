@@ -524,5 +524,7 @@
     <string name="mg_renderer_title_multidrawCompute">Use Compute MultiDraw Emulation</string>
     <string name="mg_renderer_summary_multidrawCompute">Uses compute shaders for MultiDraw emulation</string>
     <string name="star_live_lyrics_menu">STAR Live Lyrics</string>
+    <string name="privacy_policy_title">Privacy Policy</string>
+    <string name="privacy_policy_url" translatable="false">https://bainingbing673.github.io/STAR-LAUNCHER/privacy-policy.html</string>
 
 </resources>

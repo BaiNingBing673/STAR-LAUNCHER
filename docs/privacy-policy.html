@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — STAR Launcher</title>
+  <meta name="description" content="Privacy Policy for STAR Launcher (com.star.launcher) for Android.">
+  <style>
+    :root {
+      --bg: #0b1020;
+      --surface: #121a30;
+      --surface-alt: #18233f;
+      --border: #28365c;
+      --text: #eef2ff;
+      --text-muted: #a7b4d4;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, 0.14);
+      --warn: #fbbf24;
+      --warn-soft: rgba(251, 191, 36, 0.12);
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f8fc;
+        --surface: #ffffff;
+        --surface-alt: #f0f4fa;
+        --border: #d9e2f2;
+        --text: #0f172a;
+        --text-muted: #475569;
+        --accent: #0284c7;
+        --accent-soft: rgba(2, 132, 199, 0.10);
+        --warn: #b45309;
+        --warn-soft: rgba(180, 83, 9, 0.10);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 24px 16px 64px;
+    }
+
+    header.hero {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px 24px;
+      margin-bottom: 24px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.65rem, 4vw, 2.25rem);
+      line-height: 1.2;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px 18px;
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      font-size: 0.92rem;
+      color: var(--text-muted);
+    }
+
+    .meta strong {
+      color: var(--text);
+    }
+
+    nav.toc {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 22px;
+      margin-bottom: 24px;
+    }
+
+    nav.toc h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      border: none;
+      padding: 0;
+    }
+
+    nav.toc ol {
+      margin: 0;
+      padding-left: 20px;
+      columns: 2;
+      column-gap: 28px;
+    }
+
+    @media (max-width: 640px) {
+      nav.toc ol {
+        columns: 1;
+      }
+      header.hero,
+      section.card {
+        padding: 20px 16px;
+      }
+    }
+
+    nav.toc li {
+      margin-bottom: 6px;
+      break-inside: avoid;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover,
+    a:focus {
+      text-decoration: underline;
+    }
+
+    section.card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 24px;
+      margin-bottom: 18px;
+    }
+
+    h2 {
+      margin-top: 0;
+      margin-bottom: 12px;
+      font-size: 1.3rem;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    h3 {
+      margin-top: 18px;
+      margin-bottom: 8px;
+      font-size: 1.05rem;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    ul, ol {
+      margin: 0 0 12px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin-bottom: 6px;
+    }
+
+    .callout {
+      background: var(--accent-soft);
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin: 14px 0;
+      font-size: 0.95rem;
+    }
+
+    .callout.warn {
+      background: var(--warn-soft);
+      border-left-color: var(--warn);
+    }
+
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      margin: 12px 0;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+      min-width: 560px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--surface-alt);
+      font-weight: 600;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.88em;
+      background: var(--surface-alt);
+      padding: 2px 6px;
+      border-radius: 5px;
+      word-break: break-word;
+    }
+
+    footer {
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      margin-top: 28px;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <span class="badge">Privacy Policy</span>
+      <h1>STAR Launcher</h1>
+      <p>
+        This Privacy Policy explains how <strong>Bai Xiaoyang</strong> (&ldquo;we&rdquo;, &ldquo;us&rdquo;, or &ldquo;our&rdquo;)
+        handles information when you use the <strong>STAR Launcher</strong> Android application (package ID: <code>com.star.launcher</code>).
+      </p>
+      <div class="meta">
+        <div><strong>Developer:</strong> Bai Xiaoyang</div>
+        <div><strong>Privacy Contact:</strong> <a href="mailto:JackPEVN@gmail.com">JackPEVN@gmail.com</a></div>
+        <div><strong>Effective Date:</strong> November 19, 2026</div>
+        <div><strong>Last Updated:</strong> November 19, 2026</div>
+      </div>
+    </header>
+
+    <nav class="toc" aria-label="Table of contents">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#overview">Overview &amp; Key Facts</a></li>
+        <li><a href="#data-local">Data Accessed &amp; Stored on Your Device</a></li>
+        <li><a href="#permissions">Android Permissions &amp; Why We Request Them</a></li>
+        <li><a href="#third-party">Third-Party Services &amp; Network Connections</a></li>
+        <li><a href="#analytics-ads">Analytics, Advertising &amp; Crash Reporting</a></li>
+        <li><a href="#security">Data Storage, Security &amp; Backups</a></li>
+        <li><a href="#retention-deletion">Data Retention &amp; Deletion</a></li>
+        <li><a href="#children">Children&rsquo;s Privacy</a></li>
+        <li><a href="#changes">Changes to This Privacy Policy</a></li>
+        <li><a href="#contact">Contact Us</a></li>
+      </ol>
+    </nav>
+
+    <section class="card" id="overview">
+      <h2>1. Overview &amp; Key Facts</h2>
+      <p>
+        STAR Launcher is an Android launcher for Minecraft: Java Edition, including support for managing Java runtimes,
+        graphics renderers, mods, modpacks, shader packs, optional Live Lyrics display, and an optional local Bedrock/Java
+        server bridge (GeyserMC / PaperMC).
+      </p>
+      <div class="callout">
+        <strong>Summary:</strong> STAR Launcher does <strong>not</strong> operate a developer telemetry server, does <strong>not</strong>
+        include third-party advertising or analytics SDKs, and does <strong>not</strong> automatically upload crash reports.
+        However, the app stores account credentials, device hardware diagnostics, and launcher settings locally on your device,
+        and connects directly to third-party APIs when you sign in, download game assets, browse mods/modpacks, look up lyrics,
+        or join servers.
+      </div>
+    </section>
+
+    <section class="card" id="data-local">
+      <h2>2. Data Accessed &amp; Stored on Your Device</h2>
+      <p>
+        Depending on the features you use, STAR Launcher accesses and stores the following categories of information locally on your device:
+      </p>
+
+      <h3>2.1 Account &amp; Authentication Data</h3>
+      <ul>
+        <li>
+          <strong>Microsoft / Minecraft Java Accounts:</strong> When you sign in with Microsoft, STAR Launcher receives your
+          Microsoft OAuth refresh token, Xbox Live / XSTS tokens (including XUID), Minecraft Java access token, Minecraft profile
+          username, and profile UUID. WebView cookies, cache, history, and form data are cleared before starting Microsoft sign-in.
+        </li>
+        <li>
+          <strong>Offline / Local Profiles:</strong> If you create a local offline profile, STAR Launcher stores only the username
+          you enter (3&ndash;16 characters) locally without sending it to authentication servers.
+        </li>
+        <li>
+          <strong>Profile Skin Avatars:</strong> For Microsoft accounts, STAR Launcher caches a local copy of your Minecraft skin head image.
+        </li>
+      </ul>
+
+      <h3>2.2 Device &amp; Hardware Compatibility Information</h3>
+      <ul>
+        <li>
+          <strong>Hardware Capability Snapshot:</strong> To determine compatible OpenGL ES / Vulkan renderers and display
+          compatibility status, STAR Launcher reads your device&rsquo;s CPU architecture (ABI, 64-bit support, core count,
+          max CPU frequency, SoC/hardware model), total and available RAM, Android API level, OpenGL ES vendor/renderer/version,
+          Vulkan hardware version, Adreno KGSL node presence, screen resolution/refresh rates, and thermal sensor readings.
+        </li>
+        <li>
+          <strong>Local Device Fingerprint:</strong> STAR Launcher computes a local SHA-256 hash derived solely from your primary
+          CPU ABI, Android API level, GPU vendor, GPU renderer string, and Vulkan version. It does <strong>not</strong> collect
+          Android Advertising ID, <code>ANDROID_ID</code>, IMEI, phone number, MAC address, or precise location.
+        </li>
+      </ul>
+
+      <h3>2.3 Game Instances, Mods, Modpacks &amp; Shaders</h3>
+      <ul>
+        <li>
+          <strong>Launcher &amp; Instance Data:</strong> Instance names, Minecraft versions, mod loader selections, JVM memory settings,
+          control layouts, custom UI themes, background media references, and installed mod metadata (stored in a local SQLite Room
+          database <code>aether_launcher.db</code> and app storage).
+        </li>
+        <li>
+          <strong>Modpack Imports:</strong> When you select a <code>.zip</code> (CurseForge) or <code>.mrpack</code> (Modrinth) archive
+          via Android&rsquo;s file picker, STAR Launcher reads the archive locally, validates paths, and downloads referenced mod files
+          if required by the modpack manifest.
+        </li>
+        <li>
+          <strong>Shader Pack Management:</strong> Shader pack operations scan, validate, import, enable/disable, and delete files
+          strictly inside your selected instance&rsquo;s <code>shaderpacks/</code> folder on-device. Shader management itself makes
+          no network requests.
+        </li>
+        <li>
+          <strong>Optional CurseForge Credentials:</strong> If you configure a CurseForge developer API key or a custom CurseForge
+          backend proxy URL and client token, the proxy URL is saved locally in preferences/database and secrets are encrypted in
+          the local Token Vault.
+        </li>
+      </ul>
+
+      <h3>2.4 Live Lyrics &amp; Local Music Player (Optional)</h3>
+      <ul>
+        <li>
+          <strong>External Media Session Metadata:</strong> If you enable STAR Live Lyrics and grant Notification Access, STAR Launcher
+          uses Android&rsquo;s <code>MediaSessionManager</code> solely to read the active media player&rsquo;s song title, artist, album,
+          duration, playback position, album artwork, and media app name/package so lyrics can be synchronized on screen.
+        </li>
+        <li>
+          <strong>Local Playlists &amp; Custom Lyrics:</strong> If you add local audio files or custom <code>.lrc</code> files, STAR Launcher
+          stores file URIs, extracted audio tags, cached album thumbnails, and lyrics files locally inside app storage.
+        </li>
+      </ul>
+
+      <h3>2.5 Bedrock Bridge &amp; Local Server Hosting (Optional)</h3>
+      <ul>
+        <li>
+          <strong>Server Profiles &amp; LAN Addresses:</strong> If you use STAR Bedrock Bridge, STAR Launcher stores server profiles
+          (names, hosts, ports, icons, auth modes) locally in Room, reads local Wi-Fi/LAN IPv4 and IPv6 interface addresses to display
+          local connection endpoints on screen, and can ping user-specified Minecraft Java/Bedrock server addresses.
+        </li>
+        <li>
+          <strong>Floodgate Keys:</strong> If you enable Floodgate authentication, its cryptographic <code>key.pem</code> is stored
+          locally and backed up in the encrypted Token Vault.
+        </li>
+      </ul>
+
+      <h3>2.6 Logs, Performance Metrics &amp; Crash Reports</h3>
+      <ul>
+        <li>
+          <strong>Runtime &amp; Crash Logs:</strong> STAR Launcher records launcher logs, game launch session records, and unhandled
+          crash stack traces (<code>latestcrash.txt</code> and up to 20 files in <code>crash-reports/</code>) locally on your device.
+          Crash reports include device product/model, supported ABIs, Android version, launcher version, renderer, memory allocation,
+          and stack traces.
+        </li>
+        <li>
+          <strong>Local Performance Profiling:</strong> Built-in startup and frame-time trackers measure performance locally on your device
+          (and display an optional debug-only overlay). Nothing is transmitted to any remote server.
+        </li>
+      </ul>
+    </section>
+
+    <section class="card" id="permissions">
+      <h2>3. Android Permissions &amp; Why We Request Them</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Permission</th>
+              <th>Requirement</th>
+              <th>Purpose &amp; Scope</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>INTERNET</code> &amp; <code>ACCESS_NETWORK_STATE</code></td>
+              <td>Required</td>
+              <td>Sign in with Microsoft, download Minecraft/mod loader/runtime files, browse/download mods &amp; modpacks, fetch optional lyrics, download optional bridge servers, and connect to multiplayer servers.</td>
+            </tr>
+            <tr>
+              <td><code>RECORD_AUDIO</code></td>
+              <td>Optional (Runtime)</td>
+              <td>Requested only if you grant microphone access for in-game voice chat mods (such as Simple Voice Chat) running inside Minecraft. STAR Launcher itself does not record, store, or transmit microphone audio.</td>
+            </tr>
+            <tr>
+              <td><code>BIND_NOTIFICATION_LISTENER_SERVICE</code></td>
+              <td>Optional (User Setting)</td>
+              <td>Used only when you enable external media detection for STAR Live Lyrics so Android permits <code>MediaSessionManager</code> access to the currently playing song. General notifications (messages, alerts, email, etc.) are ignored and never read, logged, stored, or transmitted.</td>
+            </tr>
+            <tr>
+              <td><code>POST_NOTIFICATIONS</code></td>
+              <td>Optional (Android 13+)</td>
+              <td>Displays foreground progress and active session notifications for game/modpack downloads, background game execution, music playback, and local server/bridge hosting.</td>
+            </tr>
+            <tr>
+              <td><code>FOREGROUND_SERVICE</code> (Data Sync, Media Playback, Special Use)</td>
+              <td>Required for Active Tasks</td>
+              <td>Keeps downloads, the running Minecraft JVM process, optional music playback, and optional local Java/Geyser servers active when switching apps.</td>
+            </tr>
+            <tr>
+              <td><code>READ_EXTERNAL_STORAGE</code> / <code>WRITE_EXTERNAL_STORAGE</code> (Android 9 and below)</td>
+              <td>Legacy Devices Only</td>
+              <td>Reads and writes Minecraft game data, instances, and crash logs on Android API &le; 28. Android 10+ uses app-scoped storage and Android&rsquo;s file picker (SAF), plus an optional <code>DocumentsProvider</code> (<code>FolderProvider</code>) for user file access.</td>
+            </tr>
+            <tr>
+              <td><code>VIBRATE</code></td>
+              <td>Optional</td>
+              <td>Provides tactile haptic feedback for on-screen virtual controls and supported controllers.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" id="third-party">
+      <h2>4. Third-Party Services &amp; Network Connections</h2>
+      <p>
+        STAR Launcher does not send your data to our own servers because we do not operate a central user tracking or account backend.
+        When you use online features, the app communicates directly with the following third-party services, each governed by its own
+        privacy policy:
+      </p>
+      <ul>
+        <li>
+          <strong>Microsoft, Xbox Live &amp; Minecraft Services</strong> (<code>login.live.com</code>, <code>user.auth.xboxlive.com</code>,
+          <code>xsts.auth.xboxlive.com</code>, <code>api.minecraftservices.com</code>): Used only when you sign in with or refresh a
+          Microsoft account to authenticate and verify Minecraft ownership. See the
+          <a href="https://privacy.microsoft.com/privacystatement" target="_blank" rel="noopener noreferrer">Microsoft Privacy Statement</a>.
+        </li>
+        <li>
+          <strong>Mojang &amp; Official Game/Loader Repositories</strong> (<code>piston-meta.mojang.com</code>,
+          <code>resources.download.minecraft.net</code>, <code>libraries.minecraft.net</code>, <code>repo1.maven.org</code>,
+          <code>meta.fabricmc.net</code>, <code>maven.fabricmc.net</code>, <code>meta.quiltmc.org</code>, <code>maven.quiltmc.org</code>,
+          <code>maven.minecraftforge.net</code>, <code>maven.neoforged.net</code>, <code>optifine.net</code>,
+          <code>downloads.betterthanadventure.net</code>, and <code>github.com/AngelAuraMC/angelauramc-openjdk-build</code>):
+          Used to download Minecraft versions, assets, libraries, mod loaders, and OpenJDK runtimes.
+        </li>
+        <li>
+          <strong>BMCLAPI Mirror (Optional)</strong> (<code>bmclapi2.bangbang93.com</code>): Contacted only if you manually switch the
+          download source preference from Default to BMCLAPI.
+        </li>
+        <li>
+          <strong>MCHeads</strong> (<code>mc-heads.net</code>): When refreshing a Microsoft-authenticated profile, STAR Launcher requests
+          your Minecraft profile UUID avatar image from <code>mc-heads.net</code>.
+        </li>
+        <li>
+          <strong>Modrinth &amp; CurseForge / Custom Proxy</strong> (<code>api.modrinth.com</code>, <code>api.curseforge.com</code>,
+          or a user-configured HTTPS proxy): Contacted when you search, browse, or install mods or modpacks with remote dependencies.
+        </li>
+        <li>
+          <strong>LRCLIB (Optional)</strong> (<code>lrclib.net</code>): When Live Lyrics is enabled and not set to Local-Only mode,
+          STAR Launcher sends only the active track&rsquo;s title, artist, album, and duration (along with a generic app User-Agent)
+          to look up synchronized or plain lyrics.
+        </li>
+        <li>
+          <strong>GeyserMC &amp; PaperMC (Optional)</strong> (<code>download.geysermc.org</code>, <code>fill.papermc.io</code>):
+          Contacted only when you download or check updates for GeyserMC, Floodgate, or PaperMC inside Bedrock Bridge.
+        </li>
+        <li>
+          <strong>Cosmetica Capes (Optional)</strong> (<code>23.95.137.176</code> / <code>cosmetica.cc</code>): Disabled by default;
+          only used inside Minecraft if you enable the Cosmetica Capes setting.
+        </li>
+        <li>
+          <strong>Minecraft Java Edition &amp; Multiplayer Servers:</strong> When you launch Minecraft Java Edition, the game itself
+          and any servers or mods you connect to receive standard network traffic (such as your IP address, Minecraft username, UUID,
+          and gameplay data). Bundled default runtime configuration includes Google Public DNS (<code>8.8.8.8</code> / <code>8.8.4.4</code>)
+          in <code>resolv.conf</code> for JVM DNS resolution and Minecraft&rsquo;s default <code>options.txt</code> template
+          (which includes <code>snooperEnabled:true</code> for legacy Minecraft versions that implement Mojang&rsquo;s snooper).
+        </li>
+        <li>
+          <strong>External Links You Tap:</strong> Tapping links such as a Discord community invite or this Privacy Policy opens your
+          device&rsquo;s browser or target app.
+        </li>
+      </ul>
+    </section>
+
+    <section class="card" id="analytics-ads">
+      <h2>5. Analytics, Advertising &amp; Crash Reporting</h2>
+      <ul>
+        <li><strong>No Advertising SDKs:</strong> STAR Launcher contains no ad networks and does not access your Google Advertising ID.</li>
+        <li><strong>No Third-Party Analytics:</strong> STAR Launcher does not integrate Firebase Analytics, Google Analytics, Mixpanel, or similar tracking SDKs.</li>
+        <li>
+          <strong>User-Controlled Crash &amp; Diagnostic Sharing:</strong> Unhandled crashes and diagnostic exports
+          (<code>star-support-*.txt</code>) are saved locally on your device. Before exporting or recording diagnostic logs,
+          STAR Launcher&rsquo;s <code>SensitiveLogRedactor</code> strips access tokens, refresh tokens, JWTs, bearer headers, API keys,
+          and CLI UUID arguments. Diagnostic files or logs leave your device <strong>only</strong> if you explicitly tap
+          <em>Share Latest Log</em> or <em>Export Diagnostics</em> and send them through an app of your choice.
+        </li>
+      </ul>
+    </section>
+
+    <section class="card" id="security">
+      <h2>6. Data Storage, Security &amp; Backups</h2>
+      <ul>
+        <li>
+          <strong>Hardware-Backed Encryption:</strong> Sensitive secrets stored in STAR Launcher&rsquo;s Token Vault (such as mirrored
+          Microsoft/Minecraft tokens, optional CurseForge API keys/proxy tokens, and Floodgate keys) are encrypted using
+          <strong>AES-256-GCM</strong> via Android Keystore (<code>aether_token_vault_v1</code>) in <code>noBackupFilesDir</code>.
+        </li>
+        <li>
+          <strong>Backup &amp; Transfer Exclusions:</strong> Android Auto Backup and Device-to-Device Transfer rules
+          (<code>backup_rules.xml</code> and <code>data_extraction_rules.xml</code>) explicitly exclude account files
+          (<code>accounts/</code>), the encrypted Token Vault (<code>aether_vault/</code>), and the launcher database
+          (<code>aether_launcher.db*</code>).
+        </li>
+        <li>
+          <strong>Important Security Note on Account Files:</strong> For compatibility with the underlying launcher engine,
+          account profile JSON files in the app&rsquo;s private <code>accounts/</code> directory remain on local device storage even
+          after using the &ldquo;Encrypt Vault&rdquo; mirror option. Protect your device with a screen lock and avoid sharing raw
+          <code>accounts/</code> files.
+        </li>
+        <li>
+          <strong>Network Transport:</strong> Network requests to authentication, game metadata, mod, lyrics, and bridge APIs use
+          HTTPS/TLS (local development proxies may use <code>http://localhost</code> or <code>http://127.0.0.1</code> only if configured
+          by you).
+        </li>
+      </ul>
+    </section>
+
+    <section class="card" id="retention-deletion">
+      <h2>7. Data Retention &amp; Deletion</h2>
+      <p>
+        Because we do not collect or store your data on developer-controlled servers, retention is controlled locally on your device:
+      </p>
+      <ul>
+        <li>
+          <strong>Automatic Pruning:</strong> Local archived crash reports are capped at the 20 most recent files; older crash files
+          are automatically deleted. In-memory and disk caches (such as mod thumbnails and lyrics caches) are bounded or removable via
+          Android app cache clearing.
+        </li>
+        <li>
+          <strong>In-App Deletion Controls:</strong> Within STAR Launcher, you can directly delete game instances, installed Minecraft
+          versions, Java runtimes, mods, shader packs, custom UI themes, saved local music tracks/playlists, custom <code>.lrc</code>
+          lyrics, Floodgate keys, and saved CurseForge API/proxy credentials.
+        </li>
+        <li>
+          <strong>Account &amp; Full App Data Deletion:</strong>
+          <div class="callout warn">
+            The current STAR Launcher Settings UI does <strong>not</strong> include a one-tap &ldquo;Delete Account&rdquo; button to
+            erase saved Microsoft or offline account profile files from the dashboard. To permanently delete all locally stored
+            account profiles, Token Vault keys, diagnostic logs, and database records from your device, open your device&rsquo;s
+            <strong>Android Settings &rarr; Apps &rarr; STAR Launcher &rarr; Storage &rarr; Clear Storage / Clear Data</strong>,
+            or uninstall STAR Launcher.
+          </div>
+          To delete your underlying Microsoft or Xbox account data held by Microsoft, visit
+          <a href="https://aka.ms/CloseAccount" target="_blank" rel="noopener noreferrer">https://aka.ms/CloseAccount</a>.
+        </li>
+      </ul>
+    </section>
+
+    <section class="card" id="children">
+      <h2>8. Children&rsquo;s Privacy</h2>
+      <p>
+        STAR Launcher is not directed to children under the age of 13 (or the applicable age of digital consent in your jurisdiction),
+        and we do not knowingly collect personal information from children on our servers. Use of a Microsoft account for Minecraft
+        is subject to Microsoft&rsquo;s age requirements and family/Xbox privacy controls. If you believe a child has provided personal
+        information to us directly via support correspondence, please contact us at
+        <a href="mailto:JackPEVN@gmail.com">JackPEVN@gmail.com</a> so we can delete that correspondence.
+      </p>
+    </section>
+
+    <section class="card" id="changes">
+      <h2>9. Changes to This Privacy Policy</h2>
+      <p>
+        We may update this Privacy Policy from time to time to reflect changes in STAR Launcher&rsquo;s features, permissions,
+        or applicable legal and store requirements. When we do, we will revise the &ldquo;Last Updated&rdquo; date at the top of
+        this page. Continued use of STAR Launcher after an update constitutes acceptance of the revised policy.
+      </p>
+    </section>
+
+    <section class="card" id="contact">
+      <h2>10. Contact Us</h2>
+      <p>
+        If you have questions or requests regarding this Privacy Policy or how STAR Launcher handles data, please contact:
+      </p>
+      <ul>
+        <li><strong>Developer / Controller:</strong> Bai Xiaoyang</li>
+        <li><strong>Email:</strong> <a href="mailto:JackPEVN@gmail.com">JackPEVN@gmail.com</a></li>
+        <li><strong>Project Repository / Website:</strong> <a href="https://github.com/BaiNingBing673/STAR-LAUNCHER" target="_blank" rel="noopener noreferrer">https://github.com/BaiNingBing673/STAR-LAUNCHER</a></li>
+      </ul>
+    </section>
+
+    <footer>
+      <p>STAR Launcher (<code>com.star.launcher</code>) &mdash; Privacy Policy</p>
+    </footer>
+  </main>
+</body>
+</html>

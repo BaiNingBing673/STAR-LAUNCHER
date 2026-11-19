@@ -33,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.star.launcher.lyrics.config.LiveLyricsConfigStore
@@ -46,6 +47,8 @@ import com.star.launcher.ui.components.AetherSectionHeader
 import com.star.launcher.ui.components.AetherSurfaceCard
 import com.star.launcher.ui.components.AetherTonalButton
 import com.star.launcher.ui.dashboard.AetherDashboardUiState
+import com.star.launcher.ui.dashboard.PrivacyPolicyLinkHelper
+import com.star.launcher.ui.dashboard.PrivacyPolicyOpenOutcome
 import com.star.launcher.ui.dashboard.mapStatusToBadgeTier
 import com.star.launcher.ui.theme.AetherColors
 import com.star.launcher.ui.theme.AetherMonoStyle
@@ -56,6 +59,7 @@ import com.star.launcher.ui.theme.liquid.LocalStarTheme
 import com.star.launcher.ui.theme.liquid.StarLiquidGlassSurface
 import com.star.launcher.ui.theme.studio.StarComponentTarget
 import net.kdt.pojavlaunch.BuildConfig
+import net.kdt.pojavlaunch.R
 import net.kdt.pojavlaunch.Tools
 import net.kdt.pojavlaunch.multirt.MultiRTUtils
 import kotlin.math.roundToInt
@@ -701,6 +705,9 @@ fun SettingsScreen(
 
         // 6. Application & Build Info
         item {
+            val context = LocalContext.current
+            val privacyPolicyTitle = stringResource(R.string.privacy_policy_title)
+            val privacyPolicyUrl = stringResource(R.string.privacy_policy_url)
             AetherSurfaceCard(componentTarget = StarComponentTarget.SETTINGS_PANELS) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -721,6 +728,24 @@ fun SettingsScreen(
                 }
                 Text(
                     text = "Package: ${BuildConfig.APPLICATION_ID} · Min Android: 5.0 (API 21)",
+                    style = AetherMonoStyle.copy(color = AetherColors.OnSurfaceVariantDark)
+                )
+                AetherOutlinedButton(
+                    text = privacyPolicyTitle,
+                    icon = AetherIcons.ExternalLink,
+                    onClick = {
+                        when (PrivacyPolicyLinkHelper.openPrivacyPolicy(context, privacyPolicyUrl)) {
+                            PrivacyPolicyOpenOutcome.OPENED -> Unit
+                            PrivacyPolicyOpenOutcome.INVALID_URL ->
+                                onStatusMessage("Privacy Policy URL is invalid")
+                            PrivacyPolicyOpenOutcome.NO_HANDLER_COPIED ->
+                                onStatusMessage("Browser unavailable — Privacy Policy URL copied to clipboard")
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = privacyPolicyUrl,
                     style = AetherMonoStyle.copy(color = AetherColors.OnSurfaceVariantDark)
                 )
             }
