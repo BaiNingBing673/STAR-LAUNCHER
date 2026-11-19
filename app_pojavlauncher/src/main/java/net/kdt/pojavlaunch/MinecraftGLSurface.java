@@ -111,7 +111,10 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        StarHudInputManager.getInstance().registerResetParticipant(mIngameProcessor);
+        StarHudInputManager manager = StarHudInputManager.getInstance();
+        manager.registerResetParticipant(mIngameProcessor);
+        manager.registerPointerParticipant(mIngameProcessor);
+        manager.registerResetParticipant(mInGUIProcessor);
     }
 
     @Override
@@ -119,8 +122,13 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         if (mCurrentTouchProcessor != null) {
             mCurrentTouchProcessor.cancelPendingActions();
         }
-        StarHudInputManager.getInstance().unregisterResetParticipant(mIngameProcessor);
-        StarHudInputManager.getInstance().releaseAllInputs("gl_surface_detached");
+        mIngameProcessor.cancelPendingActions();
+        mInGUIProcessor.cancelPendingActions();
+        StarHudInputManager manager = StarHudInputManager.getInstance();
+        manager.unregisterResetParticipant(mIngameProcessor);
+        manager.unregisterPointerParticipant(mIngameProcessor);
+        manager.unregisterResetParticipant(mInGUIProcessor);
+        manager.releaseAllInputs("gl_surface_detached");
         super.onDetachedFromWindow();
     }
 

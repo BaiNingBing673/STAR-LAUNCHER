@@ -110,3 +110,19 @@ include $(BUILD_SHARED_LIBRARY)
 # delete fake libs after linked
 $(info $(shell (rm $(HERE_PATH)/../jniLibs/*/libawt_headless.so)))
 
+LOCAL_PATH := $(HERE_PATH)
+include $(CLEAR_VARS)
+LOCAL_MODULE := stargfx
+LOCAL_SRC_FILES := ../jniLibs/$(TARGET_ARCH_ABI)/libstargfx.so
+include $(PREBUILT_SHARED_LIBRARY)
+
+LOCAL_PATH := $(HERE_PATH)
+include $(CLEAR_VARS)
+LOCAL_MODULE := stargfx_bridge
+LOCAL_LDLIBS := -ldl -llog -landroid
+LOCAL_SHARED_LIBRARIES := stargfx
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/stargfx_bridge/include $(LOCAL_PATH)/stargfx_bridge
+LOCAL_CPPFLAGS := -std=c++20 -Wall -Wextra
+LOCAL_SRC_FILES := stargfx_bridge/stargfx_jni_bridge.cpp
+include $(BUILD_SHARED_LIBRARY)
+

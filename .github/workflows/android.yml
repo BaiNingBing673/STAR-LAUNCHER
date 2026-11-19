@@ -184,6 +184,7 @@ jobs:
       version_name: ${{ steps.meta.outputs.version_name }}
       version_code: ${{ steps.meta.outputs.version_code }}
       apk_sha256: ${{ steps.package.outputs.apk_sha256 }}
+      aab_sha256: ${{ steps.package.outputs.aab_sha256 }}
       zip_sha256: ${{ steps.package.outputs.zip_sha256 }}
     steps:
       - name: Checkout repository and submodules
@@ -257,7 +258,7 @@ jobs:
           branch: buildjre8
           name: jre8-pojav
 
-      - name: Prepare language list, build signed Release APK, and package conservative ZIP
+      - name: Prepare language list, build signed Release APK + Play Store AAB, and package conservative ZIP
         id: package
         env:
           STAR_KEYSTORE_FILE: ${{ runner.temp }}/star-release.jks
@@ -269,14 +270,20 @@ jobs:
           set -euo pipefail
           ./scripts/languagelist_updater.sh
           ./gradlew :app_pojavlauncher:assembleRelease --no-daemon --console=plain 2>&1 | tee logs/assemble-release.log
-          mkdir -p out/artifact-release
+          ./gradlew :app_pojavlauncher:bundleRelease --no-daemon --console=plain 2>&1 | tee logs/bundle-release.log
+          mkdir -p out/artifact-release out/artifact-play-aab
           APK_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          AAB_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.aab"
           ZIP_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.zip"
           APK_OUT="out/artifact-release/$APK_NAME"
+          AAB_OUT="out/artifact-release/$AAB_NAME"
           ZIP_OUT="out/artifact-release/$ZIP_NAME"
 
           cp app_pojavlauncher/build/outputs/apk/release/app_pojavlauncher-release.apk "$APK_OUT"
+          cp app_pojavlauncher/build/outputs/bundle/release/app_pojavlauncher-release.aab "$AAB_OUT"
           (cd out/artifact-release && sha256sum "$APK_NAME" > "${APK_NAME}.sha256")
+          (cd out/artifact-release && sha256sum "$AAB_NAME" > "${AAB_NAME}.sha256")
+          cp "$AAB_OUT" "${AAB_OUT}.sha256" out/artifact-play-aab/
           python3 scripts/package_release_zip.py \
             --apk "$APK_OUT" \
             --apk-sha256 "${APK_OUT}.sha256" \
@@ -284,8 +291,10 @@ jobs:
             --compression stored
 
           APK_SHA256=$(awk '{print tolower($1)}' "${APK_OUT}.sha256")
+          AAB_SHA256=$(awk '{print tolower($1)}' "${AAB_OUT}.sha256")
           ZIP_SHA256=$(awk '{print tolower($1)}' "${ZIP_OUT}.sha256")
           echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
+          echo "aab_sha256=$AAB_SHA256" >> "$GITHUB_OUTPUT"
           echo "zip_sha256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Report failed release build details
@@ -294,15 +303,20 @@ jobs:
           if [ -f logs/assemble-release.log ]; then
             tail -n 120 logs/assemble-release.log || true
           fi
+          if [ -f logs/bundle-release.log ]; then
+            tail -n 120 logs/bundle-release.log || true
+          fi
 
-      - name: Verify Release APK metadata, signature, ABIs, and conservative ZIP
+      - name: Verify Release APK, Play Store AAB, signature, ABIs, and conservative ZIP
         env:
           STAR_EXPECTED_CERT_SHA256: ${{ secrets.STAR_EXPECTED_CERT_SHA256 }}
         run: |
           set -euo pipefail
           APK_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
+          AAB_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.aab"
           ZIP_NAME="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.zip"
           APK_OUT="out/artifact-release/$APK_NAME"
+          AAB_OUT="out/artifact-release/$AAB_NAME"
           ZIP_OUT="out/artifact-release/$ZIP_NAME"
           SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           BUILD_TOOLS_DIR=$(find "$SDK_DIR/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
@@ -331,6 +345,19 @@ jobs:
           for abi in arm64-v8a armeabi-v7a x86 x86_64; do
             grep -q "lib/$abi/libpojavexec.so" logs/release-native-libs.txt
           done
+
+          # Verify signed Android App Bundle (.aab) for Google Play Console
+          jarsigner -verify -verbose -certs "$AAB_OUT" > logs/release-aab-verify.txt
+          grep -q "jar verified\." logs/release-aab-verify.txt
+          if grep -qi "d0:d0:88:6a:0d:7e:34:86:e6:62:7f:9b:80:11:02:7f:e3:c6:b0:fb:09:42:45:30:b6:d7:be:14:f8:c2:cc:33" logs/release-aab-verify.txt; then
+            echo "::error::Release AAB appears signed with the debug certificate."
+            exit 1
+          fi
+          unzip -l "$AAB_OUT" 'base/lib/*.so' | tee logs/release-aab-native-libs.txt
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            grep -q "base/lib/$abi/libpojavexec.so" logs/release-aab-native-libs.txt
+          done
+
           python3 scripts/verify_release_package.py \
             --zip "$ZIP_OUT" \
             --expected-apk-name "$APK_NAME" \
@@ -345,11 +372,18 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/star-release.jks"
 
-      - name: Upload Release APK, conservative ZIP, and SHA-256
+      - name: Upload Release APK, Play Store AAB, conservative ZIP, and SHA-256
         uses: actions/upload-artifact@v4
         with:
           name: STAR-Launcher-v${{ steps.meta.outputs.version_name }}
           path: out/artifact-release/
+          if-no-files-found: error
+
+      - name: Upload Play Store AAB (standalone)
+        uses: actions/upload-artifact@v4
+        with:
+          name: STAR-Launcher-v${{ steps.meta.outputs.version_name }}-play-store-aab
+          path: out/artifact-play-aab/
           if-no-files-found: error
 
       - name: Upload Release Verification Logs
@@ -429,12 +463,16 @@ jobs:
         run: |
           set -euo pipefail
           APK_NAME="STAR-Launcher-v${{ needs.release.outputs.version_name }}.apk"
+          AAB_NAME="STAR-Launcher-v${{ needs.release.outputs.version_name }}.aab"
           ZIP_NAME="STAR-Launcher-v${{ needs.release.outputs.version_name }}.zip"
-          (cd downloaded && sha256sum -c "${APK_NAME}.sha256" && sha256sum -c "${ZIP_NAME}.sha256")
+          (cd downloaded && sha256sum -c "${APK_NAME}.sha256" && sha256sum -c "${AAB_NAME}.sha256" && sha256sum -c "${ZIP_NAME}.sha256")
           DL_APK_SHA=$(sha256sum "downloaded/$APK_NAME" | awk '{print tolower($1)}')
+          DL_AAB_SHA=$(sha256sum "downloaded/$AAB_NAME" | awk '{print tolower($1)}')
           DL_ZIP_SHA=$(sha256sum "downloaded/$ZIP_NAME" | awk '{print tolower($1)}')
           test "$DL_APK_SHA" = "${{ needs.release.outputs.apk_sha256 }}"
+          test "$DL_AAB_SHA" = "${{ needs.release.outputs.aab_sha256 }}"
           test "$DL_ZIP_SHA" = "${{ needs.release.outputs.zip_sha256 }}"
+          jarsigner -verify "downloaded/$AAB_NAME" | grep -q "jar verified\."
 
           SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           BUILD_TOOLS_DIR=$(find "$SDK_DIR/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)
@@ -482,10 +520,13 @@ jobs:
           set -euo pipefail
           APK_FILE="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.apk"
           APK_SHA_FILE="${APK_FILE}.sha256"
+          AAB_FILE="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.aab"
+          AAB_SHA_FILE="${AAB_FILE}.sha256"
           ZIP_FILE="STAR-Launcher-v${{ steps.meta.outputs.version_name }}.zip"
           ZIP_SHA_FILE="${ZIP_FILE}.sha256"
-          (cd out && sha256sum -c "$APK_SHA_FILE" && sha256sum -c "$ZIP_SHA_FILE")
+          (cd out && sha256sum -c "$APK_SHA_FILE" && sha256sum -c "$AAB_SHA_FILE" && sha256sum -c "$ZIP_SHA_FILE")
           test "$(awk '{print tolower($1)}' "out/$APK_SHA_FILE")" = "${{ needs.release.outputs.apk_sha256 }}"
+          test "$(awk '{print tolower($1)}' "out/$AAB_SHA_FILE")" = "${{ needs.release.outputs.aab_sha256 }}"
           test "$(awk '{print tolower($1)}' "out/$ZIP_SHA_FILE")" = "${{ needs.release.outputs.zip_sha256 }}"
 
           NOTES_FILE="$RUNNER_TEMP/release-notes.md"
@@ -500,14 +541,17 @@ jobs:
             echo "### Release Asset Checksums (\`SHA-256\`)"
             echo '```text'
             cat "out/$APK_SHA_FILE"
+            cat "out/$AAB_SHA_FILE"
             cat "out/$ZIP_SHA_FILE"
             echo '```'
             echo ""
-            echo "> **Android Install Note:** Download \`$APK_FILE\` directly on Android, or extract \`$ZIP_FILE\` (conservative \`ZIP_STORED\` archive with no Data Descriptors or ZIP64)."
+            echo "> **Android Install Note:** Download \`$APK_FILE\` directly on Android, or extract \`$ZIP_FILE\` (conservative \`ZIP_STORED\` archive with no Data Descriptors or ZIP64). Upload \`$AAB_FILE\` to Google Play Console."
           } >> "$NOTES_FILE"
           echo "file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
           echo "apk=out/$APK_FILE" >> "$GITHUB_OUTPUT"
           echo "apk_sha=out/$APK_SHA_FILE" >> "$GITHUB_OUTPUT"
+          echo "aab=out/$AAB_FILE" >> "$GITHUB_OUTPUT"
+          echo "aab_sha=out/$AAB_SHA_FILE" >> "$GITHUB_OUTPUT"
           echo "zip=out/$ZIP_FILE" >> "$GITHUB_OUTPUT"
           echo "zip_sha=out/$ZIP_SHA_FILE" >> "$GITHUB_OUTPUT"
 
@@ -520,6 +564,8 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" \
               "${{ steps.notes.outputs.apk }}" \
               "${{ steps.notes.outputs.apk_sha }}" \
+              "${{ steps.notes.outputs.aab }}" \
+              "${{ steps.notes.outputs.aab_sha }}" \
               "${{ steps.notes.outputs.zip }}" \
               "${{ steps.notes.outputs.zip_sha }}" \
               --clobber
@@ -528,6 +574,8 @@ jobs:
             gh release create "$GITHUB_REF_NAME" \
               "${{ steps.notes.outputs.apk }}" \
               "${{ steps.notes.outputs.apk_sha }}" \
+              "${{ steps.notes.outputs.aab }}" \
+              "${{ steps.notes.outputs.aab_sha }}" \
               "${{ steps.notes.outputs.zip }}" \
               "${{ steps.notes.outputs.zip_sha }}" \
               --draft \

@@ -585,6 +585,13 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         // Autoselect renderer
         boolean hasAngelica = hasMods("angelica");
         if (Tools.LOCAL_RENDERER == null) Tools.LOCAL_RENDERER = "opengles_mobileglues";
+        if (com.star.launcher.stargfx.StarGfxFallbackController.INSTANCE.isStarGfxRendererId(Tools.LOCAL_RENDERER)) {
+            Tools.LOCAL_RENDERER = com.star.launcher.stargfx.StarGfxFallbackController.handleMinecraftLaunchAttempt(
+                    this,
+                    versionId,
+                    Tools.LOCAL_RENDERER
+            );
+        }
         // Angelica IS the FPE emulator
         if (hasAngelica) Tools.useSFPEW = false;
 
@@ -595,8 +602,11 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         // as the list of priority to use, highest to lowest.
         if(!Tools.checkRendererCompatible(this, Tools.LOCAL_RENDERER)) {
             Tools.RenderersList renderersList = Tools.getCompatibleRenderers(this);
-            String firstCompatibleRenderer = renderersList.rendererIds.get(0);
-            Log.i("runCraft","Missing renderer "+Tools.LOCAL_RENDERER+ " will be replaced with "+firstCompatibleRenderer);
+            String firstCompatibleRenderer = (renderersList != null && renderersList.rendererIds != null && !renderersList.rendererIds.isEmpty())
+                    ? renderersList.rendererIds.get(0)
+                    : "opengles_system_gles";
+            Log.i("runCraft", "Incompatible/unavailable renderer " + Tools.LOCAL_RENDERER + " replaced with " + firstCompatibleRenderer);
+            Logger.appendToLog("Renderer compatibility fallback: " + Tools.LOCAL_RENDERER + " -> " + firstCompatibleRenderer);
             Tools.LOCAL_RENDERER = firstCompatibleRenderer;
             Tools.releaseRenderersCache();
         }

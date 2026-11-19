@@ -80,10 +80,14 @@ public class CallbackBridge {
                 sPendingTapReleaseCallback = null;
                 sPendingTapReleaseButton = -1;
             }
-            // Never fire a stale GUI delayed release after gameplay grab has already started
-            // or while an active STAR HUD lease owns the same mouse button.
-            if ((!scheduledWhileGrabbing && isGrabbing)
-                    || (button >= 0 && StarHudInputManager.getInstance().isMouseButtonHeld(button))) {
+            // Never release a mouse button that an active STAR HUD lease currently holds.
+            if (button >= 0 && StarHudInputManager.getInstance().isMouseButtonHeld(button)) {
+                return;
+            }
+            // If gameplay grab started while the GUI tap release was pending, release the button
+            // without sending stale GUI cursor coordinates that would jump the camera.
+            if (!scheduledWhileGrabbing && isGrabbing) {
+                sendMouseKeycode(button, CallbackBridge.getCurrentMods(), false);
                 return;
             }
             putMouseEventWithCoords(button, false, x, y);
@@ -106,7 +110,16 @@ public class CallbackBridge {
         }
         if (pending != null) {
             try {
-                sChoreographer.removeFrameCallback(pending);
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    sChoreographer.removeFrameCallback(pending);
+                } else {
+                    sGrabHandler.post(() -> {
+                        try {
+                            sChoreographer.removeFrameCallback(pending);
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
             } catch (Throwable ignored) {
             }
             if (pendingButton >= 0 && !StarHudInputManager.getInstance().isMouseButtonHeld(pendingButton)) {
@@ -124,7 +137,9 @@ public class CallbackBridge {
     public static void sendCursorPos(float x, float y) {
         mouseX = x;
         mouseY = y;
-        nativeSendCursorPos(mouseX, mouseY);
+        if (sNativeLoaded) {
+            nativeSendCursorPos(mouseX, mouseY);
+        }
         // HOVER_MOVE and MOVE are equivalent in SDL
         if (!MinecraftGLSurface.sdlEnabled) return;
         if (!isGrabbing)
@@ -146,12 +161,12 @@ public class CallbackBridge {
      */
     public static void sendKeycode(int keycode, char keychar, int scancode, int modifiers, boolean isDown) {
         // TODO CHECK: This may cause input issue, not receive input!
-        if(keycode != 0)  nativeSendKey(keycode,scancode,isDown ? 1 : 0, modifiers);
+        if (sNativeLoaded && keycode != 0) nativeSendKey(keycode, scancode, isDown ? 1 : 0, modifiers);
         // Only controlmaps goes through here, that means we need to block ISOControl or else
         // Minecraft tries to type :TAB: as a character in chat, fails, and then ignores the key,
         // breaking the tab autofill function in old versions. (like 1.12.2, 1.8.9).
-        if(isDown && !Character.isISOControl(keychar)) {
-            nativeSendCharMods(keychar,modifiers);
+        if (sNativeLoaded && isDown && !Character.isISOControl(keychar)) {
+            nativeSendCharMods(keychar, modifiers);
             nativeSendChar(keychar);
         }
         // If not in GUI and pressed a hotbar key, synchronize HotbarView selection index
@@ -174,8 +189,10 @@ public class CallbackBridge {
         // Only an EditText goes through here, that means emojis are allowed, so no isISOControl
         // cause we might break emoji mods then.
         // See net/kdt/pojavlaunch/customcontrols/keyboard/TouchCharInput.java#L147 (onTextChanged)
-        nativeSendCharMods(keychar,modifiers);
-        nativeSendChar(keychar);
+        if (sNativeLoaded) {
+            nativeSendCharMods(keychar, modifiers);
+            nativeSendChar(keychar);
+        }
         if (!MinecraftGLSurface.sdlEnabled) return;
         SDLActivity.onNativeKeyDown(EfficientAndroidLWJGLKeycode.getAndroidKeycode(keychar));
         SDLActivity.onNativeKeyUp(EfficientAndroidLWJGLKeycode.getAndroidKeycode(keychar));
@@ -217,7 +234,9 @@ public class CallbackBridge {
             }
         }
         // if (isGrabbing()) DEBUG_STRING.append("MouseGrabStrace: " + android.util.Log.getStackTraceString(new Throwable()) + "\n");
-        nativeSendMouseButton(button, isDown ? 1 : 0, modifiers);
+        if (sNativeLoaded) {
+            nativeSendMouseButton(button, isDown ? 1 : 0, modifiers);
+        }
         if (!MinecraftGLSurface.sdlEnabled) return;
         int aKey = -1;
         switch (button) {
@@ -258,7 +277,9 @@ public class CallbackBridge {
     }
     
     public static void sendScroll(float xoffset, float yoffset) {
-        nativeSendScroll(xoffset, yoffset);
+        if (sNativeLoaded) {
+            nativeSendScroll(xoffset, yoffset);
+        }
         if (isGrabbing() && yoffset != 0f) {
             HotbarSyncListener syncListener = sHotbarSyncListener != null ? sHotbarSyncListener.get() : null;
             if (syncListener != null) {
@@ -270,7 +291,9 @@ public class CallbackBridge {
     }
 
     public static void sendUpdateWindowSize(int w, int h) {
-        nativeSendScreenSize(w, h);
+        if (sNativeLoaded) {
+            nativeSendScreenSize(w, h);
+        }
     }
 
     public static boolean isGrabbing() {
@@ -405,14 +428,19 @@ public class CallbackBridge {
     //Called from JRE side
     @SuppressWarnings("unused")
     @Keep
-    private static void onGrabStateChanged(final boolean grabbing) {
+    public static void onGrabStateChanged(final boolean grabbing) {
         isGrabbing = grabbing;
         if (!grabbing) {
             sSawGrabLossSinceNotify = true;
             StarHudInputManager.getInstance().releaseAllInputs("grab_state_lost");
             releaseStrayDispatchedMouseButtons();
         } else {
-            sGrabHandler.post(CallbackBridge::flushPendingTapRelease);
+            flushPendingTapRelease();
+            releaseStrayUnownedMouseButtons();
+            sGrabHandler.post(() -> {
+                flushPendingTapRelease();
+                releaseStrayUnownedMouseButtons();
+            });
         }
         sChoreographer.postFrameCallbackDelayed((time) -> {
             if (isGrabbing != grabbing) {
@@ -439,7 +467,7 @@ public class CallbackBridge {
 
     }
 
-    private static void releaseStrayDispatchedMouseButtons() {
+    public static void releaseStrayDispatchedMouseButtons() {
         for (int btn = 0; btn < sDispatchedMouseButtons.length; btn++) {
             boolean pressed;
             synchronized (sMouseStateLock) {
@@ -448,6 +476,41 @@ public class CallbackBridge {
             if (pressed) {
                 sendMouseKeycode(btn, 0, false);
             }
+        }
+    }
+
+    public static void releaseStrayUnownedMouseButtons() {
+        StarHudInputManager manager = StarHudInputManager.getInstance();
+        for (int btn = 0; btn < sDispatchedMouseButtons.length; btn++) {
+            boolean pressed;
+            synchronized (sMouseStateLock) {
+                pressed = sDispatchedMouseButtons[btn];
+            }
+            if (pressed && !manager.isMouseButtonHeld(btn)) {
+                sendMouseKeycode(btn, 0, false);
+            }
+        }
+    }
+
+    public static boolean isMouseButtonDispatched(int button) {
+        synchronized (sMouseStateLock) {
+            return button >= 0 && button < sDispatchedMouseButtons.length && sDispatchedMouseButtons[button];
+        }
+    }
+
+    public static boolean hasAnyDispatchedMouseButton() {
+        synchronized (sMouseStateLock) {
+            for (boolean pressed : sDispatchedMouseButtons) {
+                if (pressed) return true;
+            }
+            return false;
+        }
+    }
+
+    public static void resetDispatchedMouseButtonStates() {
+        synchronized (sMouseStateLock) {
+            java.util.Arrays.fill(sDispatchedMouseButtons, false);
+            sMouseButtonState = 0;
         }
     }
 
@@ -503,10 +566,23 @@ public class CallbackBridge {
     public static native void nativeSetWindowAttrib(int attrib, int value);
     private static native ByteBuffer nativeCreateGamepadButtonBuffer();
     private static native ByteBuffer nativeCreateGamepadAxisBuffer();
+    private static final boolean sNativeLoaded;
     static {
-        System.loadLibrary("pojavexec");
-        sGamepadButtonBuffer = nativeCreateGamepadButtonBuffer();
-        sGamepadAxisBuffer = createGamepadAxisBuffer();
+        boolean loaded = false;
+        ByteBuffer buttonBuf;
+        FloatBuffer axisBuf;
+        try {
+            System.loadLibrary("pojavexec");
+            loaded = true;
+            buttonBuf = nativeCreateGamepadButtonBuffer();
+            axisBuf = createGamepadAxisBuffer();
+        } catch (UnsatisfiedLinkError ignored) {
+            buttonBuf = ByteBuffer.allocateDirect(64);
+            axisBuf = ByteBuffer.allocateDirect(64).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+        }
+        sNativeLoaded = loaded;
+        sGamepadButtonBuffer = buttonBuf;
+        sGamepadAxisBuffer = axisBuf;
     }
 }
 

@@ -350,33 +350,145 @@ public class ControlLayout extends FrameLayout {
 
 	final HashMap<View, ControlInterface> mapTable = new HashMap<>();
 
+	public static int computePointerIdBitmask(MotionEvent ev, int excludeIndex) {
+		if (ev == null) return 0;
+		int count = ev.getPointerCount();
+		int mask = 0;
+		for (int i = 0; i < count; i++) {
+			if (i == excludeIndex) continue;
+			int pid = ev.getPointerId(i);
+			if (pid >= 0 && pid < 32) {
+				mask |= (1 << pid);
+			}
+		}
+		return mask;
+	}
+
+	public void releaseSwipedButtonForView(View v) {
+		if (v == null) return;
+		ControlInterface lastControlButton = mapTable.remove(v);
+		if (lastControlButton != null) {
+			lastControlButton.sendKeyPresses(false);
+		}
+	}
+
+	public void clearAllSwipedButtons() {
+		if (mapTable.isEmpty()) return;
+		List<ControlInterface> toRelease = new ArrayList<>(mapTable.values());
+		mapTable.clear();
+		for (ControlInterface btn : toRelease) {
+			if (btn != null) {
+				btn.sendKeyPresses(false);
+			}
+		}
+	}
+
+	@Override
+	public boolean dispatchTouchEvent(MotionEvent ev) {
+		if (ev == null) {
+			return false;
+		}
+		int action = ev.getActionMasked();
+		com.star.launcher.hud.StarHudInputManager manager =
+				com.star.launcher.hud.StarHudInputManager.getInstance();
+		if (action == MotionEvent.ACTION_DOWN) {
+			// A screen-level ACTION_DOWN starts a fresh touch sequence (0 prior pointers active).
+			clearAllSwipedButtons();
+			manager.reconcileActiveTouchPointers(0, "screen_action_down");
+		} else if (action == MotionEvent.ACTION_MOVE) {
+			int presentMask = computePointerIdBitmask(ev, -1);
+			manager.reconcileActiveTouchPointers(presentMask, "screen_pre_move");
+		} else if ((action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP)
+				&& ev.getPointerCount() >= 2) {
+			int presentMask = computePointerIdBitmask(ev, -1);
+			manager.reconcileActiveTouchPointers(presentMask, "screen_pre_" + action);
+		}
+		try {
+			return super.dispatchTouchEvent(ev);
+		} finally {
+			if (action == MotionEvent.ACTION_POINTER_UP) {
+				int idx = ev.getActionIndex();
+				int remainingMask;
+				if (ev.getPointerCount() >= 2) {
+					remainingMask = computePointerIdBitmask(ev, idx);
+				} else {
+					int liftedPid = (idx >= 0 && idx < ev.getPointerCount()) ? ev.getPointerId(idx) : -1;
+					remainingMask = (liftedPid >= 0 && liftedPid < 32) ? ~(1 << liftedPid) : ~0;
+				}
+				manager.reconcileActiveTouchPointers(remainingMask, "screen_post_pointer_up");
+			} else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+				clearAllSwipedButtons();
+				manager.reconcileActiveTouchPointers(
+						0,
+						action == MotionEvent.ACTION_CANCEL ? "screen_post_cancel" : "screen_post_up"
+				);
+			}
+		}
+	}
+
+	@Override
+	public void onWindowFocusChanged(boolean hasWindowFocus) {
+		super.onWindowFocusChanged(hasWindowFocus);
+		if (!hasWindowFocus) {
+			clearAllSwipedButtons();
+			com.star.launcher.hud.StarHudInputManager.getInstance().releaseAllInputs("control_layout_focus_lost");
+		}
+	}
+
+	@Override
+	protected void onDetachedFromWindow() {
+		clearAllSwipedButtons();
+		com.star.launcher.hud.StarHudInputManager.getInstance().releaseAllInputs("control_layout_detached");
+		super.onDetachedFromWindow();
+	}
+
 	//While this is called onTouch, this should only be called from a ControlButton.
 	public void onTouch(View v, MotionEvent ev) {
+		if (v == null || ev == null) return;
+		if (v instanceof ControlButton && ((ControlButton) v).containsMouseAction()) {
+			releaseSwipedButtonForView(v);
+			return;
+		}
 		ControlInterface lastControlButton = mapTable.get(v);
 
-		// Map location to screen coordinates
-		ev.offsetLocation(v.getX(), v.getY());
-
-
+		int action = ev.getActionMasked();
 		//Check if the action is cancelling, reset the lastControl button associated to the view
-		if (ev.getActionMasked() == MotionEvent.ACTION_UP
-				|| ev.getActionMasked() == MotionEvent.ACTION_CANCEL
-				|| ev.getActionMasked() == MotionEvent.ACTION_POINTER_UP) {
-			if (lastControlButton != null) lastControlButton.sendKeyPresses(false);
-			mapTable.put(v, null);
+		if (action == MotionEvent.ACTION_UP
+				|| action == MotionEvent.ACTION_CANCEL
+				|| action == MotionEvent.ACTION_POINTER_UP) {
+			releaseSwipedButtonForView(v);
 			return;
 		}
 
-		if (ev.getActionMasked() != MotionEvent.ACTION_MOVE) return;
+		if (action != MotionEvent.ACTION_MOVE) return;
 
+		int pointerIndex = 0;
+		if (v instanceof ControlButton) {
+			int activePid = ((ControlButton) v).getActivePointerId();
+			if (activePid != MotionEvent.INVALID_POINTER_ID) {
+				int foundIdx = ev.findPointerIndex(activePid);
+				if (foundIdx < 0) {
+					releaseSwipedButtonForView(v);
+					return;
+				}
+				pointerIndex = foundIdx;
+			}
+		}
+		if (pointerIndex < 0 || pointerIndex >= ev.getPointerCount()) {
+			releaseSwipedButtonForView(v);
+			return;
+		}
+
+		float screenX = ev.getX(pointerIndex) + v.getX();
+		float screenY = ev.getY(pointerIndex) + v.getY();
 
 		//Optimization pass to avoid looking at all children again
 		if (lastControlButton != null) {
-			System.out.println("last control button check" + ev.getX() + "-" + ev.getY() + "-" + lastControlButton.getControlView().getX() + "-" + lastControlButton.getControlView().getY());
-			if (ev.getX() > lastControlButton.getControlView().getX()
-					&& ev.getX() < lastControlButton.getControlView().getX() + lastControlButton.getControlView().getWidth()
-					&& ev.getY() > lastControlButton.getControlView().getY()
-					&& ev.getY() < lastControlButton.getControlView().getY() + lastControlButton.getControlView().getHeight()) {
+			View lastView = lastControlButton.getControlView();
+			if (screenX > lastView.getX()
+					&& screenX < lastView.getX() + lastView.getWidth()
+					&& screenY > lastView.getY()
+					&& screenY < lastView.getY() + lastView.getHeight()) {
 				return;
 			}
 		}
@@ -385,14 +497,25 @@ public class ControlLayout extends FrameLayout {
 		if (lastControlButton != null) lastControlButton.sendKeyPresses(false);
 		mapTable.remove(v);
 
-		// Update the state of all swipeable buttons
+		// If the pointer returned inside the originating view v, do not swipe-activate another button
+		if (screenX >= v.getX() && screenX <= v.getX() + v.getWidth()
+				&& screenY >= v.getY() && screenY <= v.getY() + v.getHeight()) {
+			return;
+		}
+
+		// Update the state of all swipeable buttons (excluding mouse buttons to preserve break/place isolation)
 		for (ControlInterface button : getButtonChildren()) {
 			if (!button.getProperties().isSwipeable) continue;
+			if (button.getControlView() == v) continue;
+			if (button instanceof ControlButton && ((ControlButton) button).containsMouseAction()) {
+				continue;
+			}
 
-			if (ev.getX() > button.getControlView().getX()
-					&& ev.getX() < button.getControlView().getX() + button.getControlView().getWidth()
-					&& ev.getY() > button.getControlView().getY()
-					&& ev.getY() < button.getControlView().getY() + button.getControlView().getHeight()) {
+			View btnView = button.getControlView();
+			if (screenX > btnView.getX()
+					&& screenX < btnView.getX() + btnView.getWidth()
+					&& screenY > btnView.getY()
+					&& screenY < btnView.getY() + btnView.getHeight()) {
 
 				//Press the new key
 				if (!button.equals(lastControlButton)) {

@@ -6,6 +6,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.star.launcher.data.db.entity.InstalledModEntity
+import com.star.launcher.data.db.entity.ServerProfileEntity
 import com.star.launcher.data.db.model.ModLoaderType
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -110,6 +111,29 @@ class AetherDatabaseMigrationTest {
             val rows = migratedDb.installedModDao().getForInstance("legacy-inst")
             assertEquals(1, rows.size)
             assertEquals("sodium.jar", rows.first().fileName)
+
+            migratedDb.serverProfileDao().upsert(
+                ServerProfileEntity(
+                    profileId = "srv-1",
+                    name = "Test Bridge",
+                    description = "Cross-play",
+                    iconBase64 = null,
+                    javaAddress = "127.0.0.1",
+                    javaPort = 25565,
+                    bedrockAddress = "192.168.1.10",
+                    bedrockPort = 19132,
+                    serverSoftware = "PAPER",
+                    geyserAvailability = "DETECTED_COMPATIBLE",
+                    authMode = "FLOODGATE",
+                    versionCompatibilitySummary = "Ready",
+                    connectionStatus = "ONLINE",
+                    isFavorite = true,
+                    lastConnectedAtMs = null,
+                    lastCheckedAtMs = null,
+                    createdAtMs = 3000L
+                )
+            )
+            assertEquals(1, migratedDb.serverProfileDao().getAll().size)
             assertTrue(migratedDb.openHelper.writableDatabase.isOpen)
         } finally {
             migratedDb.close()

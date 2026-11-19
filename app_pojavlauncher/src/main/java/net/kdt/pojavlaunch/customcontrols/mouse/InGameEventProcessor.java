@@ -17,7 +17,10 @@ import org.lwjgl.glfw.CallbackBridge;
  * long-press or tap click gestures regardless of hold duration or preferences, and bind
  * exclusively to a single owned pointer ID until that pointer is released or cancelled.
  */
-public class InGameEventProcessor implements TouchEventProcessor, StarHudInputManager.ResetParticipant {
+public class InGameEventProcessor implements
+        TouchEventProcessor,
+        StarHudInputManager.ResetParticipant,
+        StarHudInputManager.PointerReconciliationParticipant {
 
     public interface CameraCursorSink {
         void onCameraDelta(float deltaX, float deltaY);
@@ -65,7 +68,8 @@ public class InGameEventProcessor implements TouchEventProcessor, StarHudInputMa
                 break;
 
             case MotionEvent.ACTION_POINTER_DOWN:
-                if (mCameraPointerId == MotionEvent.INVALID_POINTER_ID) {
+                if (mCameraPointerId == MotionEvent.INVALID_POINTER_ID
+                        || (motionEvent.getPointerCount() >= 2 && motionEvent.findPointerIndex(mCameraPointerId) < 0)) {
                     claimCameraPointer(motionEvent, motionEvent.getActionIndex());
                 }
                 break;
@@ -98,19 +102,42 @@ public class InGameEventProcessor implements TouchEventProcessor, StarHudInputMa
 
             case MotionEvent.ACTION_POINTER_UP: {
                 int liftingIndex = motionEvent.getActionIndex();
-                if (liftingIndex >= 0 && liftingIndex < motionEvent.getPointerCount()
-                        && motionEvent.getPointerId(liftingIndex) == mCameraPointerId) {
+                if ((liftingIndex >= 0 && liftingIndex < motionEvent.getPointerCount()
+                        && motionEvent.getPointerId(liftingIndex) == mCameraPointerId)
+                        || (motionEvent.getPointerCount() >= 2 && motionEvent.findPointerIndex(mCameraPointerId) < 0)) {
                     releaseCameraPointer();
                 }
                 break;
             }
 
-            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_UP: {
+                int liftingIndex = motionEvent.getActionIndex();
+                int liftingPid = (liftingIndex >= 0 && liftingIndex < motionEvent.getPointerCount())
+                        ? motionEvent.getPointerId(liftingIndex)
+                        : MotionEvent.INVALID_POINTER_ID;
+                if (liftingPid == mCameraPointerId || motionEvent.findPointerIndex(mCameraPointerId) < 0) {
+                    releaseCameraPointer();
+                }
+                break;
+            }
+
             case MotionEvent.ACTION_CANCEL:
                 releaseCameraPointer();
                 break;
         }
         return true;
+    }
+
+    @Override
+    public void onReconcileActivePointers(int activePointerIdBitmask, String reason) {
+        if (mCameraPointerId != MotionEvent.INVALID_POINTER_ID) {
+            boolean present = mCameraPointerId >= 0
+                    && mCameraPointerId < 32
+                    && (activePointerIdBitmask & (1 << mCameraPointerId)) != 0;
+            if (!present) {
+                releaseCameraPointer();
+            }
+        }
     }
 
     public int getTrackedCameraPointerId() {

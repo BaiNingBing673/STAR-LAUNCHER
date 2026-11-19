@@ -2,6 +2,28 @@ package com.star.launcher.core
 
 import android.content.Context
 import com.star.launcher.account.AccountRepository
+import com.star.launcher.bridge.BridgeController
+import com.star.launcher.bridge.auth.BridgeAuthenticationManager
+import com.star.launcher.bridge.auth.FloodgateManager
+import com.star.launcher.bridge.compat.BridgeCompatibilityEngine
+import com.star.launcher.bridge.config.GeyserConfigManager
+import com.star.launcher.bridge.config.LocalServerConfigManager
+import com.star.launcher.bridge.diagnostics.BridgeDiagnostics
+import com.star.launcher.bridge.discovery.ServerDiscoveryManager
+import com.star.launcher.bridge.discovery.ServerProfileManager
+import com.star.launcher.bridge.logging.BridgeLogManager
+import com.star.launcher.bridge.network.BridgeNetworkManager
+import com.star.launcher.bridge.network.BridgePortManager
+import com.star.launcher.bridge.process.AndroidBridgeProcessManager
+import com.star.launcher.bridge.process.BridgeConnectionMonitor
+import com.star.launcher.bridge.process.BridgeHealthMonitor
+import com.star.launcher.bridge.runtime.AndroidBridgeRuntimeEnvironment
+import com.star.launcher.bridge.runtime.BridgeRuntimeManager
+import com.star.launcher.bridge.runtime.BridgeUpdateManager
+import com.star.launcher.bridge.runtime.BridgeVersionManager
+import com.star.launcher.bridge.runtime.GeyserRuntimeManager
+import com.star.launcher.bridge.runtime.RuntimeValidator
+import com.star.launcher.bridge.storage.BridgeStoragePaths
 import com.star.launcher.compat.AndroidDeviceCapabilityProbe
 import com.star.launcher.compat.CompatibilityEvaluator
 import com.star.launcher.compat.DeviceCapabilityProbe
@@ -32,6 +54,8 @@ import com.star.launcher.mods.deps.ModDependencyResolver
 import com.star.launcher.mods.download.ModDownloadInstaller
 import com.star.launcher.mods.inventory.InstalledModManager
 import com.star.launcher.mods.loader.ModLoaderInstaller
+import com.star.launcher.mods.modpack.ModpackImportManager
+import com.star.launcher.mods.shaders.ShaderPackManager
 import com.star.launcher.version.PojavMinecraftInstallBackend
 import com.star.launcher.version.VersionCatalogService
 import com.star.launcher.version.VersionInstallCoordinator
@@ -165,6 +189,97 @@ class AetherContainer(context: Context) {
             gameInstanceDao = database.gameInstanceDao(),
             versionManager = versionManager,
             environmentResolver = instanceEnvironmentResolver
+        )
+    }
+    val shaderPackManager: ShaderPackManager by lazy {
+        ShaderPackManager()
+    }
+    val modpackImportManager: ModpackImportManager by lazy {
+        ModpackImportManager()
+    }
+
+    // STAR Bedrock Bridge modular graph
+    val bridgeStoragePaths: BridgeStoragePaths by lazy {
+        BridgeStoragePaths()
+    }
+    val bridgeLogManager: BridgeLogManager by lazy {
+        BridgeLogManager(bridgeStoragePaths)
+    }
+    val bridgeRuntimeValidator: RuntimeValidator by lazy {
+        RuntimeValidator(bridgeStoragePaths, AndroidBridgeRuntimeEnvironment(appContext))
+    }
+    val bridgeVersionManager: BridgeVersionManager by lazy {
+        BridgeVersionManager()
+    }
+    val bridgeUpdateManager: BridgeUpdateManager by lazy {
+        BridgeUpdateManager(bridgeStoragePaths, bridgeLogManager)
+    }
+    val geyserRuntimeManager: GeyserRuntimeManager by lazy {
+        GeyserRuntimeManager(bridgeStoragePaths, bridgeVersionManager, bridgeUpdateManager)
+    }
+    val bridgeRuntimeManager: BridgeRuntimeManager by lazy {
+        BridgeRuntimeManager(bridgeStoragePaths, bridgeRuntimeValidator, bridgeVersionManager, bridgeUpdateManager)
+    }
+    val geyserConfigManager: GeyserConfigManager by lazy {
+        GeyserConfigManager(bridgeStoragePaths)
+    }
+    val localServerConfigManager: LocalServerConfigManager by lazy {
+        LocalServerConfigManager(bridgeStoragePaths)
+    }
+    val bridgePortManager: BridgePortManager by lazy {
+        BridgePortManager()
+    }
+    val bridgeNetworkManager: BridgeNetworkManager by lazy {
+        BridgeNetworkManager(bridgePortManager)
+    }
+    val floodgateManager: FloodgateManager by lazy {
+        FloodgateManager(bridgeStoragePaths, bridgeVersionManager, bridgeUpdateManager, tokenVault, bridgeLogManager)
+    }
+    val bridgeAuthenticationManager: BridgeAuthenticationManager by lazy {
+        BridgeAuthenticationManager(floodgateManager, accountRepository)
+    }
+    val bridgeProcessManager: AndroidBridgeProcessManager by lazy {
+        AndroidBridgeProcessManager(appContext, bridgeStoragePaths, bridgeLogManager)
+    }
+    val bridgeHealthMonitor: BridgeHealthMonitor by lazy {
+        BridgeHealthMonitor(bridgeProcessManager)
+    }
+    val bridgeConnectionMonitor: BridgeConnectionMonitor by lazy {
+        BridgeConnectionMonitor(bridgeNetworkManager)
+    }
+    val serverProfileManager: ServerProfileManager by lazy {
+        ServerProfileManager(database.serverProfileDao())
+    }
+    val serverDiscoveryManager: ServerDiscoveryManager by lazy {
+        ServerDiscoveryManager(serverProfileManager, bridgeNetworkManager)
+    }
+    val bridgeCompatibilityEngine: BridgeCompatibilityEngine by lazy {
+        BridgeCompatibilityEngine()
+    }
+    val bridgeDiagnostics: BridgeDiagnostics by lazy {
+        BridgeDiagnostics(bridgeStoragePaths, bridgeLogManager)
+    }
+    val bridgeController: BridgeController by lazy {
+        BridgeController(
+            paths = bridgeStoragePaths,
+            settingsRepository = settingsRepository,
+            runtimeManager = bridgeRuntimeManager,
+            geyserRuntimeManager = geyserRuntimeManager,
+            versionManager = bridgeVersionManager,
+            geyserConfigManager = geyserConfigManager,
+            localServerConfigManager = localServerConfigManager,
+            networkManager = bridgeNetworkManager,
+            portManager = bridgePortManager,
+            floodgateManager = floodgateManager,
+            authManager = bridgeAuthenticationManager,
+            processController = bridgeProcessManager,
+            healthMonitor = bridgeHealthMonitor,
+            connectionMonitor = bridgeConnectionMonitor,
+            profileManager = serverProfileManager,
+            discoveryManager = serverDiscoveryManager,
+            compatibilityEngine = bridgeCompatibilityEngine,
+            logManager = bridgeLogManager,
+            diagnostics = bridgeDiagnostics
         )
     }
 

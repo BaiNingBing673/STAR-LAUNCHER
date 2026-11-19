@@ -509,7 +509,14 @@ public final class Tools {
         javaArgList.add("-Djava.library.path="+javaLibraryPath);
 
         javaArgList.addAll(Arrays.asList(getMinecraftJVMArgs(versionId, gamedir)));
-        javaArgList.add("-cp"); javaArgList.add(launchClasspath);
+        String effectiveClasspath = launchClasspath;
+        if ("stargfx_vulkan".equals(LOCAL_RENDERER)) {
+            File bridgeJar = new File(Tools.DIR_DATA, "MioLibPatcher/star-renderpearl-bridge.jar");
+            if (bridgeJar.isFile()) {
+                effectiveClasspath = bridgeJar.getAbsolutePath() + ":" + launchClasspath;
+            }
+        }
+        javaArgList.add("-cp"); javaArgList.add(effectiveClasspath);
 
         // Some modloaders (babric) don't fully respect java.libary.path and only use the native lib dir
         // This arg makes them use it. LWJGL prioritizes this path during native loading as well.
@@ -922,6 +929,60 @@ public final class Tools {
     public static String getClientClasspath(String version) {
         return DIR_HOME_VERSION + "/" + version + "/" + version + ".jar";
     }
+
+    /**
+     * Resolves the client JAR path for a version, falling back to {@code info.jar} or the
+     * {@code inheritsFrom} parent chain when the child profile (e.g. Fabric/Quilt) does not
+     * duplicate the base Minecraft JAR in its own directory.
+     */
+    public static String resolveClientClasspath(JMinecraftVersionList.Version info, String actualname) {
+        String primaryPath = getClientClasspath(actualname);
+        File primaryJar = new File(primaryPath);
+        if (primaryJar.isFile() && primaryJar.length() > 0L) {
+            return primaryPath;
+        }
+        if (info != null) {
+            if (isValidString(info.jar)) {
+                String explicitPath = getClientClasspath(info.jar);
+                File explicitJar = new File(explicitPath);
+                if (explicitJar.isFile() && explicitJar.length() > 0L) {
+                    return explicitPath;
+                }
+            }
+            java.util.Set<String> visited = new java.util.HashSet<>();
+            if (isValidString(actualname)) visited.add(actualname);
+            String parentId = info.inheritsFrom;
+            while (isValidString(parentId) && visited.add(parentId)) {
+                String parentPath = getClientClasspath(parentId);
+                File parentJar = new File(parentPath);
+                if (parentJar.isFile() && parentJar.length() > 0L) {
+                    return parentPath;
+                }
+                File parentJson = new File(DIR_HOME_VERSION, parentId + "/" + parentId + ".json");
+                if (!parentJson.isFile()) break;
+                try {
+                    JMinecraftVersionList.Version parentVer = GLOBAL_GSON.fromJson(
+                            read(parentJson),
+                            JMinecraftVersionList.Version.class
+                    );
+                    if (parentVer == null) break;
+                    if (isValidString(parentVer.jar)) {
+                        String parentExplicitPath = getClientClasspath(parentVer.jar);
+                        File parentExplicitJar = new File(parentExplicitPath);
+                        if (parentExplicitJar.isFile() && parentExplicitJar.length() > 0L) {
+                            return parentExplicitPath;
+                        }
+                    }
+                    parentId = parentVer.inheritsFrom;
+                } catch (Exception e) {
+                    Log.w(APP_NAME, "Failed to inspect inherited version JSON for " + parentId, e);
+                    break;
+                }
+            }
+        }
+        return primaryPath;
+    }
+
     public static String generateLaunchClasspath(JMinecraftVersionList.Version info, String actualname) {
         StringBuilder launchClasspath = new StringBuilder(); //versnDir + "/" + version + "/" + version + ".jar:";
         String libClasspath = getLibClasspath(info); // Sets lwjglVersion, janky, but we can't get it any simpler
@@ -955,7 +1016,7 @@ public final class Tools {
         } else Log.e("generateLaunchClasspath", "lwjgl modules are missing from components!");
 
         launchClasspath.append(libClasspath).append(":");
-        launchClasspath.append(getClientClasspath(actualname));
+        launchClasspath.append(resolveClientClasspath(info, actualname));
         // Anything LWJGL2 gets LWJGLX
         if (iLwjglVersion <= 299) launchClasspath.append(":").append(lwjglxFile);
         return launchClasspath.toString();
@@ -1309,7 +1370,7 @@ public final class Tools {
                 }
                 //inheritsVer.inheritsFrom = inheritsVer.id;
                 insertSafety(inheritsVer, customVer,
-                        "assetIndex", "assets", "id",
+                        "assetIndex", "assets", "id", "jar",
                         "mainClass", "minecraftArguments",
                         "releaseTime", "time", "type", "inheritsFrom"
                 );
@@ -1521,20 +1582,31 @@ public final class Tools {
     }
 
     public static int getDisplayFriendlyRes(int displaySideRes, float scaling){
-        displaySideRes *= scaling;
-        if(displaySideRes % 2 != 0) displaySideRes --;
-        return displaySideRes;
+        if (displaySideRes <= 0) displaySideRes = 64;
+        if (scaling <= 0f || Float.isNaN(scaling) || Float.isInfinite(scaling)) scaling = 1f;
+        int scaled = Math.round(displaySideRes * scaling);
+        if (scaled < 64) scaled = 64;
+        if (scaled % 2 != 0) scaled--;
+        return Math.max(64, scaled);
     }
 
     public static String getFileName(Context ctx, Uri uri) {
-        Cursor c = ctx.getContentResolver().query(uri, null, null, null, null);
-        if(c == null) return uri.getLastPathSegment(); // idk myself but it happens on asus file manager
-        c.moveToFirst();
-        int columnIndex = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-        if(columnIndex == -1) return uri.getLastPathSegment();
-        String fileName = c.getString(columnIndex);
-        c.close();
-        return fileName;
+        if (uri == null) return "";
+        try (Cursor c = ctx.getContentResolver().query(uri, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int columnIndex = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (columnIndex >= 0 && !c.isNull(columnIndex)) {
+                    String fileName = c.getString(columnIndex);
+                    if (fileName != null && !fileName.trim().isEmpty()) {
+                        return fileName;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w("Tools", "Failed to query DISPLAY_NAME for URI: " + uri, e);
+        }
+        String fallback = uri.getLastPathSegment();
+        return fallback != null ? fallback : "";
     }
 
     /** Swap the main fragment with another */
@@ -1766,10 +1838,25 @@ public final class Tools {
         }
     }
 
+    private static final int VULKAN_VERSION_1_1 = 0x00401000;
+
     public static boolean checkVulkanSupport(PackageManager packageManager) {
+        if (packageManager == null) return false;
         if(SDK_INT >= Build.VERSION_CODES.N) {
             return packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL) &&
                     packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION);
+        }
+        return false;
+    }
+
+    /**
+     * Checks whether the device declares Vulkan 1.1+ hardware support (required by Kopper-Zink,
+     * OSMesa Zink, and STAR GFX Vulkan).
+     */
+    public static boolean checkVulkan11Support(PackageManager packageManager) {
+        if (!checkVulkanSupport(packageManager)) return false;
+        if (SDK_INT >= Build.VERSION_CODES.N) {
+            return packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, VULKAN_VERSION_1_1);
         }
         return false;
     }
@@ -1779,30 +1866,59 @@ public final class Tools {
         return weakReference.get();
     }
 
-    /** Return the renderers that are compatible with this device */
+    private static boolean hasNativeLib(String nativeLibDir, String libName) {
+        return nativeLibDir != null && !nativeLibDir.isEmpty() && new File(nativeLibDir, libName).isFile();
+    }
+
+    /** Return the renderers that are compatible with this device based on capability & binary probing */
     public static RenderersList getCompatibleRenderers(Context context) {
         if(sCompatibleRenderers != null) return sCompatibleRenderers;
         Resources resources = context.getResources();
         String[] defaultRenderers = resources.getStringArray(R.array.renderer_values);
         String[] defaultRendererNames = resources.getStringArray(R.array.renderer);
-        boolean deviceHasVulkan = checkVulkanSupport(context.getPackageManager());
-        // Zink is now also optional because it sucks
-        boolean deviceHasOSMesaZinkBinary = new File(Tools.NATIVE_LIB_DIR, "libOSMesa.so").exists();
-        boolean deviceHasOpenGLES3 = JREUtils.getDetectedVersion() >= 3;
-        // LTW is an optional proprietary dependency
-        boolean appHasLtw = new File(Tools.NATIVE_LIB_DIR, "libltw.so").exists();
-        boolean appHasKw = new File(Tools.NATIVE_LIB_DIR, "libng_gl4es.so").exists();
+        String nativeLibDir = Tools.NATIVE_LIB_DIR;
+        if (nativeLibDir == null || nativeLibDir.isEmpty()) {
+            nativeLibDir = context.getApplicationInfo() != null ? context.getApplicationInfo().nativeLibraryDir : null;
+        }
+        PackageManager pm = context.getPackageManager();
+        boolean deviceHasVulkan = checkVulkanSupport(pm);
+        boolean deviceHasVulkan11 = checkVulkan11Support(pm);
+        boolean deviceHasOpenGLES3 = GLInfoUtils.getGlInfo().glesMajorVersion >= 3;
+
+        boolean appHasMobileGlues = hasNativeLib(nativeLibDir, "libmobileglues.so");
+        boolean appHasKopperZink = hasNativeLib(nativeLibDir, "libglxshim.so") && hasNativeLib(nativeLibDir, "libEGL_mesa.so");
+        boolean appHasOSMesaZinkBinary = hasNativeLib(nativeLibDir, "libOSMesa.so");
+        boolean appHasLtw = hasNativeLib(nativeLibDir, "libltw.so");
+        boolean appHasKw = hasNativeLib(nativeLibDir, "libng_gl4es.so");
+        boolean appHasStarGfx = hasNativeLib(nativeLibDir, "libstargfx.so")
+                && com.star.launcher.stargfx.StarGfxFallbackController.INSTANCE.isEnabled(context);
+
         List<String> rendererIds = new ArrayList<>(defaultRenderers.length);
         List<String> rendererNames = new ArrayList<>(defaultRendererNames.length);
-        for(int i = 0; i < defaultRenderers.length; i++) {
+        int count = Math.min(defaultRenderers.length, defaultRendererNames.length);
+        for(int i = 0; i < count; i++) {
             String rendererId = defaultRenderers[i];
-            if(rendererId.contains("vulkan") && !deviceHasVulkan) continue;
-            if(rendererId.contains("vulkan_zink") && !deviceHasOSMesaZinkBinary) continue;
-            if(rendererId.contains("ltw") && (!deviceHasOpenGLES3 || !appHasLtw)) continue;
-            if(rendererId.contains("opengles2") && (!deviceHasOpenGLES3 || !appHasKw)) continue;
+            if (rendererId.equals("stargfx_vulkan") && (!appHasStarGfx || !deviceHasVulkan11)) continue;
+            if (rendererId.equals("stargfx_gles") && (!appHasStarGfx || !deviceHasOpenGLES3)) continue;
+            if (rendererId.equals("opengles_mobileglues") && (!deviceHasOpenGLES3 || !appHasMobileGlues)) continue;
+            if (rendererId.equals("opengles3_desktopgl_zink_kopper") && (!deviceHasVulkan11 || !appHasKopperZink)) continue;
+            if (rendererId.contains("vulkan_zink") && (!deviceHasVulkan11 || !appHasOSMesaZinkBinary)) continue;
+            if (rendererId.contains("vulkan") && !deviceHasVulkan) continue;
+            if (rendererId.contains("ltw") && (!deviceHasOpenGLES3 || !appHasLtw)) continue;
+            if (rendererId.contains("opengles2") && !appHasKw) continue;
             rendererIds.add(rendererId);
             rendererNames.add(defaultRendererNames[i]);
         }
+
+        // Guarantee a safe non-empty fallback list even if optional native renderer .so files are absent
+        if (rendererIds.isEmpty()) {
+            Log.w("Tools", "No wrapped renderer passed capability/binary checks (GLES3="
+                    + deviceHasOpenGLES3 + ", Vulkan11=" + deviceHasVulkan11 + ", nativeLibDir=" + nativeLibDir
+                    + "); falling back to system GLES.");
+            rendererIds.add("opengles_system_gles");
+            rendererNames.add("System OpenGL ES (Fallback)");
+        }
+
         sCompatibleRenderers = new RenderersList(rendererIds,
                 rendererNames.toArray(new String[0]));
 

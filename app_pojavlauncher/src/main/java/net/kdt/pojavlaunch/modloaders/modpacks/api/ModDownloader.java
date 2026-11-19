@@ -61,9 +61,22 @@ public class ModDownloader {
     }
 
     public void submitDownload(int fileSize, String relativePath, @Nullable String downloadHash, String... url) {
+        if (!net.kdt.pojavlaunch.utils.ZipUtils.isSafeEntryName(relativePath)) {
+            throw new IllegalArgumentException("Blocked unsafe modpack file path: " + relativePath);
+        }
+        File target = new File(mDestinationDirectory, relativePath);
+        try {
+            String destCanonical = mDestinationDirectory.getCanonicalPath();
+            String prefix = destCanonical.endsWith(File.separator) ? destCanonical : destCanonical + File.separator;
+            if (!target.getCanonicalPath().startsWith(prefix)) {
+                throw new IllegalArgumentException("Blocked path traversal in modpack file: " + relativePath);
+            }
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Unable to validate modpack file path: " + relativePath, e);
+        }
         if (mUseFileCount) mTotalSize += 1;
-        else mTotalSize += fileSize;
-        mDownloadPool.execute(new DownloadTask(url, new File(mDestinationDirectory, relativePath), downloadHash, null, -1L, null, true, 0L, 0L, null, null));
+        else mTotalSize += Math.max(fileSize, 0);
+        mDownloadPool.execute(new DownloadTask(url, target, downloadHash, null, -1L, null, true, 0L, 0L, null, null));
     }
 
     public void submitDownload(FileInfoProvider infoProvider) {
@@ -104,7 +117,7 @@ public class ModDownloader {
             pool.shutdown();
             while (!pool.awaitTermination(20, TimeUnit.MILLISECONDS) && !mTerminator.get()) {
                 if (feedback != null) {
-                    feedback.updateProgress((int) mDownloadSize.get(), (int) mTotalSize);
+                    emitScaledProgress(feedback, mDownloadSize.get(), mTotalSize);
                 }
             }
             if (mTerminator.get()) {
@@ -115,13 +128,24 @@ public class ModDownloader {
                 }
             }
             if (feedback != null) {
-                feedback.updateProgress((int) mDownloadSize.get(), (int) mTotalSize);
+                emitScaledProgress(feedback, mDownloadSize.get(), mTotalSize);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             pool.shutdownNow();
             throw new InterruptedIOException("Modpack download interrupted");
         }
+    }
+
+    private static void emitScaledProgress(Tools.DownloaderFeedback feedback, long current, long total) {
+        if (total <= Integer.MAX_VALUE && current <= Integer.MAX_VALUE) {
+            feedback.updateProgress((int) Math.max(0L, current), (int) Math.max(0L, total));
+            return;
+        }
+        // Avoid 32-bit int overflow for multi-gigabyte modpacks by scaling to basis points (0..10000)
+        int maxScale = 10_000;
+        int scaled = total > 0L ? (int) Math.min(maxScale, (Math.max(0L, current) * maxScale) / total) : 0;
+        feedback.updateProgress(scaled, maxScale);
     }
 
     public int getSucceededCount() {

@@ -42,7 +42,8 @@ public class HotbarView extends View implements
         View.OnLayoutChangeListener,
         Runnable,
         CallbackBridge.HotbarSyncListener,
-        StarHudInputManager.ResetParticipant {
+        StarHudInputManager.ResetParticipant,
+        StarHudInputManager.PointerReconciliationParticipant {
 
     private static final int SLOT_COUNT = 9;
     private static final float DEFAULT_WIDTH_DP = 396f; // 44dp * 9
@@ -152,6 +153,17 @@ public class HotbarView extends View implements
         setTranslationZ(4f * context.getResources().getDisplayMetrics().density);
     }
 
+    private boolean mRegisteredWithManager = false;
+
+    private void ensureRegisteredWithManager() {
+        if (!mRegisteredWithManager) {
+            StarHudInputManager manager = StarHudInputManager.getInstance();
+            manager.registerResetParticipant(this);
+            manager.registerPointerParticipant(this);
+            mRegisteredWithManager = true;
+        }
+    }
+
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
@@ -164,22 +176,39 @@ public class HotbarView extends View implements
         repositionView();
         CallbackBridge.addGrabListener(mGrabListener);
         CallbackBridge.setHotbarSyncListener(this);
-        StarHudInputManager.getInstance().registerResetParticipant(this);
+        ensureRegisteredWithManager();
         updateVisibilityForGrabState(CallbackBridge.isGrabbing());
     }
 
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
-        mDropGesture.cancel();
+        finishTouchGesture();
         CallbackBridge.removeGrabListener(mGrabListener);
         CallbackBridge.setHotbarSyncListener(null);
-        StarHudInputManager.getInstance().unregisterResetParticipant(this);
+        if (mRegisteredWithManager) {
+            StarHudInputManager manager = StarHudInputManager.getInstance();
+            manager.unregisterResetParticipant(this);
+            manager.unregisterPointerParticipant(this);
+            mRegisteredWithManager = false;
+        }
     }
 
     @Override
     public void onGlobalInputReset(@NonNull String reason) {
         finishTouchGesture();
+    }
+
+    @Override
+    public void onReconcileActivePointers(int activePointerIdBitmask, @NonNull String reason) {
+        if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
+            boolean present = mActivePointerId >= 0
+                    && mActivePointerId < 32
+                    && (activePointerIdBitmask & (1 << mActivePointerId)) != 0;
+            if (!present) {
+                finishTouchGesture();
+            }
+        }
     }
 
     public void setInputBridge(@NonNull StarHudInputBridge inputBridge) {
@@ -440,15 +469,35 @@ public class HotbarView extends View implements
         if (mCustomizeHighlight) return false;
         if (!mInputBridge.isGrabbing()) return false;
         if (mStarHudMode && !mHudElementEnabled) return false;
+        ensureRegisteredWithManager();
 
         int actionMasked = event.getActionMasked();
         switch (actionMasked) {
-            case MotionEvent.ACTION_DOWN:
-            case MotionEvent.ACTION_POINTER_DOWN: {
+            case MotionEvent.ACTION_DOWN: {
                 if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
-                    return true;
+                    finishTouchGesture();
                 }
                 int idx = event.getActionIndex();
+                if (idx < 0 || idx >= event.getPointerCount()) return false;
+                mActivePointerId = event.getPointerId(idx);
+                mDownX = event.getX(idx);
+                mSwipingSlots = false;
+
+                boolean hasDoubleTapped = mDoubleTapDetector.onTouchEvent(event);
+                mDropGesture.submit();
+                handleSlotAtX(mDownX, hasDoubleTapped, false);
+                return true;
+            }
+            case MotionEvent.ACTION_POINTER_DOWN: {
+                if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
+                    if (event.getPointerCount() >= 2 && event.findPointerIndex(mActivePointerId) < 0) {
+                        finishTouchGesture();
+                    } else {
+                        return true;
+                    }
+                }
+                int idx = event.getActionIndex();
+                if (idx < 0 || idx >= event.getPointerCount()) return false;
                 mActivePointerId = event.getPointerId(idx);
                 mDownX = event.getX(idx);
                 mSwipingSlots = false;
@@ -461,7 +510,10 @@ public class HotbarView extends View implements
             case MotionEvent.ACTION_MOVE: {
                 if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
                 int idx = event.findPointerIndex(mActivePointerId);
-                if (idx < 0) return false;
+                if (idx < 0) {
+                    finishTouchGesture();
+                    return true;
+                }
 
                 float x = event.getX(idx);
                 if (!mSwipingSlots && Math.abs(x - mDownX) > mTouchSlop) {
@@ -472,8 +524,10 @@ public class HotbarView extends View implements
                 return true;
             }
             case MotionEvent.ACTION_POINTER_UP: {
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
                 int idx = event.getActionIndex();
-                if (event.getPointerId(idx) == mActivePointerId) {
+                if ((idx >= 0 && idx < event.getPointerCount() && event.getPointerId(idx) == mActivePointerId)
+                        || (event.getPointerCount() >= 2 && event.findPointerIndex(mActivePointerId) < 0)) {
                     finishTouchGesture();
                     return true;
                 }

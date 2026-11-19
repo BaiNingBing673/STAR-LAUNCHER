@@ -3,6 +3,8 @@ package net.kdt.pojavlaunch.customcontrols.mouse;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 
+import com.star.launcher.hud.StarHudInputManager;
+
 import net.kdt.pojavlaunch.LwjglGlfwKeycode;
 import net.kdt.pojavlaunch.SingleTapConfirm;
 import net.kdt.pojavlaunch.Tools;
@@ -10,7 +12,7 @@ import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 
 import org.lwjgl.glfw.CallbackBridge;
 
-public class InGUIEventProcessor implements TouchEventProcessor {
+public class InGUIEventProcessor implements TouchEventProcessor, StarHudInputManager.ResetParticipant {
     public static final float FINGER_SCROLL_THRESHOLD = Tools.dpToPx(6);
     public static final float FINGER_STILL_THRESHOLD = Tools.dpToPx(5);
 
@@ -31,6 +33,9 @@ public class InGUIEventProcessor implements TouchEventProcessor {
 
         switch (motionEvent.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                if (mIsMouseDown) {
+                    disableMouse();
+                }
                 mTracker.startTracking(motionEvent);
                 if(!touchpadDisplayed()) {
                     sendTouchCoordinates(motionEvent.getX(), motionEvent.getY());
@@ -63,6 +68,12 @@ public class InGUIEventProcessor implements TouchEventProcessor {
                 break;
 
             case MotionEvent.ACTION_CANCEL:
+                mScroller.resetScrollOvershoot();
+                mTracker.cancelTracking();
+                if (mIsMouseDown) disableMouse();
+                resetGesture();
+                break;
+
             case MotionEvent.ACTION_UP:
                 mScroller.resetScrollOvershoot();
                 mTracker.cancelTracking();
@@ -74,6 +85,7 @@ public class InGUIEventProcessor implements TouchEventProcessor {
 
                 if(mIsMouseDown) disableMouse();
                 resetGesture();
+                break;
         }
 
 
@@ -124,5 +136,10 @@ public class InGUIEventProcessor implements TouchEventProcessor {
         if (mIsMouseDown) {
             disableMouse();
         }
+    }
+
+    @Override
+    public void onGlobalInputReset(String reason) {
+        cancelPendingActions();
     }
 }

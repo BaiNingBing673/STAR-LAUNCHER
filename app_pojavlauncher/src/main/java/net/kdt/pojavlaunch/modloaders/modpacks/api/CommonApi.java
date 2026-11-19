@@ -150,22 +150,8 @@ public class CommonApi implements ModpackApi {
 
     private @NonNull ModpackApi getModpackApi(@NonNull File modpackFile) throws IOException {
         try (ZipFile zip = new ZipFile(modpackFile)) {
-            boolean isModrinth;
-            boolean isCurseforge;
-
-            try {
-                ZipUtils.getEntryStream(zip, "modrinth.index.json");
-                isModrinth = true;
-            } catch (IOException ignored) {
-                isModrinth = false;
-            }
-
-            try {
-                ZipUtils.getEntryStream(zip, "manifest.json");
-                isCurseforge = true;
-            } catch (IOException ignored) {
-                isCurseforge = false;
-            }
+            boolean isModrinth = zip.getEntry("modrinth.index.json") != null;
+            boolean isCurseforge = zip.getEntry("manifest.json") != null;
 
             if (isModrinth && isCurseforge) {
                 String name = modpackFile.getName();
@@ -177,7 +163,7 @@ public class CommonApi implements ModpackApi {
             if (isModrinth) return mModrinthApi;
             if (isCurseforge) return mCurseforgeApi;
 
-            throw new IllegalArgumentException("Zip provided does not contain a manifest file.");
+            throw new IllegalArgumentException("Zip provided does not contain a valid modpack manifest (manifest.json or modrinth.index.json).");
         }
     }
 

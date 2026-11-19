@@ -26,6 +26,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -70,6 +71,10 @@ import com.star.launcher.mods.download.ModDownloadProgressItem
 import com.star.launcher.mods.inventory.InstalledModInventoryItem
 import com.star.launcher.mods.loader.ModLoaderCandidate
 import com.star.launcher.mods.loader.ModLoaderInstaller
+import com.star.launcher.mods.shaders.ShaderCompatibilityLevel
+import com.star.launcher.mods.shaders.ShaderInstallStatus
+import com.star.launcher.mods.shaders.ShaderPackEntry
+import com.star.launcher.mods.shaders.ShaderPackInventoryReport
 import com.star.launcher.mods.ui.ModsErrorKind
 import com.star.launcher.mods.ui.ModsSubTab
 import com.star.launcher.mods.ui.ModsUiState
@@ -140,6 +145,18 @@ fun ModsScreen(
     onRefreshInstallLoaderCandidates: () -> Unit = {},
     onStartModLoaderInstall: () -> Unit = {},
     onCancelModLoaderInstall: () -> Unit = {},
+    onImportShaderPacks: () -> Unit = {},
+    onRefreshShaders: () -> Unit = {},
+    onUpdateShaderSearch: (String) -> Unit = {},
+    onToggleShaderEnabled: (ShaderPackEntry) -> Unit = {},
+    onToggleShaderSelection: (String) -> Unit = {},
+    onSelectAllShaders: () -> Unit = {},
+    onClearShaderSelection: () -> Unit = {},
+    onBulkSetShadersEnabled: (Boolean) -> Unit = {},
+    onRequestDeleteShader: (ShaderPackEntry) -> Unit = {},
+    onRequestDeleteSelectedShaders: () -> Unit = {},
+    onConfirmDeleteShaders: () -> Unit = {},
+    onDismissDeleteShaders: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showInstancePicker by remember { mutableStateOf(false) }
@@ -161,7 +178,7 @@ fun ModsScreen(
             )
         }
 
-        // Sub-tab switcher: Discover | My Mods
+        // Sub-tab switcher: Discover | My Mods | Shaders
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -170,10 +187,12 @@ fun ModsScreen(
             ) {
                 ModsSubTab.entries.forEach { tab ->
                     val selected = state.activeSubTab == tab
-                    val countSuffix = if (tab == ModsSubTab.MY_MODS && state.inventoryReport != null) {
-                        " (${state.inventoryReport.mods.size})"
-                    } else {
-                        ""
+                    val countSuffix = when {
+                        tab == ModsSubTab.MY_MODS && state.inventoryReport != null ->
+                            " (${state.inventoryReport.mods.size})"
+                        tab == ModsSubTab.SHADERS && state.shaderReport != null ->
+                            " (${state.shaderReport.packs.size})"
+                        else -> ""
                     }
                     Surface(
                         onClick = { onSelectSubTab(tab) },
@@ -186,7 +205,7 @@ fun ModsScreen(
                         )
                     ) {
                         Box(
-                            modifier = Modifier.padding(vertical = 11.dp, horizontal = 12.dp),
+                            modifier = Modifier.padding(vertical = 11.dp, horizontal = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
@@ -194,7 +213,9 @@ fun ModsScreen(
                                 style = MaterialTheme.typography.titleSmall.copy(
                                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
                                 ),
-                                color = if (selected) AetherColors.AccentCyan else AetherColors.OnSurfaceVariantDark
+                                color = if (selected) AetherColors.AccentCyan else AetherColors.OnSurfaceVariantDark,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -409,7 +430,7 @@ fun ModsScreen(
                     }
                 }
             }
-        } else {
+        } else if (state.activeSubTab == ModsSubTab.MY_MODS) {
             // MY MODS SUB-TAB
             if (state.selectedInstance == null) {
                 item {
@@ -480,6 +501,95 @@ fun ModsScreen(
                     }
                 }
             }
+        } else {
+            // DEDICATED SHADERS SUB-TAB (<gameDir>/shaderpacks/)
+            if (state.selectedInstance == null) {
+                item {
+                    AetherEmptyState(
+                        icon = AetherIcons.Library,
+                        title = "No Instance Selected",
+                        description = "Shader packs are stored per Minecraft instance in its shaderpacks/ folder. Select or create an instance first.",
+                        actionLabel = "Create Instance",
+                        onAction = onOpenCreateInstance
+                    )
+                }
+            } else {
+                state.shaderReport?.let { report ->
+                    item {
+                        ShaderCompatibilityBannerCard(report = report)
+                    }
+                }
+
+                item {
+                    ShadersToolbarCard(
+                        state = state,
+                        onUpdateSearch = onUpdateShaderSearch,
+                        onImportShaderPacks = onImportShaderPacks,
+                        onRefresh = onRefreshShaders,
+                        onSelectAll = onSelectAllShaders,
+                        onClearSelection = onClearShaderSelection,
+                        onBulkEnable = { onBulkSetShadersEnabled(true) },
+                        onBulkDisable = { onBulkSetShadersEnabled(false) },
+                        onBulkRemove = onRequestDeleteSelectedShaders
+                    )
+                }
+
+                val nonShader = state.shaderReport?.nonShaderFiles.orEmpty()
+                if (nonShader.isNotEmpty()) {
+                    item {
+                        AetherSurfaceCard(
+                            containerColor = AetherColors.TierTestedBg,
+                            borderColor = AetherColors.TierTestedFg.copy(alpha = 0.45f)
+                        ) {
+                            Text(
+                                text = "Unrecognized Files in shaderpacks/",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = AetherColors.TierTestedFg
+                            )
+                            Text(
+                                text = nonShader.joinToString(", "),
+                                style = AetherMonoStyle,
+                                color = AetherColors.OnSurfaceDark
+                            )
+                        }
+                    }
+                }
+
+                if (state.isLoadingShaders || state.isImportingShaders) {
+                    item {
+                        AetherLoadingState(
+                            message = if (state.isImportingShaders) {
+                                "Validating and importing shader pack(s) into shaderpacks/..."
+                            } else {
+                                "Scanning instance shaderpacks/ directory..."
+                            }
+                        )
+                    }
+                } else {
+                    val shaders = state.filteredShaders
+                    if (shaders.isEmpty()) {
+                        item {
+                            AetherEmptyState(
+                                icon = AetherIcons.Mods,
+                                title = if (state.shaderSearchQuery.isBlank()) "No Shader Packs Installed" else "No Matching Shader Packs",
+                                description = "Import .zip shader packs into ${state.selectedInstance.name}/shaderpacks. Shader packs are kept strictly separate from Fabric/Forge mods.",
+                                actionLabel = "Import Shader .zip",
+                                onAction = onImportShaderPacks
+                            )
+                        }
+                    } else {
+                        items(shaders, key = { "shader_${it.fileName}" }) { pack ->
+                            ShaderPackCard(
+                                pack = pack,
+                                isSelected = pack.fileName in state.selectedShaderFiles,
+                                onToggleSelect = { onToggleShaderSelection(pack.fileName) },
+                                onToggleEnabled = { onToggleShaderEnabled(pack) },
+                                onRequestDelete = { onRequestDeleteShader(pack) }
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -540,6 +650,35 @@ fun ModsScreen(
             },
             dismissButton = {
                 TextButton(onClick = onDismissDeleteMod) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Confirm Delete Shader Pack(s) Dialog
+    if (state.pendingDeleteShaders.isNotEmpty()) {
+        val count = state.pendingDeleteShaders.size
+        val targetLabel = if (count == 1) {
+            "'${state.pendingDeleteShaders.first().fileName}'"
+        } else {
+            "$count selected shader packs"
+        }
+        AlertDialog(
+            onDismissRequest = onDismissDeleteShaders,
+            title = { Text(if (count == 1) "Remove Shader Pack?" else "Remove $count Shader Packs?") },
+            text = {
+                Text(
+                    "Delete $targetLabel from '${state.selectedInstance?.name}/shaderpacks'? Ordinary mods and shader .txt settings files will not be touched."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = onConfirmDeleteShaders) {
+                    Text("Remove", color = AetherColors.TierBlockedFg)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissDeleteShaders) {
                     Text("Cancel")
                 }
             }
@@ -2054,6 +2193,280 @@ fun InstallModLoaderDialog(
             }
         }
     )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ShaderCompatibilityBannerCard(
+    report: ShaderPackInventoryReport
+) {
+    val (accent, badgeBg, badgeFg) = when (report.rendererCompatibilityLevel) {
+        ShaderCompatibilityLevel.COMPATIBLE -> Triple(
+            AetherColors.TierVerifiedFg,
+            AetherColors.TierVerifiedBg,
+            AetherColors.TierVerifiedFg
+        )
+        ShaderCompatibilityLevel.WARNING -> Triple(
+            AetherColors.TierTestedFg,
+            AetherColors.TierTestedBg,
+            AetherColors.TierTestedFg
+        )
+        ShaderCompatibilityLevel.INCOMPATIBLE -> Triple(
+            AetherColors.TierBlockedFg,
+            AetherColors.TierBlockedBg,
+            AetherColors.TierBlockedFg
+        )
+        ShaderCompatibilityLevel.UNKNOWN -> Triple(
+            AetherColors.AccentCyan,
+            AetherColors.PrimaryContainerDark,
+            AetherColors.AccentCyan
+        )
+    }
+
+    AetherAccentCard(
+        accentColor = accent,
+        componentTarget = StarComponentTarget.MOD_MANAGER_PANELS
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Shader Packs · shaderpacks/",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = AetherColors.OnSurfaceDark
+                )
+                Text(
+                    text = report.shaderpacksDirPath,
+                    style = AetherMonoStyle.copy(color = AetherColors.OnSurfaceVariantDark),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            InfoBadgePill(
+                text = report.rendererCompatibilityLevel.label,
+                fg = badgeFg,
+                bg = badgeBg
+            )
+        }
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Xs),
+            verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+        ) {
+            InfoBadgePill(
+                text = "MC ${report.mcVersion ?: "Unknown"}",
+                fg = AetherColors.AccentCyan,
+                bg = AetherColors.PrimaryContainerDark
+            )
+            InfoBadgePill(
+                text = "Renderer: ${report.activeRendererLabel}",
+                fg = AetherColors.OnSurfaceDark,
+                bg = AetherColors.SurfaceElevatedDark
+            )
+            InfoBadgePill(
+                text = report.detectedShaderModName?.let { "Loader: $it" } ?: "Shader Mod: Not Detected",
+                fg = if (report.hasShaderModInstalled) AetherColors.TierVerifiedFg else AetherColors.TierTestedFg,
+                bg = if (report.hasShaderModInstalled) AetherColors.TierVerifiedBg else AetherColors.TierTestedBg
+            )
+        }
+
+        Text(
+            text = report.rendererGuidance,
+            style = MaterialTheme.typography.bodySmall,
+            color = AetherColors.OnSurfaceVariantDark
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ShadersToolbarCard(
+    state: ModsUiState,
+    onUpdateSearch: (String) -> Unit,
+    onImportShaderPacks: () -> Unit,
+    onRefresh: () -> Unit,
+    onSelectAll: () -> Unit,
+    onClearSelection: () -> Unit,
+    onBulkEnable: () -> Unit,
+    onBulkDisable: () -> Unit,
+    onBulkRemove: () -> Unit
+) {
+    val selectedCount = state.selectedShaderFiles.size
+    val totalCount = state.filteredShaders.size
+
+    AetherSurfaceCard(componentTarget = StarComponentTarget.MOD_MANAGER_PANELS) {
+        OutlinedTextField(
+            value = state.shaderSearchQuery,
+            onValueChange = onUpdateSearch,
+            label = { Text("Search installed shader packs") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
+            verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+        ) {
+            AetherPrimaryButton(
+                text = if (state.isImportingShaders) "Importing..." else "Import Shader .zip",
+                icon = AetherIcons.Plus,
+                enabled = !state.isImportingShaders,
+                onClick = onImportShaderPacks
+            )
+            AetherOutlinedButton(
+                text = "Refresh",
+                icon = AetherIcons.Refresh,
+                onClick = onRefresh
+            )
+            if (totalCount > 0) {
+                AetherOutlinedButton(
+                    text = if (selectedCount == totalCount) "Clear All" else "Select All",
+                    onClick = if (selectedCount == totalCount) onClearSelection else onSelectAll
+                )
+            }
+        }
+
+        if (selectedCount > 0) {
+            HorizontalDivider(color = AetherColors.OutlineVariantDark)
+            Text(
+                text = "$selectedCount shader pack(s) selected",
+                style = MaterialTheme.typography.labelMedium,
+                color = AetherColors.AccentCyan
+            )
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
+                verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+            ) {
+                AetherTonalButton(
+                    text = "Enable Selected",
+                    onClick = onBulkEnable
+                )
+                AetherOutlinedButton(
+                    text = "Disable Selected",
+                    onClick = onBulkDisable
+                )
+                AetherOutlinedButton(
+                    text = "Remove Selected",
+                    onClick = onBulkRemove
+                )
+                TextButton(onClick = onClearSelection) {
+                    Text("Cancel", color = AetherColors.OnSurfaceVariantDark)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ShaderPackCard(
+    pack: ShaderPackEntry,
+    isSelected: Boolean,
+    onToggleSelect: () -> Unit,
+    onToggleEnabled: () -> Unit,
+    onRequestDelete: () -> Unit
+) {
+    val (statusFg, statusBg) = when (pack.status) {
+        ShaderInstallStatus.ENABLED -> AetherColors.TierVerifiedFg to AetherColors.TierVerifiedBg
+        ShaderInstallStatus.DISABLED -> AetherColors.OnSurfaceVariantDark to AetherColors.SurfaceVariantDark
+        ShaderInstallStatus.CORRUPTED,
+        ShaderInstallStatus.INVALID -> AetherColors.TierBlockedFg to AetherColors.TierBlockedBg
+    }
+    val (compatFg, compatBg) = when (pack.compatibilityLevel) {
+        ShaderCompatibilityLevel.COMPATIBLE -> AetherColors.TierVerifiedFg to AetherColors.TierVerifiedBg
+        ShaderCompatibilityLevel.WARNING -> AetherColors.TierTestedFg to AetherColors.TierTestedBg
+        ShaderCompatibilityLevel.INCOMPATIBLE -> AetherColors.TierBlockedFg to AetherColors.TierBlockedBg
+        ShaderCompatibilityLevel.UNKNOWN -> AetherColors.AccentCyan to AetherColors.PrimaryContainerDark
+    }
+
+    AetherSurfaceCard(
+        borderColor = when {
+            isSelected -> AetherColors.AccentCyan.copy(alpha = 0.8f)
+            pack.status == ShaderInstallStatus.CORRUPTED || pack.status == ShaderInstallStatus.INVALID ->
+                AetherColors.TierBlockedFg.copy(alpha = 0.55f)
+            else -> null
+        },
+        componentTarget = StarComponentTarget.MOD_MANAGER_PANELS,
+        onClick = onToggleSelect
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm)
+        ) {
+            Checkbox(
+                checked = isSelected,
+                onCheckedChange = { onToggleSelect() }
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = pack.displayName,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = AetherColors.OnSurfaceDark,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${pack.fileName} · ${formatBytes(pack.sizeBytes)}",
+                    style = AetherMonoStyle.copy(color = AetherColors.OnSurfaceVariantDark),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (pack.status == ShaderInstallStatus.ENABLED || pack.status == ShaderInstallStatus.DISABLED) {
+                Switch(
+                    checked = pack.isEnabled,
+                    onCheckedChange = { onToggleEnabled() }
+                )
+            }
+        }
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Xs),
+            verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+        ) {
+            InfoBadgePill(text = pack.status.label, fg = statusFg, bg = statusBg)
+            InfoBadgePill(text = pack.formatLabel, fg = AetherColors.AccentCyan, bg = AetherColors.PrimaryContainerDark)
+            InfoBadgePill(text = pack.rendererCompatibilityLabel, fg = compatFg, bg = compatBg)
+        }
+
+        pack.warnings.forEach { warning ->
+            Text(
+                text = "• $warning",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (pack.status == ShaderInstallStatus.CORRUPTED || pack.status == ShaderInstallStatus.INVALID) {
+                    AetherColors.TierBlockedFg
+                } else {
+                    AetherColors.TierTestedFg
+                }
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (pack.status == ShaderInstallStatus.ENABLED || pack.status == ShaderInstallStatus.DISABLED) {
+                TextButton(onClick = onToggleEnabled) {
+                    Text(
+                        text = if (pack.isEnabled) "Disable" else "Enable",
+                        color = AetherColors.AccentCyan
+                    )
+                }
+            }
+            TextButton(onClick = onRequestDelete) {
+                Text("Remove", color = AetherColors.TierBlockedFg)
+            }
+        }
+    }
 }
 
 fun formatCompactNumber(value: Long): String = when {

@@ -20,6 +20,8 @@ static volatile jobject exitTrap_ctx;
 static volatile jclass exitTrap_exitClass;
 static volatile jmethodID exitTrap_staticMethod;
 static JavaVM *exitTrap_jvm;
+static volatile bool headlessExitMode = false;
+static int stdin_pfd[2] = {-1, -1};
 
 static int pfd[2];
 static pthread_t logger;
@@ -112,7 +114,11 @@ _Noreturn void nominal_exit(int code, bool is_signal) {
         // I mean, if Zygote can do that, why can't I?
         killpg(getpgrp(), SIGTERM);
     }
-    if(code != 0) {
+    if(headlessExitMode) {
+        if (exitTrap_exitClass != NULL && exitTrap_staticMethod != NULL) {
+            (*env)->CallStaticVoidMethod(env, exitTrap_exitClass, exitTrap_staticMethod, exitTrap_ctx, code, is_signal);
+        }
+    } else if(code != 0) {
         // Exit code 0 is pretty established as "eh it's fine"
         // so only open the GUI if the code is != 0
         (*env)->CallStaticVoidMethod(env, exitTrap_exitClass, exitTrap_staticMethod, exitTrap_ctx, code, is_signal);
@@ -163,8 +169,66 @@ Java_net_kdt_pojavlaunch_Logger_setLogListener(JNIEnv *env, __attribute((unused)
 JNIEXPORT void JNICALL
 Java_net_kdt_pojavlaunch_utils_JREUtils_setupExitMethod(JNIEnv *env, jclass clazz,
                                                         jobject context) {
+    headlessExitMode = false;
     exitTrap_ctx = (*env)->NewGlobalRef(env,context);
     (*env)->GetJavaVM(env,&exitTrap_jvm);
     exitTrap_exitClass = (*env)->NewGlobalRef(env,(*env)->FindClass(env,"net/kdt/pojavlaunch/ExitActivity"));
     exitTrap_staticMethod = (*env)->GetStaticMethodID(env,exitTrap_exitClass,"showExitMessage","(Landroid/content/Context;IZ)V");
+}
+
+JNIEXPORT void JNICALL
+Java_com_star_launcher_bridge_process_BridgeJvmNative_setupHeadlessExit(JNIEnv *env, jclass clazz,
+                                                                        jobject context) {
+    headlessExitMode = true;
+    exitTrap_ctx = (*env)->NewGlobalRef(env, context);
+    (*env)->GetJavaVM(env, &exitTrap_jvm);
+    jclass localClass = (*env)->FindClass(env, "com/star/launcher/bridge/process/BridgeJvmExitBridge");
+    if (localClass != NULL) {
+        exitTrap_exitClass = (*env)->NewGlobalRef(env, localClass);
+        exitTrap_staticMethod = (*env)->GetStaticMethodID(env, exitTrap_exitClass, "onJvmExit", "(Landroid/content/Context;IZ)V");
+    }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_star_launcher_bridge_process_BridgeJvmNative_openStdinPipe(JNIEnv *env, jclass clazz) {
+    if (stdin_pfd[1] != -1) {
+        close(stdin_pfd[1]);
+        stdin_pfd[1] = -1;
+    }
+    if (pipe(stdin_pfd) != 0) {
+        return JNI_FALSE;
+    }
+    if (dup2(stdin_pfd[0], STDIN_FILENO) == -1) {
+        close(stdin_pfd[0]);
+        close(stdin_pfd[1]);
+        stdin_pfd[0] = -1;
+        stdin_pfd[1] = -1;
+        return JNI_FALSE;
+    }
+    close(stdin_pfd[0]);
+    stdin_pfd[0] = -1;
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_star_launcher_bridge_process_BridgeJvmNative_writeStdin(JNIEnv *env, jclass clazz, jstring command) {
+    if (stdin_pfd[1] == -1 || command == NULL) {
+        return JNI_FALSE;
+    }
+    const char *utf = (*env)->GetStringUTFChars(env, command, NULL);
+    if (utf == NULL) {
+        return JNI_FALSE;
+    }
+    size_t len = strlen(utf);
+    ssize_t written = write(stdin_pfd[1], utf, len);
+    (*env)->ReleaseStringUTFChars(env, command, utf);
+    return (written == (ssize_t)len) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_star_launcher_bridge_process_BridgeJvmNative_closeStdinPipe(JNIEnv *env, jclass clazz) {
+    if (stdin_pfd[1] != -1) {
+        close(stdin_pfd[1]);
+        stdin_pfd[1] = -1;
+    }
 }

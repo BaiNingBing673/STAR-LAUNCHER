@@ -136,7 +136,8 @@ fun VersionsScreen(
     onCreateInstanceFromVersion: (String) -> Unit,
     onRetryDownload: (String) -> Unit,
     onCancelDownload: (String) -> Unit,
-    onOpenInstallProgress: (String?, String?) -> Unit
+    onOpenInstallProgress: (String?, String?) -> Unit,
+    onSaveVersionRenderer: (String, String?) -> Unit = { _, _ -> }
 ) {
     val allItems = state.versionCatalogItems
     val filteredItems = remember(
@@ -158,11 +159,74 @@ fun VersionsScreen(
     }
 
     val selectedItem = state.selectedVersionItem ?: filteredItems.firstOrNull()
+    val selectedVersionId = selectedItem?.versionId
+    val savedRendererProfileId = selectedVersionId?.let { state.versionRendererProfiles[it] }
+    var draftRendererProfileId by remember(selectedVersionId, savedRendererProfileId) {
+        mutableStateOf(savedRendererProfileId)
+    }
+    val hasUnsavedRendererChanges = selectedVersionId != null && draftRendererProfileId != savedRendererProfileId
+    var pendingNavigationAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+
     var showDetailSheet by rememberSaveable { mutableStateOf(false) }
     var showFabricDialog by rememberSaveable { mutableStateOf(false) }
     var fabricTargetMcVersion by rememberSaveable { mutableStateOf(selectedItem?.versionId ?: "1.21.4") }
     var sortMenuExpanded by remember { mutableStateOf(false) }
     var includeHistoricalSync by rememberSaveable { mutableStateOf(true) }
+
+    fun guardUnsavedRenderer(action: () -> Unit) {
+        if (hasUnsavedRendererChanges) {
+            pendingNavigationAction = action
+        } else {
+            action()
+        }
+    }
+
+    if (pendingNavigationAction != null && selectedVersionId != null) {
+        val pending = pendingNavigationAction!!
+        AlertDialog(
+            onDismissRequest = { pendingNavigationAction = null },
+            containerColor = AetherColors.SurfaceElevatedDark,
+            title = {
+                Text(
+                    text = "Unsaved Renderer Changes",
+                    color = AetherColors.OnSurfaceDark
+                )
+            },
+            text = {
+                Text(
+                    text = "You changed the renderer for Minecraft $selectedVersionId without saving. Save before leaving?",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherColors.OnSurfaceVariantDark
+                )
+            },
+            confirmButton = {
+                AetherPrimaryButton(
+                    text = "Save",
+                    onClick = {
+                        onSaveVersionRenderer(selectedVersionId, draftRendererProfileId)
+                        pendingNavigationAction = null
+                        pending()
+                    }
+                )
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)) {
+                    TextButton(onClick = { pendingNavigationAction = null }) {
+                        Text("Stay", color = AetherColors.OnSurfaceVariantDark)
+                    }
+                    TextButton(
+                        onClick = {
+                            draftRendererProfileId = savedRendererProfileId
+                            pendingNavigationAction = null
+                            pending()
+                        }
+                    ) {
+                        Text("Discard", color = AetherColors.ErrorDark)
+                    }
+                }
+            }
+        )
+    }
 
     val availableFilters = remember(state.hasModdedVersions) {
         buildList {
@@ -229,7 +293,7 @@ fun VersionsScreen(
     if (!isExpandedWidth && showDetailSheet && selectedItem != null) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
-            onDismissRequest = { showDetailSheet = false },
+            onDismissRequest = { guardUnsavedRenderer { showDetailSheet = false } },
             sheetState = sheetState,
             containerColor = AetherColors.SurfaceDark,
             contentColor = AetherColors.OnSurfaceDark
@@ -242,25 +306,38 @@ fun VersionsScreen(
             ) {
                 VersionDetailPanel(
                     item = selectedItem,
+                    rendererProfiles = state.rendererProfiles,
+                    savedRendererProfileId = savedRendererProfileId,
+                    draftRendererProfileId = draftRendererProfileId,
+                    onSelectDraftRenderer = { draftRendererProfileId = it },
+                    onSaveRenderer = { profileId -> onSaveVersionRenderer(selectedItem.versionId, profileId) },
+                    onDiscardRendererChanges = { draftRendererProfileId = savedRendererProfileId },
                     onPlay = {
-                        showDetailSheet = false
-                        onPlayVersion(selectedItem.versionId)
+                        guardUnsavedRenderer {
+                            showDetailSheet = false
+                            onPlayVersion(selectedItem.versionId)
+                        }
                     },
                     onInstall = { onInstallVersion(selectedItem.versionId) },
                     onCancelInstall = { onCancelVersionInstall(selectedItem.versionId) },
                     onRetryInstall = { onRetryVersionInstall(selectedItem.versionId) },
                     onVerifyInstall = { onVerifyVersion(selectedItem.versionId) },
                     onDeleteInstall = {
+                        draftRendererProfileId = savedRendererProfileId
                         onDeleteVersion(selectedItem.versionId)
                         showDetailSheet = false
                     },
                     onCreateInstance = {
-                        showDetailSheet = false
-                        onCreateInstanceFromVersion(selectedItem.versionId)
+                        guardUnsavedRenderer {
+                            showDetailSheet = false
+                            onCreateInstanceFromVersion(selectedItem.versionId)
+                        }
                     },
                     onOpenInstallProgressScreen = {
-                        showDetailSheet = false
-                        onOpenInstallProgress(selectedItem.versionId, "Minecraft ${selectedItem.versionId}")
+                        guardUnsavedRenderer {
+                            showDetailSheet = false
+                            onOpenInstallProgress(selectedItem.versionId, "Minecraft ${selectedItem.versionId}")
+                        }
                     },
                     reducedMotion = reducedMotion
                 )
@@ -422,20 +499,24 @@ fun VersionsScreen(
                     VersionListColumn(
                         items = filteredItems,
                         selectedVersionId = selectedItem?.versionId,
-                        onSelect = { item -> onSelectVersion(item.versionId) },
+                        onSelect = { item ->
+                            if (item.versionId != selectedVersionId) {
+                                guardUnsavedRenderer { onSelectVersion(item.versionId) }
+                            }
+                        },
                         onPrimaryAction = { item ->
                             when (item.state) {
-                                VersionState.INSTALLED -> onPlayVersion(item.versionId)
-                                VersionState.NOT_INSTALLED -> {
+                                VersionState.INSTALLED -> guardUnsavedRenderer { onPlayVersion(item.versionId) }
+                                VersionState.NOT_INSTALLED -> guardUnsavedRenderer {
                                     onSelectVersion(item.versionId)
                                     onInstallVersion(item.versionId)
                                 }
-                                VersionState.FAILED -> {
+                                VersionState.FAILED -> guardUnsavedRenderer {
                                     onSelectVersion(item.versionId)
                                     onRetryVersionInstall(item.versionId)
                                 }
                                 VersionState.INSTALLING, VersionState.UNSUPPORTED ->
-                                    onSelectVersion(item.versionId)
+                                    guardUnsavedRenderer { onSelectVersion(item.versionId) }
                             }
                         },
                         onSyncCatalog = { onSyncRemoteCatalog(includeHistoricalSync) }
@@ -451,15 +532,26 @@ fun VersionsScreen(
                     if (selectedItem != null) {
                         VersionDetailPanel(
                             item = selectedItem,
-                            onPlay = { onPlayVersion(selectedItem.versionId) },
+                            rendererProfiles = state.rendererProfiles,
+                            savedRendererProfileId = savedRendererProfileId,
+                            draftRendererProfileId = draftRendererProfileId,
+                            onSelectDraftRenderer = { draftRendererProfileId = it },
+                            onSaveRenderer = { profileId -> onSaveVersionRenderer(selectedItem.versionId, profileId) },
+                            onDiscardRendererChanges = { draftRendererProfileId = savedRendererProfileId },
+                            onPlay = { guardUnsavedRenderer { onPlayVersion(selectedItem.versionId) } },
                             onInstall = { onInstallVersion(selectedItem.versionId) },
                             onCancelInstall = { onCancelVersionInstall(selectedItem.versionId) },
                             onRetryInstall = { onRetryVersionInstall(selectedItem.versionId) },
                             onVerifyInstall = { onVerifyVersion(selectedItem.versionId) },
-                            onDeleteInstall = { onDeleteVersion(selectedItem.versionId) },
-                            onCreateInstance = { onCreateInstanceFromVersion(selectedItem.versionId) },
+                            onDeleteInstall = {
+                                draftRendererProfileId = savedRendererProfileId
+                                onDeleteVersion(selectedItem.versionId)
+                            },
+                            onCreateInstance = { guardUnsavedRenderer { onCreateInstanceFromVersion(selectedItem.versionId) } },
                             onOpenInstallProgressScreen = {
-                                onOpenInstallProgress(selectedItem.versionId, "Minecraft ${selectedItem.versionId}")
+                                guardUnsavedRenderer {
+                                    onOpenInstallProgress(selectedItem.versionId, "Minecraft ${selectedItem.versionId}")
+                                }
                             },
                             reducedMotion = reducedMotion
                         )

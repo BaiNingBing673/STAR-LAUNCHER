@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
@@ -37,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import com.star.launcher.lyrics.config.LiveLyricsConfigStore
 import com.star.launcher.data.db.model.CompatibilityTier
 import com.star.launcher.ui.components.AetherAccentCard
+import com.star.launcher.ui.components.AetherBrandMark
 import com.star.launcher.ui.components.AetherIcons
 import com.star.launcher.ui.components.AetherOutlinedButton
 import com.star.launcher.ui.components.AetherPrimaryButton
@@ -85,6 +87,8 @@ fun SettingsScreen(
     onOpenEnginePreferences: () -> Unit,
     onOpenHudCustomization: () -> Unit = {},
     onOpenLiveLyrics: () -> Unit = {},
+    onOpenBedrockBridge: () -> Unit = {},
+    onOpenStarGfxDiagnostics: () -> Unit = {},
     isExpandedWidth: Boolean = false,
     reducedMotion: Boolean = false,
     onStatusMessage: (String) -> Unit = {},
@@ -503,6 +507,30 @@ fun SettingsScreen(
             }
         }
 
+        // 3b. Multiplayer & Cross-Platform Bedrock Bridge
+        item {
+            AetherAccentCard(
+                accentColor = AetherColors.AccentBlue,
+                componentTarget = StarComponentTarget.SETTINGS_PANELS
+            ) {
+                Text(
+                    text = "Multiplayer · STAR Bedrock Bridge",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = AetherColors.OnBackgroundDark
+                )
+                Text(
+                    text = "Host a local Java + Bedrock cross-play server via GeyserMC Standalone or manage external Geyser-enabled server profiles while keeping native Java and Bedrock multiplayer UIs untouched.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherColors.OnSurfaceVariantDark
+                )
+                AetherPrimaryButton(
+                    text = "Open Bedrock Bridge",
+                    onClick = onOpenBedrockBridge,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+
         // 4. Compatibility & Hardware Matrix
         item {
             AetherSurfaceCard(componentTarget = StarComponentTarget.SETTINGS_PANELS) {
@@ -663,21 +691,34 @@ fun SettingsScreen(
                     onClick = onOpenEnginePreferences,
                     modifier = Modifier.fillMaxWidth()
                 )
+                AetherTonalButton(
+                    text = "STAR GFX Runtime & Diagnostics",
+                    onClick = onOpenStarGfxDiagnostics,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
 
         // 6. Application & Build Info
         item {
             AetherSurfaceCard(componentTarget = StarComponentTarget.SETTINGS_PANELS) {
-                Text(
-                    text = "About STAR Launcher",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = AetherColors.OnSurfaceDark
-                )
-                Text(
-                    text = "Version ${BuildConfig.VERSION_NAME} (Code ${BuildConfig.VERSION_CODE}) · ${BuildConfig.BUILD_TYPE}",
-                    style = AetherMonoStyle.copy(color = AetherColors.AccentCyan)
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Md)
+                ) {
+                    AetherBrandMark(modifier = Modifier.size(40.dp))
+                    Column {
+                        Text(
+                            text = "About STAR Launcher",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = AetherColors.OnSurfaceDark
+                        )
+                        Text(
+                            text = "Version ${BuildConfig.VERSION_NAME} (Code ${BuildConfig.VERSION_CODE}) · ${BuildConfig.BUILD_TYPE}",
+                            style = AetherMonoStyle.copy(color = AetherColors.AccentCyan)
+                        )
+                    }
+                }
                 Text(
                     text = "Package: ${BuildConfig.APPLICATION_ID} · Min Android: 5.0 (API 21)",
                     style = AetherMonoStyle.copy(color = AetherColors.OnSurfaceVariantDark)

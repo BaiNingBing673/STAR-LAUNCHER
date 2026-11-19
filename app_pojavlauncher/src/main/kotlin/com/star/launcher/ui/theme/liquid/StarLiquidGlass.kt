@@ -22,11 +22,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ProvideTextStyle
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -677,13 +680,17 @@ fun StarGlassDialog(
     dismissButton: (@Composable RowScope.() -> Unit)? = null
 ) {
     val theme = LocalStarTheme.current
+    val configuration = LocalConfiguration.current
+    val maxDialogHeight = (configuration.screenHeightDp * 0.88f).coerceAtLeast(280f).dp
     Dialog(
         onDismissRequest = onDismissRequest,
         properties = properties
     ) {
         StarLiquidGlassSurface(
             componentTarget = StarComponentTarget.DIALOGS,
-            modifier = modifier.fillMaxWidth()
+            modifier = modifier
+                .fillMaxWidth()
+                .heightIn(max = maxDialogHeight)
         ) {
             Column(
                 modifier = Modifier
@@ -700,11 +707,16 @@ fun StarGlassDialog(
                 }
                 if (text != null) {
                     Column(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
                         verticalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
                         content = text
                     )
                 }
+                HorizontalDivider(
+                    color = theme.borderColor.copy(alpha = 0.25f)
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm, Alignment.End),

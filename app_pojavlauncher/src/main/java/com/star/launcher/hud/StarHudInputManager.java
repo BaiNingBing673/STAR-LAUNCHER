@@ -41,6 +41,10 @@ public final class StarHudInputManager {
         void onGlobalInputReset(@NonNull String reason);
     }
 
+    public interface PointerReconciliationParticipant {
+        void onReconcileActivePointers(int activePointerIdBitmask, @NonNull String reason);
+    }
+
     public interface TelemetryListener {
         void onInputStateChanged();
     }
@@ -53,6 +57,7 @@ public final class StarHudInputManager {
         public final boolean isMouse;
         public final int code;
         public final boolean applyModifiers;
+        public final boolean persistentToggle;
         public final long acquiredAtMs;
 
         LeaseInfo(
@@ -65,6 +70,20 @@ public final class StarHudInputManager {
                 boolean applyModifiers,
                 long acquiredAtMs
         ) {
+            this(leaseId, buttonId, pointerId, actionLabel, isMouse, code, applyModifiers, false, acquiredAtMs);
+        }
+
+        LeaseInfo(
+                String leaseId,
+                String buttonId,
+                int pointerId,
+                String actionLabel,
+                boolean isMouse,
+                int code,
+                boolean applyModifiers,
+                boolean persistentToggle,
+                long acquiredAtMs
+        ) {
             this.leaseId = leaseId;
             this.buttonId = buttonId;
             this.pointerId = pointerId;
@@ -72,6 +91,7 @@ public final class StarHudInputManager {
             this.isMouse = isMouse;
             this.code = code;
             this.applyModifiers = applyModifiers;
+            this.persistentToggle = persistentToggle;
             this.acquiredAtMs = acquiredAtMs;
         }
     }
@@ -150,18 +170,53 @@ public final class StarHudInputManager {
     // Authoritative dispatched native state per GLFW mouse button (true = DOWN sent without matching UP yet).
     private final Map<Integer, Boolean> mDispatchedMouseStates = new HashMap<>();
     private final Deque<String> mRecentEvents = new ArrayDeque<>(MAX_RECENT_EVENTS);
+    private final Deque<String> mDiagnosticLogs = new ArrayDeque<>(64);
     private final CopyOnWriteArrayList<ResetParticipant> mResetParticipants = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<PointerReconciliationParticipant> mPointerParticipants = new CopyOnWriteArrayList<>();
     private final CopyOnWriteArrayList<TelemetryListener> mTelemetryListeners = new CopyOnWriteArrayList<>();
     private final Handler mMainHandler = new Handler(Looper.getMainLooper());
 
     @NonNull
     private volatile StarHudInputBridge mBridge = StarHudInputBridge.DEFAULT;
+    private volatile boolean mDiagnosticLoggingEnabled = false;
     private String mLastEvent = "idle";
     private int mMismatchCount = 0;
     private int mBridgeErrorCount = 0;
     private long mLastMismatchLogMs = 0L;
 
     private StarHudInputManager() {}
+
+    public void setDiagnosticLoggingEnabled(boolean enabled) {
+        mDiagnosticLoggingEnabled = enabled;
+    }
+
+    public boolean isDiagnosticLoggingEnabled() {
+        return mDiagnosticLoggingEnabled;
+    }
+
+    public void logDiagnostic(@NonNull String message) {
+        logDiagnostic("INPUT", message);
+    }
+
+    public void logDiagnostic(@NonNull String category, @NonNull String message) {
+        String entry = "[" + category + "] " + message;
+        synchronized (mLock) {
+            if (mDiagnosticLogs.size() >= 64) {
+                mDiagnosticLogs.pollFirst();
+            }
+            mDiagnosticLogs.addLast(entry);
+        }
+        if (mDiagnosticLoggingEnabled) {
+            Log.d(TAG, entry);
+        }
+    }
+
+    @NonNull
+    public List<String> getDiagnosticLogs() {
+        synchronized (mLock) {
+            return new ArrayList<>(mDiagnosticLogs);
+        }
+    }
 
     public void setInputBridge(@NonNull StarHudInputBridge bridge) {
         synchronized (mLock) {
@@ -184,6 +239,24 @@ public final class StarHudInputManager {
         mResetParticipants.remove(participant);
     }
 
+    public void registerPointerParticipant(@NonNull PointerReconciliationParticipant participant) {
+        registerPointerReconciliationParticipant(participant);
+    }
+
+    public void unregisterPointerParticipant(@NonNull PointerReconciliationParticipant participant) {
+        unregisterPointerReconciliationParticipant(participant);
+    }
+
+    public void registerPointerReconciliationParticipant(@NonNull PointerReconciliationParticipant participant) {
+        if (!mPointerParticipants.contains(participant)) {
+            mPointerParticipants.add(participant);
+        }
+    }
+
+    public void unregisterPointerReconciliationParticipant(@NonNull PointerReconciliationParticipant participant) {
+        mPointerParticipants.remove(participant);
+    }
+
     public void addTelemetryListener(@NonNull TelemetryListener listener) {
         if (!mTelemetryListeners.contains(listener)) {
             mTelemetryListeners.add(listener);
@@ -202,11 +275,23 @@ public final class StarHudInputManager {
             int keycode,
             boolean applyModifiers
     ) {
+        return acquireKeyLease(leaseId, buttonId, pointerId, actionLabel, keycode, applyModifiers, false);
+    }
+
+    public boolean acquireKeyLease(
+            @NonNull String leaseId,
+            @NonNull String buttonId,
+            int pointerId,
+            @NonNull String actionLabel,
+            int keycode,
+            boolean applyModifiers,
+            boolean persistentToggle
+    ) {
         if (keycode <= 0) {
             recordMismatch("Invalid keycode " + keycode + " from " + buttonId);
             return false;
         }
-        return acquireLeaseInternal(leaseId, buttonId, pointerId, actionLabel, false, keycode, applyModifiers);
+        return acquireLeaseInternal(leaseId, buttonId, pointerId, actionLabel, false, keycode, applyModifiers, persistentToggle);
     }
 
     public boolean acquireMouseLease(
@@ -216,11 +301,22 @@ public final class StarHudInputManager {
             @NonNull String actionLabel,
             int mouseButton
     ) {
+        return acquireMouseLease(leaseId, buttonId, pointerId, actionLabel, mouseButton, false);
+    }
+
+    public boolean acquireMouseLease(
+            @NonNull String leaseId,
+            @NonNull String buttonId,
+            int pointerId,
+            @NonNull String actionLabel,
+            int mouseButton,
+            boolean persistentToggle
+    ) {
         if (mouseButton < 0) {
             recordMismatch("Invalid mouseButton " + mouseButton + " from " + buttonId);
             return false;
         }
-        return acquireLeaseInternal(leaseId, buttonId, pointerId, actionLabel, true, mouseButton, false);
+        return acquireLeaseInternal(leaseId, buttonId, pointerId, actionLabel, true, mouseButton, false, persistentToggle);
     }
 
     private boolean acquireLeaseInternal(
@@ -230,8 +326,18 @@ public final class StarHudInputManager {
             @NonNull String actionLabel,
             boolean isMouse,
             int code,
-            boolean applyModifiers
+            boolean applyModifiers,
+            boolean persistentToggle
     ) {
+        int effectivePointerId = pointerId;
+        if (effectivePointerId < INVALID_POINTER_ID) {
+            recordMismatch("Invalid pointerId " + effectivePointerId + " from " + buttonId);
+            effectivePointerId = INVALID_POINTER_ID;
+        }
+        if (persistentToggle) {
+            effectivePointerId = INVALID_POINTER_ID;
+        }
+
         boolean shouldSendDown;
         boolean hasOldRelease = false;
         boolean oldIsMouse = false;
@@ -244,11 +350,20 @@ public final class StarHudInputManager {
                 LeaseInfo existing = mLeasesById.get(leaseId);
                 if (existing != null) {
                     if (existing.isMouse == isMouse && existing.code == code) {
-                        // Reject hijacking by a different active pointer; ignore duplicate DOWN from same pointer.
-                        if (pointerId >= 0 && existing.pointerId >= 0 && existing.pointerId != pointerId) {
-                            recordMismatch("Conflicting pointer DOWN on " + leaseId
-                                    + " (active=" + existing.pointerId + ", incoming=" + pointerId + ")");
-                            return false;
+                        if (existing.pointerId != effectivePointerId || existing.persistentToggle != persistentToggle) {
+                            LeaseInfo updated = new LeaseInfo(
+                                    leaseId,
+                                    buttonId,
+                                    effectivePointerId,
+                                    actionLabel,
+                                    isMouse,
+                                    code,
+                                    applyModifiers,
+                                    persistentToggle,
+                                    existing.acquiredAtMs
+                            );
+                            mLeasesById.put(leaseId, updated);
+                            recordEventLocked("REBIND " + leaseId + " [p=" + existing.pointerId + "->" + effectivePointerId + "]");
                         }
                         return true;
                     }
@@ -268,7 +383,15 @@ public final class StarHudInputManager {
                 }
                 shouldSendDown = isMouse ? !isMousePressedLocked(code) : owners.isEmpty();
                 LeaseInfo info = new LeaseInfo(
-                        leaseId, buttonId, pointerId, actionLabel, isMouse, code, applyModifiers, System.currentTimeMillis()
+                        leaseId,
+                        buttonId,
+                        effectivePointerId,
+                        actionLabel,
+                        isMouse,
+                        code,
+                        applyModifiers,
+                        persistentToggle,
+                        System.currentTimeMillis()
                 );
                 mLeasesById.put(leaseId, info);
                 owners.add(leaseId);
@@ -277,7 +400,10 @@ public final class StarHudInputManager {
                     mKeyApplyMods.put(code, Boolean.TRUE);
                 }
                 String formatted = isMouse ? ("MOUSE " + formatMouseButton(code)) : ("KEY " + formatKeycode(code));
-                recordEventLocked("DOWN " + formatted + " [" + buttonId + " p=" + pointerId + "]");
+                recordEventLocked("DOWN " + formatted + " [" + buttonId + " p=" + effectivePointerId + "]");
+                if (mDiagnosticLoggingEnabled) {
+                    logDiagnostic("PRESS", formatted + " lease=" + leaseId + " btn=" + buttonId + " ptr=" + effectivePointerId);
+                }
             }
 
             if (hasOldRelease) {
@@ -324,6 +450,10 @@ public final class StarHudInputManager {
                 } else {
                     recordEventLocked("UP KEY " + formatKeycode(removed.code) + " [" + removed.buttonId + " " + reason + "]");
                 }
+                if (mDiagnosticLoggingEnabled) {
+                    String formatted = removed.isMouse ? ("MOUSE " + formatMouseButton(removed.code)) : ("KEY " + formatKeycode(removed.code));
+                    logDiagnostic("RELEASE", formatted + " lease=" + leaseId + " btn=" + removed.buttonId + " ptr=" + removed.pointerId + " reason=" + reason);
+                }
             }
 
             if (shouldSendUp) {
@@ -335,6 +465,41 @@ public final class StarHudInputManager {
             }
         }
         notifyTelemetry();
+    }
+
+    /**
+     * Reconciles all active pointer-bound (non-toggle) leases and registered touch views against
+     * the authoritative bitmask of physical pointers currently touching the screen.
+     * Any pointer-bound lease whose pointerId is not in {@code activePointerIdBitmask} is
+     * immediately released without disturbing other active pointers.
+     */
+    public void reconcileActiveTouchPointers(int activePointerIdBitmask, @NonNull String reason) {
+        List<String> orphanedLeases = new ArrayList<>();
+        synchronized (mLock) {
+            for (LeaseInfo info : mLeasesById.values()) {
+                if (!info.persistentToggle && info.pointerId >= 0) {
+                    boolean stillActive = info.pointerId < 32 && ((activePointerIdBitmask & (1 << info.pointerId)) != 0);
+                    if (!stillActive) {
+                        orphanedLeases.add(info.leaseId);
+                    }
+                }
+            }
+        }
+        for (String leaseId : orphanedLeases) {
+            if (mDiagnosticLoggingEnabled) {
+                logDiagnostic("RECONCILE", "Releasing orphaned pointer lease " + leaseId + " (" + reason + ")");
+            }
+            releaseLeaseIfPresent(leaseId, reason);
+        }
+        if (!mPointerParticipants.isEmpty()) {
+            for (PointerReconciliationParticipant participant : mPointerParticipants) {
+                try {
+                    participant.onReconcileActivePointers(activePointerIdBitmask, reason);
+                } catch (Throwable t) {
+                    Log.w(TAG, "PointerReconciliationParticipant threw during reconcile(" + reason + ")", t);
+                }
+            }
+        }
     }
 
     /**
@@ -512,6 +677,19 @@ public final class StarHudInputManager {
             for (Integer btn : mouseToRelease) {
                 transitionMouseLocked(btn, false, "resetAll:" + reason);
             }
+            if (forceCommonMouseUp) {
+                transitionMouseLocked(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_LEFT, false, "emergencyForce:" + reason);
+                transitionMouseLocked(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT, false, "emergencyForce:" + reason);
+                transitionMouseLocked(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_MIDDLE, false, "emergencyForce:" + reason);
+            }
+            if (mBridge == StarHudInputBridge.DEFAULT) {
+                try {
+                    CallbackBridge.flushPendingTapRelease();
+                    CallbackBridge.releaseStrayDispatchedMouseButtons();
+                } catch (Throwable ignored) {
+                }
+            }
+            verifyCleanStateAfterResetLocked(reason);
         }
         // Clear any stray modifier latches safely
         try {
@@ -521,8 +699,33 @@ public final class StarHudInputManager {
         } catch (Throwable ignored) {
         }
 
+        logDiagnostic("RESET_ALL reason=" + reason + " keysReleased=" + keysToRelease.size()
+                + " mouseReleased=" + mouseToRelease.size());
         notifyResetParticipants(reason);
         notifyTelemetry();
+    }
+
+    private void verifyCleanStateAfterResetLocked(@NonNull String reason) {
+        synchronized (mLock) {
+            if (!mLeasesById.isEmpty() || !mButtonLeases.isEmpty()
+                    || !mKeyOwners.isEmpty() || !mMouseOwners.isEmpty()) {
+                recordMismatch("Input state survived full reset (" + reason + "): leases="
+                        + mLeasesById.size() + " buttons=" + mButtonLeases.size()
+                        + " keys=" + mKeyOwners.size() + " mouse=" + mMouseOwners.size());
+                mLeasesById.clear();
+                mButtonLeases.clear();
+                mKeyOwners.clear();
+                mKeyApplyMods.clear();
+                mMouseOwners.clear();
+            }
+            for (Map.Entry<Integer, Boolean> e : mDispatchedMouseStates.entrySet()) {
+                if (Boolean.TRUE.equals(e.getValue())) {
+                    recordMismatch("Dispatched mouse button survived full reset (" + reason + "): "
+                            + formatMouseButton(e.getKey()));
+                    mDispatchedMouseStates.put(e.getKey(), false);
+                }
+            }
+        }
     }
 
     private void notifyResetParticipants(@NonNull String reason) {
@@ -556,6 +759,10 @@ public final class StarHudInputManager {
                 LeaseInfo info = entry.getValue();
                 if (!entry.getKey().equals(info.leaseId)) {
                     inconsistency = "leaseId key mismatch: " + entry.getKey();
+                    break;
+                }
+                if (!info.persistentToggle && info.pointerId < 0) {
+                    inconsistency = "invalid pointer ownership on non-toggle lease " + info.leaseId + " (p=" + info.pointerId + ")";
                     break;
                 }
                 Map<Integer, Set<String>> ownerMap = info.isMouse ? mMouseOwners : mKeyOwners;
@@ -771,13 +978,20 @@ public final class StarHudInputManager {
                 mMouseOwners.clear();
                 mDispatchedMouseStates.clear();
                 mRecentEvents.clear();
+                mDiagnosticLogs.clear();
+                mDiagnosticLoggingEnabled = false;
                 mLastEvent = "idle";
                 mMismatchCount = 0;
                 mBridgeErrorCount = 0;
             }
             mResetParticipants.clear();
+            mPointerParticipants.clear();
             mTelemetryListeners.clear();
             mBridge = StarHudInputBridge.DEFAULT;
+            try {
+                CallbackBridge.resetDispatchedMouseButtonStates();
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -858,6 +1072,11 @@ public final class StarHudInputManager {
             synchronized (mLock) {
                 mDispatchedMouseStates.put(mouseButton, !wantPressed);
             }
+        } else {
+            logDiagnostic("MOUSE_TRANSITION btn=" + formatMouseButton(mouseButton)
+                    + " edge=" + (wantPressed ? "PRESS" : "RELEASE")
+                    + " active=" + wantPressed
+                    + " ctx=" + contextId);
         }
         return ok;
     }

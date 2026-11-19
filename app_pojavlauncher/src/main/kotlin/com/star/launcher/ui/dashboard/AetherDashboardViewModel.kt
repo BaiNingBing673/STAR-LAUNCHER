@@ -55,6 +55,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -108,6 +109,7 @@ data class AetherDashboardUiState(
     val downloadableRuntimes: List<DownloadableRuntimeOption> = emptyList(),
     val isDownloadingRuntimeJava: Int? = null,
     val rendererProfiles: List<RendererProfileEntity> = emptyList(),
+    val versionRendererProfiles: Map<String, String> = emptyMap(),
     val accounts: List<AetherAccountSummary> = emptyList(),
     val activeDownloads: List<DownloadTaskEntity> = emptyList(),
     val recentSessions: List<GameSessionEntity> = emptyList(),
@@ -325,7 +327,7 @@ class AetherDashboardController(
     fun startObserving() {
         if (observeJob != null) return
         observeJob = scope.launch {
-            val (savedVersionId, savedInstanceId) = runCatching {
+            val (savedVersionId, savedInstanceId, savedVersionRenderers) = runCatching {
                 withContext(ioDispatcher) {
                     versionInstallCoordinator?.recoverInterruptedInstalls()
                     val vId = settingsRepository
@@ -334,15 +336,28 @@ class AetherDashboardController(
                     val iId = settingsRepository
                         ?.getString(KEY_SELECTED_INSTANCE_ID, "")
                         ?.ifBlank { null }
-                    vId to iId
+                    val allSettings = settingsRepository?.observeAll()?.first().orEmpty()
+                    val perVersionMap = buildMap {
+                        for ((key, entity) in allSettings) {
+                            if (key.startsWith(KEY_VERSION_RENDERER_PREFIX)) {
+                                val verId = key.removePrefix(KEY_VERSION_RENDERER_PREFIX)
+                                val profileId = entity.value.trim()
+                                if (verId.isNotBlank() && profileId.isNotBlank()) {
+                                    put(verId, profileId)
+                                }
+                            }
+                        }
+                    }
+                    Triple(vId, iId, perVersionMap)
                 }
-            }.getOrDefault(null to null)
+            }.getOrDefault(Triple(null, null, emptyMap()))
 
-            if (savedVersionId != null || savedInstanceId != null) {
+            if (savedVersionId != null || savedInstanceId != null || savedVersionRenderers.isNotEmpty()) {
                 _uiState.update { state ->
                     state.copy(
                         selectedVersionId = state.selectedVersionId ?: savedVersionId,
-                        selectedInstanceId = state.selectedInstanceId ?: savedInstanceId
+                        selectedInstanceId = state.selectedInstanceId ?: savedInstanceId,
+                        versionRendererProfiles = savedVersionRenderers + state.versionRendererProfiles
                     )
                 }
             }
@@ -427,6 +442,24 @@ class AetherDashboardController(
             launch {
                 instanceManager.observeRendererProfiles().collectLatest { list ->
                     _uiState.update { it.copy(rendererProfiles = list) }
+                }
+            }
+            settingsRepository?.let { repo ->
+                launch {
+                    repo.observeAll().collectLatest { allSettings ->
+                        val perVersionMap = buildMap {
+                            for ((key, entity) in allSettings) {
+                                if (key.startsWith(KEY_VERSION_RENDERER_PREFIX)) {
+                                    val verId = key.removePrefix(KEY_VERSION_RENDERER_PREFIX)
+                                    val profileId = entity.value.trim()
+                                    if (verId.isNotBlank() && profileId.isNotBlank()) {
+                                        put(verId, profileId)
+                                    }
+                                }
+                            }
+                        }
+                        _uiState.update { it.copy(versionRendererProfiles = perVersionMap) }
+                    }
                 }
             }
             launch {
@@ -668,20 +701,129 @@ class AetherDashboardController(
                 return@launch
             }
 
+            val savedVersionProfileId = resolveSavedRendererProfileForVersion(versionId)
             val currentSelectedId = _uiState.value.selectedInstanceId
             val currentSelectedDb = currentSelectedId?.let { instanceManager.getInstance(it) }
             val existingInstance = currentSelectedDb?.takeIf { it.versionId == versionId }
                 ?: instanceManager.getAllInstances().firstOrNull { it.versionId == versionId }
-            val instance = existingInstance ?: instanceManager.createInstance(
-                name = "Minecraft $versionId",
-                versionId = versionId,
-                runtimeId = null,
-                rendererProfileId = null
-            )
+            val instance = if (existingInstance != null) {
+                if (savedVersionProfileId != null &&
+                    existingInstance.name == "Minecraft $versionId" &&
+                    existingInstance.rendererProfileId != savedVersionProfileId
+                ) {
+                    runCatching {
+                        instanceManager.updateInstanceConfig(
+                            instanceId = existingInstance.instanceId,
+                            name = existingInstance.name,
+                            versionId = existingInstance.versionId,
+                            runtimeId = existingInstance.runtimeId,
+                            rendererProfileId = savedVersionProfileId,
+                            allocatedRamMb = existingInstance.allocatedRamMb,
+                            customJvmArgs = existingInstance.customJvmArgs,
+                            controlMapPath = existingInstance.controlMapPath
+                        )
+                    }.getOrDefault(existingInstance)
+                } else {
+                    existingInstance
+                }
+            } else {
+                instanceManager.createInstance(
+                    name = "Minecraft $versionId",
+                    versionId = versionId,
+                    runtimeId = null,
+                    rendererProfileId = savedVersionProfileId
+                )
+            }
             _uiState.update { it.copy(selectedInstanceId = instance.instanceId) }
             persistSelectedInstanceId(instance.instanceId)
             prepareInstanceLaunchInternal(instance.instanceId, requestToken, onReady)
         }
+    }
+
+    fun saveVersionRenderer(versionId: String, rendererProfileId: String?) {
+        val cleanVersionId = versionId.trim()
+        if (cleanVersionId.isBlank()) {
+            _uiState.update { it.copy(statusBanner = "Cannot save renderer: no Minecraft version selected.") }
+            return
+        }
+        scope.launch(ioDispatcher) {
+            val availableProfiles = _uiState.value.rendererProfiles.ifEmpty {
+                runCatching { instanceManager.observeRendererProfiles().first() }.getOrDefault(emptyList())
+            }
+            val requestedId = rendererProfileId?.trim()?.takeIf { it.isNotBlank() }
+            val matchedProfile = if (requestedId != null) {
+                availableProfiles.firstOrNull { it.profileId == requestedId || it.rendererId == requestedId }
+            } else {
+                null
+            }
+            if (requestedId != null && matchedProfile == null) {
+                _uiState.update {
+                    it.copy(
+                        statusBanner = "Selected renderer is unavailable or incompatible on this device. Choose a supported renderer or Auto."
+                    )
+                }
+                return@launch
+            }
+
+            val settingKey = versionRendererSettingKey(cleanVersionId)
+            val resolvedProfileId = matchedProfile?.profileId
+            val persistResult = runCatching {
+                if (resolvedProfileId == null) {
+                    settingsRepository?.remove(settingKey)
+                } else {
+                    settingsRepository?.setString(settingKey, resolvedProfileId)
+                }
+                // Keep any auto-created version instance for this exact version synchronized without touching other versions.
+                val autoInstance = instanceManager.getAllInstances().firstOrNull {
+                    it.versionId == cleanVersionId && it.name == "Minecraft $cleanVersionId"
+                }
+                if (autoInstance != null && autoInstance.rendererProfileId != resolvedProfileId) {
+                    instanceManager.updateInstanceConfig(
+                        instanceId = autoInstance.instanceId,
+                        name = autoInstance.name,
+                        versionId = autoInstance.versionId,
+                        runtimeId = autoInstance.runtimeId,
+                        rendererProfileId = resolvedProfileId,
+                        allocatedRamMb = autoInstance.allocatedRamMb,
+                        customJvmArgs = autoInstance.customJvmArgs,
+                        controlMapPath = autoInstance.controlMapPath
+                    )
+                }
+            }
+
+            persistResult.onSuccess {
+                _uiState.update { state ->
+                    val updatedMap = state.versionRendererProfiles.toMutableMap()
+                    if (resolvedProfileId == null) {
+                        updatedMap.remove(cleanVersionId)
+                    } else {
+                        updatedMap[cleanVersionId] = resolvedProfileId
+                    }
+                    val label = matchedProfile?.displayName ?: "Auto (Recommended)"
+                    state.copy(
+                        versionRendererProfiles = updatedMap,
+                        statusBanner = "Saved renderer '$label' for Minecraft $cleanVersionId"
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        statusBanner = "Failed to save renderer for $cleanVersionId: ${err.message ?: "Storage error"}"
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun resolveSavedRendererProfileForVersion(versionId: String): String? {
+        val raw = _uiState.value.versionRendererProfiles[versionId]
+            ?: runCatching {
+                settingsRepository?.getString(versionRendererSettingKey(versionId), "")?.takeIf { it.isNotBlank() }
+            }.getOrNull()
+            ?: return null
+        val available = _uiState.value.rendererProfiles
+        if (available.isEmpty()) return raw
+        return available.firstOrNull { it.profileId == raw || it.rendererId == raw }?.profileId
     }
 
     fun installLatestFabricForVersion(gameVersion: String) {
@@ -893,6 +1035,30 @@ class AetherDashboardController(
         controlMapPath: String?
     ) {
         scope.launch(ioDispatcher) {
+            val availableRenderers = _uiState.value.rendererProfiles.ifEmpty {
+                runCatching { instanceManager.observeRendererProfiles().first() }.getOrDefault(emptyList())
+            }
+            val requestedRenderer = rendererProfileId?.trim()?.takeIf { it.isNotBlank() }
+            val matchedRenderer = if (requestedRenderer != null && availableRenderers.isNotEmpty()) {
+                availableRenderers.firstOrNull { it.profileId == requestedRenderer || it.rendererId == requestedRenderer }
+            } else {
+                null
+            }
+            if (requestedRenderer != null && availableRenderers.isNotEmpty() && matchedRenderer == null) {
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        statusBanner = "Cannot save: selected renderer is unavailable on this device. Choose Auto or a supported renderer."
+                    )
+                }
+                return@launch
+            }
+            val resolvedRendererProfileId = if (availableRenderers.isNotEmpty()) {
+                matchedRenderer?.profileId
+            } else {
+                requestedRenderer
+            }
+
             _uiState.update { it.copy(isBusy = true, editingInstance = null) }
             val result = runCatching {
                 instanceManager.updateInstanceConfig(
@@ -900,18 +1066,21 @@ class AetherDashboardController(
                     name = name,
                     versionId = versionId,
                     runtimeId = runtimeId,
-                    rendererProfileId = rendererProfileId,
+                    rendererProfileId = resolvedRendererProfileId,
                     allocatedRamMb = allocatedRamMb,
                     customJvmArgs = customJvmArgs,
                     controlMapPath = controlMapPath
                 )
             }
             result.onSuccess { updated ->
+                val rendererLabel = availableRenderers
+                    .firstOrNull { it.profileId == updated.rendererProfileId }?.displayName
+                    ?: "Auto"
                 _uiState.update { state ->
                     state.copy(
                         isBusy = false,
                         selectedInstanceId = state.selectedInstanceId ?: updated.instanceId,
-                        statusBanner = "Saved settings for '${updated.name}'"
+                        statusBanner = "Saved settings for '${updated.name}' (Renderer: $rendererLabel)"
                     )
                 }
             }.onFailure { err ->
@@ -1341,6 +1510,10 @@ class AetherDashboardController(
         const val KEY_DISCORD_INVITE_URL = "community_discord_invite_url"
         const val KEY_REDUCED_MOTION = "ui_reduced_motion"
         const val KEY_SELECTED_INSTANCE_ID = "selected_instance_id_v1"
+        const val KEY_VERSION_RENDERER_PREFIX = "version_renderer_v1:"
+
+        fun versionRendererSettingKey(versionId: String): String =
+            "$KEY_VERSION_RENDERER_PREFIX${versionId.trim()}"
     }
 }
 

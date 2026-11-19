@@ -17,7 +17,9 @@ import net.kdt.pojavlaunch.LwjglGlfwKeycode;
  * Translucent circular STAR virtual joystick providing 360-degree visual tracking
  * and clean multi-touch-safe WASD input for Minecraft Java Edition.
  */
-public class StarJoystickView extends View implements StarHudInputManager.ResetParticipant {
+public class StarJoystickView extends View implements
+        StarHudInputManager.ResetParticipant,
+        StarHudInputManager.PointerReconciliationParticipant {
     public static final float DEFAULT_DIAMETER_DP = 126f;
 
     private static final float RADIAL_DEADZONE = 0.20f;
@@ -109,10 +111,33 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
         StarHudInputManager.getInstance().setInputBridge(inputBridge);
     }
 
+    private boolean mRegisteredWithManager = false;
+
+    private void ensureRegisteredWithManager() {
+        if (!mRegisteredWithManager) {
+            StarHudInputManager manager = StarHudInputManager.getInstance();
+            manager.registerResetParticipant(this);
+            manager.registerPointerParticipant(this);
+            mRegisteredWithManager = true;
+        }
+    }
+
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        StarHudInputManager.getInstance().registerResetParticipant(this);
+        ensureRegisteredWithManager();
+    }
+
+    @Override
+    public void onReconcileActivePointers(int activePointerIdBitmask, @NonNull String reason) {
+        if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
+            boolean present = mActivePointerId >= 0
+                    && mActivePointerId < 32
+                    && (activePointerIdBitmask & (1 << mActivePointerId)) != 0;
+            if (!present) {
+                releaseAllKeys();
+            }
+        }
     }
 
     @Override
@@ -222,7 +247,12 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
     @Override
     protected void onDetachedFromWindow() {
         releaseAllKeys();
-        StarHudInputManager.getInstance().unregisterResetParticipant(this);
+        if (mRegisteredWithManager) {
+            StarHudInputManager manager = StarHudInputManager.getInstance();
+            manager.unregisterResetParticipant(this);
+            manager.unregisterPointerParticipant(this);
+            mRegisteredWithManager = false;
+        }
         super.onDetachedFromWindow();
     }
 
@@ -308,14 +338,39 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
     @Override
     public boolean onTouchEvent(@NonNull MotionEvent event) {
         if (mCustomizeHighlight || !isEnabled() || getVisibility() != VISIBLE) {
+            if (mActivePointerId != MotionEvent.INVALID_POINTER_ID || mTracking) {
+                releaseAllKeys();
+            }
             return false;
         }
+        ensureRegisteredWithManager();
         int action = event.getActionMasked();
         switch (action) {
-            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_DOWN: {
+                if (mActivePointerId != MotionEvent.INVALID_POINTER_ID || mTracking) {
+                    releaseAllKeys();
+                }
+                int idx = event.getActionIndex();
+                if (idx < 0 || idx >= event.getPointerCount()) {
+                    return false;
+                }
+                int pointerId = event.getPointerId(idx);
+                if (pointerId == MotionEvent.INVALID_POINTER_ID) {
+                    return false;
+                }
+                mActivePointerId = pointerId;
+                mTracking = true;
+                updateVectorFromLocalCoords(event.getX(idx), event.getY(idx));
+                invalidate();
+                return true;
+            }
             case MotionEvent.ACTION_POINTER_DOWN: {
                 if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
-                    return true;
+                    if (event.getPointerCount() >= 2 && event.findPointerIndex(mActivePointerId) < 0) {
+                        releaseAllKeys();
+                    } else {
+                        return true;
+                    }
                 }
                 int idx = event.getActionIndex();
                 if (idx < 0 || idx >= event.getPointerCount()) {
@@ -344,26 +399,20 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
             case MotionEvent.ACTION_POINTER_UP: {
                 if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
                 int idx = event.getActionIndex();
-                if (idx >= 0 && idx < event.getPointerCount() && event.getPointerId(idx) == mActivePointerId) {
+                if ((idx >= 0 && idx < event.getPointerCount() && event.getPointerId(idx) == mActivePointerId)
+                        || (event.getPointerCount() >= 2 && event.findPointerIndex(mActivePointerId) < 0)) {
                     releaseAllKeys();
                     return true;
                 }
                 return false;
             }
             case MotionEvent.ACTION_UP: {
-                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
-                int idx = event.getActionIndex();
-                int pointerId = (idx >= 0 && idx < event.getPointerCount())
-                        ? event.getPointerId(idx)
-                        : MotionEvent.INVALID_POINTER_ID;
-                if (pointerId == mActivePointerId) {
-                    releaseAllKeys();
-                    return true;
-                }
-                return false;
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID && !mTracking) return false;
+                releaseAllKeys();
+                return true;
             }
             case MotionEvent.ACTION_CANCEL:
-                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) return false;
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID && !mTracking) return false;
                 releaseAllKeys();
                 return true;
             default:
@@ -377,6 +426,10 @@ public class StarJoystickView extends View implements StarHudInputManager.ResetP
      */
     public void beginDynamicSession(int pointerId, float overlayX, float overlayY, RectF zoneBounds) {
         if (mCustomizeHighlight) return;
+        ensureRegisteredWithManager();
+        if (mActivePointerId != MotionEvent.INVALID_POINTER_ID && mActivePointerId != pointerId) {
+            releaseAllKeys();
+        }
         mActivePointerId = pointerId;
         mTracking = true;
 

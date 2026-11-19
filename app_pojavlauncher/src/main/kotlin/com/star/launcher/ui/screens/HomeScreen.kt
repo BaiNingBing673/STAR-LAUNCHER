@@ -95,7 +95,13 @@ fun HomeScreen(
         (selectedRuntime != null && selectedRuntime.majorVersion >= requiredJava)
     val deviceAbi = state.deviceCapabilities?.cpuAbiPrimary ?: "arm64-v8a"
     val activeAccount = state.accounts.firstOrNull { it.isSelected }
-    val rendererName = featured?.rendererProfileId?.let { pid ->
+    val activeVersionRendererProfileId = selectedVersion?.versionId?.let { state.versionRendererProfiles[it] }
+    val resolvedRendererProfileId = featured
+        ?.takeIf { selectedVersion == null || it.versionId == selectedVersion.versionId }
+        ?.rendererProfileId
+        ?: activeVersionRendererProfileId
+        ?: featured?.rendererProfileId
+    val rendererName = resolvedRendererProfileId?.let { pid ->
         state.rendererProfiles.firstOrNull { it.profileId == pid }?.displayName
     } ?: state.rendererProfiles.firstOrNull { it.isDefault }?.displayName ?: "MobileGlues"
 

@@ -126,6 +126,12 @@
             android:process=":game"
             android:windowSoftInputMode="adjustResize"
             android:screenOrientation="sensorLandscape" />
+        <activity
+            android:name="com.star.launcher.stargfx.StarGfxStandaloneActivity"
+            android:exported="true"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout"
+            android:label="STAR GFX 3D Verification"
+            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar" />
 
         <provider
             android:name=".scoped.FolderProvider"
@@ -149,6 +155,22 @@
             android:name="com.star.launcher.lyrics.player.StarMusicPlayerService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+        <service
+            android:name="com.star.launcher.bridge.service.LocalServerService"
+            android:exported="false"
+            android:process=":bridge_server"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs a user-initiated local Minecraft Java Edition server in an isolated JVM process independently of the game UI."/>
+        </service>
+        <service
+            android:name="com.star.launcher.bridge.service.GeyserBridgeService"
+            android:exported="false"
+            android:process=":bridge_geyser"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs GeyserMC Standalone protocol translation in an isolated JVM process so Bedrock and Java players share the same server world."/>
+        </service>
         <service
             android:name="com.star.launcher.lyrics.media.StarMediaNotificationListener"
             android:exported="true"

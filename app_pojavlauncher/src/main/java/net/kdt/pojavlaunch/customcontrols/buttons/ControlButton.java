@@ -33,7 +33,10 @@ import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 import org.lwjgl.glfw.CallbackBridge;
 
 @SuppressLint({"ViewConstructor", "AppCompatCustomView"})
-public class ControlButton extends TextView implements ControlInterface, StarHudInputManager.ResetParticipant {
+public class ControlButton extends TextView implements
+        ControlInterface,
+        StarHudInputManager.ResetParticipant,
+        StarHudInputManager.PointerReconciliationParticipant {
     private final Paint mRectPaint = new Paint();
     protected ControlData mProperties;
     private final ControlLayout mControlLayout;
@@ -45,6 +48,7 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
     protected boolean mIsPointerOutOfBounds = false;
     private int mActivePointerId = MotionEvent.INVALID_POINTER_ID;
     private boolean mPointerHeld = false;
+    private boolean mRegisteredWithManager = false;
     private final String mMouseLeasePrefix = "ctrl_btn:" + System.identityHashCode(this) + ":";
 
     public ControlButton(ControlLayout layout, ControlData properties) {
@@ -118,7 +122,46 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
     }
 
 
+    public int getActivePointerId() {
+        return mActivePointerId;
+    }
+
+    public boolean isPointerHeld() {
+        return mPointerHeld;
+    }
+
+    public boolean containsMouseAction() {
+        if (mProperties == null || mProperties.keycodes == null) return false;
+        for (int keycode : mProperties.keycodes) {
+            if (keycode == ControlData.SPECIALBTN_MOUSEPRI
+                    || keycode == ControlData.SPECIALBTN_MOUSESEC
+                    || keycode == ControlData.SPECIALBTN_MOUSEMID
+                    || keycode == ControlData.SPECIALBTN_MOUSEBCK
+                    || keycode == ControlData.SPECIALBTN_MOUSEFWD) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void releaseSwipedTargetIfAny() {
+        ControlLayout parent = getControlLayoutParent();
+        if (parent != null) {
+            parent.releaseSwipedButtonForView(this);
+        }
+    }
+
+    private void ensureRegisteredWithManager() {
+        if (!mRegisteredWithManager) {
+            StarHudInputManager manager = StarHudInputManager.getInstance();
+            manager.registerResetParticipant(this);
+            manager.registerPointerParticipant(this);
+            mRegisteredWithManager = true;
+        }
+    }
+
     private void forceReleaseHeldControl(String reason) {
+        releaseSwipedTargetIfAny();
         mActivePointerId = MotionEvent.INVALID_POINTER_ID;
         mIsPointerOutOfBounds = false;
         if (mPointerHeld) {
@@ -151,18 +194,24 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        StarHudInputManager.getInstance().registerResetParticipant(this);
+        ensureRegisteredWithManager();
     }
 
     @Override
     protected void onDetachedFromWindow() {
         forceReleaseHeldControl("detached");
-        StarHudInputManager.getInstance().unregisterResetParticipant(this);
+        if (mRegisteredWithManager) {
+            StarHudInputManager manager = StarHudInputManager.getInstance();
+            manager.unregisterResetParticipant(this);
+            manager.unregisterPointerParticipant(this);
+            mRegisteredWithManager = false;
+        }
         super.onDetachedFromWindow();
     }
 
     @Override
     public void onGlobalInputReset(@NonNull String reason) {
+        releaseSwipedTargetIfAny();
         mActivePointerId = MotionEvent.INVALID_POINTER_ID;
         mIsPointerOutOfBounds = false;
         mPointerHeld = false;
@@ -173,9 +222,29 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
         invalidate();
     }
 
+    @Override
+    public void onReconcileActivePointers(int activePointerIdBitmask, @NonNull String reason) {
+        if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
+            boolean present = mActivePointerId >= 0
+                    && mActivePointerId < 32
+                    && (activePointerIdBitmask & (1 << mActivePointerId)) != 0;
+            if (!present) {
+                releaseSwipedTargetIfAny();
+                mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+                mIsPointerOutOfBounds = false;
+                if (!mProperties.isToggle && mPointerHeld) {
+                    mPointerHeld = false;
+                    sendKeyPresses(false);
+                }
+                invalidate();
+            }
+        }
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        ensureRegisteredWithManager();
         switch (event.getActionMasked()){
             case MotionEvent.ACTION_MOVE: {
                 if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) {
@@ -183,6 +252,7 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
                 }
                 int idx = event.findPointerIndex(mActivePointerId);
                 if (idx < 0) {
+                    releaseSwipedTargetIfAny();
                     if (!mProperties.isToggle && mPointerHeld) {
                         mPointerHeld = false;
                         sendKeyPresses(false);
@@ -204,21 +274,22 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
                 //If out of bounds
                 if(pointerX < 0 || pointerX > getWidth() ||
                         pointerY < 0 || pointerY > getHeight()){
-                    if(getProperties().isSwipeable && !mIsPointerOutOfBounds){
-                        //Remove keys
-                        if(!triggerToggle() && mPointerHeld) {
-                            mPointerHeld = false;
-                            sendKeyPresses(false);
-                        }
+                    if(!getProperties().isToggle && mPointerHeld) {
+                        mPointerHeld = false;
+                        sendKeyPresses(false);
                     }
                     mIsPointerOutOfBounds = true;
-                    getControlLayoutParent().onTouch(this, event);
+                    if(getProperties().isSwipeable && !containsMouseAction() && getControlLayoutParent() != null){
+                        getControlLayoutParent().onTouch(this, event);
+                    }
                     break;
                 }
 
                 //Else if we now are in bounds
                 if(mIsPointerOutOfBounds) {
-                    getControlLayoutParent().onTouch(this, event);
+                    if(getProperties().isSwipeable && !containsMouseAction() && getControlLayoutParent() != null) {
+                        getControlLayoutParent().onTouch(this, event);
+                    }
                     //RE-press the button
                     if(getProperties().isSwipeable && !getProperties().isToggle && !mPointerHeld){
                         mPointerHeld = true;
@@ -229,7 +300,29 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
                 break;
             }
 
-            case MotionEvent.ACTION_DOWN: // 0
+            case MotionEvent.ACTION_DOWN: { // 0
+                if (mActivePointerId != MotionEvent.INVALID_POINTER_ID || (!getProperties().isToggle && mPointerHeld)) {
+                    releaseSwipedTargetIfAny();
+                    mIsPointerOutOfBounds = false;
+                    if (!getProperties().isToggle && mPointerHeld) {
+                        mPointerHeld = false;
+                        sendKeyPresses(false);
+                    }
+                    mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+                }
+                int idx = event.getActionIndex();
+                if (idx < 0 || idx >= event.getPointerCount()) {
+                    return false;
+                }
+                mActivePointerId = event.getPointerId(idx);
+                mIsPointerOutOfBounds = false;
+                if(!getProperties().isToggle && !mPointerHeld){
+                    mPointerHeld = true;
+                    sendKeyPresses(true);
+                }
+                break;
+            }
+
             case MotionEvent.ACTION_POINTER_DOWN: { // 5
                 if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
                     return true;
@@ -239,6 +332,7 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
                     return false;
                 }
                 mActivePointerId = event.getPointerId(idx);
+                mIsPointerOutOfBounds = false;
                 if(!getProperties().isToggle && !mPointerHeld){
                     mPointerHeld = true;
                     sendKeyPresses(true);
@@ -247,6 +341,9 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
             }
 
             case MotionEvent.ACTION_POINTER_UP: { // 6
+                if (mActivePointerId == MotionEvent.INVALID_POINTER_ID) {
+                    return false;
+                }
                 int idx = event.getActionIndex();
                 int pointerId = (idx >= 0 && idx < event.getPointerCount())
                         ? event.getPointerId(idx)
@@ -254,11 +351,14 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
                 if (pointerId != mActivePointerId) {
                     return false;
                 }
-                if(getProperties().passThruEnabled){
+                if(getProperties().passThruEnabled && CallbackBridge.isGrabbing()){
                     View gameSurface = getControlLayoutParent().getGameSurface();
                     if(gameSurface != null) gameSurface.dispatchTouchEvent(event);
                 }
-                if(mIsPointerOutOfBounds) getControlLayoutParent().onTouch(this, event);
+                if(mIsPointerOutOfBounds && getControlLayoutParent() != null) {
+                    getControlLayoutParent().onTouch(this, event);
+                }
+                releaseSwipedTargetIfAny();
                 mIsPointerOutOfBounds = false;
                 mActivePointerId = MotionEvent.INVALID_POINTER_ID;
 
@@ -269,17 +369,35 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
                 break;
             }
 
-            case MotionEvent.ACTION_UP: // 1
-            case MotionEvent.ACTION_CANCEL: { // 3
-                if(getProperties().passThruEnabled){
+            case MotionEvent.ACTION_UP: { // 1
+                if(getProperties().passThruEnabled && CallbackBridge.isGrabbing()){
                     View gameSurface = getControlLayoutParent().getGameSurface();
                     if(gameSurface != null) gameSurface.dispatchTouchEvent(event);
                 }
-                if(mIsPointerOutOfBounds) getControlLayoutParent().onTouch(this, event);
+                if(mIsPointerOutOfBounds && getControlLayoutParent() != null) {
+                    getControlLayoutParent().onTouch(this, event);
+                }
+                releaseSwipedTargetIfAny();
                 mIsPointerOutOfBounds = false;
                 mActivePointerId = MotionEvent.INVALID_POINTER_ID;
 
                 if(!triggerToggle() && mPointerHeld) {
+                    mPointerHeld = false;
+                    sendKeyPresses(false);
+                }
+                break;
+            }
+
+            case MotionEvent.ACTION_CANCEL: { // 3
+                if(getProperties().passThruEnabled && CallbackBridge.isGrabbing()){
+                    View gameSurface = getControlLayoutParent().getGameSurface();
+                    if(gameSurface != null) gameSurface.dispatchTouchEvent(event);
+                }
+                releaseSwipedTargetIfAny();
+                mIsPointerOutOfBounds = false;
+                mActivePointerId = MotionEvent.INVALID_POINTER_ID;
+
+                if(!getProperties().isToggle && mPointerHeld) {
                     mPointerHeld = false;
                     sendKeyPresses(false);
                 }
@@ -359,11 +477,11 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
                 break;
 
             case ControlData.SPECIALBTN_MOUSEBCK:
-                sendMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_4, isDown);
+                dispatchManagedMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_4, isDown);
                 break;
 
             case ControlData.SPECIALBTN_MOUSEFWD:
-                sendMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_5, isDown);
+                dispatchManagedMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_5, isDown);
                 break;
 
             default:
@@ -378,9 +496,10 @@ public class ControlButton extends TextView implements ControlInterface, StarHud
         String label = (mProperties != null && mProperties.name != null && !mProperties.name.isEmpty())
                 ? mProperties.name
                 : ("CTRL_MB_" + mouseButton);
+        boolean persistentToggle = mProperties != null && mProperties.isToggle;
         StarHudInputManager manager = StarHudInputManager.getInstance();
         if (isDown) {
-            manager.acquireMouseLease(leaseId, buttonId, mActivePointerId, label, mouseButton);
+            manager.acquireMouseLease(leaseId, buttonId, mActivePointerId, label, mouseButton, persistentToggle);
         } else {
             manager.releaseLeaseIfPresent(leaseId, "ctrl_release");
         }

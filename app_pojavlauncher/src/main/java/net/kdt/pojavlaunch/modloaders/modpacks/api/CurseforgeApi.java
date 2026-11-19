@@ -442,48 +442,59 @@ public class CurseforgeApi implements ModpackApi {
                     CurseManifest.class);
             if (!verifyManifest(curseManifest)) {
                 Log.i(TAG, "manifest verification failed");
-                return null;
+                throw new IOException("Invalid or incomplete CurseForge manifest.json.");
             }
-            // Validate credentials before scheduling dozens of concurrent downloads
-            mAuthProvider.resolveAuth();
-
-            File modsDir = new File(instanceDestination, "mods");
-            ModDownloader modDownloader = new ModDownloader(modsDir, true, true);
             CurseManifest.CurseFile[] files = curseManifest.files != null
                     ? curseManifest.files
                     : new CurseManifest.CurseFile[0];
 
-            for (final CurseManifest.CurseFile curseFile : files) {
-                modDownloader.submitDownload(curseFile.projectID, curseFile.fileID, curseFile.required, () -> {
-                    ResolvedFileDownload resolved = resolveFileDownload(curseFile.projectID, curseFile.fileID);
-                    return new ModDownloader.FileInfo(
-                            resolved.url,
-                            resolved.fileName,
-                            resolved.sha1,
-                            resolved.md5,
-                            resolved.fileLength,
-                            resolved.downloadHeaders,
-                            curseFile.projectID,
-                            curseFile.fileID,
-                            resolved.modName,
-                            resolved.websiteUrl
-                    );
-                });
-            }
+            List<CurseForgeException.FileFailure> optionalFailures = Collections.emptyList();
+            List<CurseForgeException.FileFailure> requiredFailures = Collections.emptyList();
+            int succeededCount = 0;
 
-            Tools.DownloaderFeedback progressCallback = (c, m) ->
-                    ProgressKeeper.submitProgress(
-                            ProgressLayout.INSTALL_MODPACK,
-                            (int) Math.max((float) c / Math.max(m, 1) * 100, 0),
-                            R.string.modpack_download_downloading_mods_fc,
-                            c,
-                            m
-                    );
+            if (files.length > 0) {
+                // Only require CurseForge API credentials when the pack actually references remote files to download
+                mAuthProvider.resolveAuth();
 
-            modDownloader.awaitFinish(progressCallback);
+                File modsDir = new File(instanceDestination, "mods");
+                ModDownloader modDownloader = new ModDownloader(modsDir, true, true);
 
-            if (modDownloader.hasRetryableFailures()) {
-                modDownloader.retryFailed(progressCallback);
+                for (final CurseManifest.CurseFile curseFile : files) {
+                    modDownloader.submitDownload(curseFile.projectID, curseFile.fileID, curseFile.required, () -> {
+                        ResolvedFileDownload resolved = resolveFileDownload(curseFile.projectID, curseFile.fileID);
+                        return new ModDownloader.FileInfo(
+                                resolved.url,
+                                resolved.fileName,
+                                resolved.sha1,
+                                resolved.md5,
+                                resolved.fileLength,
+                                resolved.downloadHeaders,
+                                curseFile.projectID,
+                                curseFile.fileID,
+                                resolved.modName,
+                                resolved.websiteUrl
+                        );
+                    });
+                }
+
+                Tools.DownloaderFeedback progressCallback = (c, m) ->
+                        ProgressKeeper.submitProgress(
+                                ProgressLayout.INSTALL_MODPACK,
+                                (int) Math.max((float) c / Math.max(m, 1) * 100, 0),
+                                R.string.modpack_download_downloading_mods_fc,
+                                c,
+                                m
+                        );
+
+                modDownloader.awaitFinish(progressCallback);
+
+                if (modDownloader.hasRetryableFailures()) {
+                    modDownloader.retryFailed(progressCallback);
+                }
+
+                optionalFailures = modDownloader.getOptionalFailures();
+                requiredFailures = modDownloader.getFailedDownloads();
+                succeededCount = modDownloader.getSucceededCount();
             }
 
             String overridesDir = "overrides";
@@ -495,16 +506,14 @@ public class CurseforgeApi implements ModpackApi {
             }
             ZipUtils.zipExtract(modpackZipFile, overridesDir, instanceDestination);
 
-            List<CurseForgeException.FileFailure> optionalFailures = modDownloader.getOptionalFailures();
             if (!optionalFailures.isEmpty()) {
                 Log.w(TAG, optionalFailures.size() + " optional modpack file(s) could not be downloaded and were skipped.");
             }
 
-            List<CurseForgeException.FileFailure> requiredFailures = modDownloader.getFailedDownloads();
             if (!requiredFailures.isEmpty()) {
                 throw CurseForgeException.partialFailure(
                         files.length,
-                        modDownloader.getSucceededCount(),
+                        succeededCount,
                         requiredFailures,
                         optionalFailures
                 );
@@ -515,6 +524,9 @@ public class CurseforgeApi implements ModpackApi {
     }
 
     private ModLoader createInfo(CurseManifest.CurseMinecraft minecraft) {
+        if (minecraft == null || minecraft.modLoaders == null || minecraft.modLoaders.length == 0) {
+            return null;
+        }
         CurseManifest.CurseModLoader primaryModLoader = null;
         for (CurseManifest.CurseModLoader modLoader : minecraft.modLoaders) {
             if (modLoader.primary) {

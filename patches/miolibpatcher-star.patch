@@ -1,5 +1,5 @@
 diff --git a/build.gradle.kts b/build.gradle.kts
-index 2f3e0ae29798e7ac217769794afd1ed1c1ee6ecd..0f0d810c5b4eaac233e2b6aee85fcb4149cc411b 100644
+index 2f3e0ae..0f0d810 100644
 --- a/build.gradle.kts
 +++ b/build.gradle.kts
 @@ -11,6 +11,7 @@ repositories {
@@ -11,7 +11,7 @@ index 2f3e0ae29798e7ac217769794afd1ed1c1ee6ecd..0f0d810c5b4eaac233e2b6aee85fcb41
  
  java {
 diff --git a/src/main/java/com/mio/libpatcher/MainAgent.java b/src/main/java/com/mio/libpatcher/MainAgent.java
-index 2afab934a40b33613a0c9d03f30d550f33a09489..8b071713449216aba296f931dbd2874e264c3924 100644
+index 2afab93..631a843 100644
 --- a/src/main/java/com/mio/libpatcher/MainAgent.java
 +++ b/src/main/java/com/mio/libpatcher/MainAgent.java
 @@ -53,6 +53,7 @@ public class MainAgent {
@@ -22,7 +22,7 @@ index 2afab934a40b33613a0c9d03f30d550f33a09489..8b071713449216aba296f931dbd2874e
          transformers.add(new SystemInfoTransformer());
          transformers.add(new RandomPatchesTransformer());
          transformers.add(new ProcessorIdentifierTransformer());
-@@ -68,6 +69,10 @@ public class MainAgent {
+@@ -68,6 +69,12 @@ public class MainAgent {
          transformers.add(new ALC10Transformer());
          transformers.add(new ASMTransformer());
          transformers.add(new SmoothFontTransformer());
@@ -30,12 +30,160 @@ index 2afab934a40b33613a0c9d03f30d550f33a09489..8b071713449216aba296f931dbd2874e
 +        transformers.add(new MinecraftSurfaceResumeTransformer());
 +        transformers.add(new GlSingleWindowTransformer());
 +        transformers.add(new GlShaderUniformNameTransformer());
++        transformers.add(new StarGfxBackendTransformer());
++        transformers.add(new FrontendFrameProbeTransformer());
          return transformers;
      }
  
+diff --git a/src/main/java/com/mio/libpatcher/transformer/FrontendFrameProbeTransformer.java b/src/main/java/com/mio/libpatcher/transformer/FrontendFrameProbeTransformer.java
+new file mode 100644
+index 0000000..f7591ac
+--- /dev/null
++++ b/src/main/java/com/mio/libpatcher/transformer/FrontendFrameProbeTransformer.java
+@@ -0,0 +1,140 @@
++package com.mio.libpatcher.transformer;
++
++import com.mio.libpatcher.util.LogUtil;
++import javassist.CtClass;
++import javassist.CtField;
++import javassist.CtMethod;
++import javassist.CtNewMethod;
++import javassist.NotFoundException;
++
++/**
++ * Passive RenderPearl FrontendGpuSurface frame-time probe for M8 apples-to-apples
++ * comparison across backends (e.g. OpenGL ES vs STAR GFX Vulkan) with near-zero overhead.
++ */
++public class FrontendFrameProbeTransformer implements BaseTransformer {
++
++    @Override
++    public String getTargetClassName() {
++        return "com.mojang.renderpearl.frontend.FrontendGpuSurface";
++    }
++
++    @Override
++    public void transform(CtClass clazz) throws Throwable {
++        if (clazz.isFrozen()) {
++            clazz.defrost();
++        }
++
++        CtMethod acquireMethod;
++        CtMethod blitMethod;
++        CtMethod presentMethod;
++        try {
++            acquireMethod = clazz.getDeclaredMethod("acquireNextTexture");
++            blitMethod = clazz.getDeclaredMethod("blitFromTexture");
++            presentMethod = clazz.getDeclaredMethod("present");
++        } catch (NotFoundException ignored) {
++            return;
++        }
++
++        clazz.addField(CtField.make("private static final int rpBenchWin = 120;", clazz));
++        clazz.addField(CtField.make("private static final double[] rpBenchMs = new double[120];", clazz));
++        clazz.addField(CtField.make("private static int rpBenchCount = 0;", clazz));
++        clazz.addField(CtField.make("private static long rpBenchLastEndNs = 0L;", clazz));
++        clazz.addField(CtField.make("private static long rpBenchSumAcqNs = 0L;", clazz));
++        clazz.addField(CtField.make("private static long rpBenchSumBlitNs = 0L;", clazz));
++        clazz.addField(CtField.make("private static long rpBenchSumPresNs = 0L;", clazz));
++        clazz.addField(CtField.make("private static long rpBenchLastAcqNs = 0L;", clazz));
++        clazz.addField(CtField.make("private static long rpBenchLastBlitNs = 0L;", clazz));
++
++        clazz.addMethod(CtNewMethod.make(
++                "private static long rpReadVmRssKb() {" +
++                        "  java.io.BufferedReader br = null;" +
++                        "  try {" +
++                        "    br = new java.io.BufferedReader(new java.io.FileReader(\"/proc/self/status\"));" +
++                        "    String line;" +
++                        "    while ((line = br.readLine()) != null) {" +
++                        "      if (line.startsWith(\"VmRSS:\")) {" +
++                        "        String rest = line.substring(6).trim();" +
++                        "        int sp = rest.indexOf(' ');" +
++                        "        String num = sp > 0 ? rest.substring(0, sp) : rest;" +
++                        "        return java.lang.Long.parseLong(num);" +
++                        "      }" +
++                        "    }" +
++                        "  } catch (Throwable ignored) {" +
++                        "  } finally {" +
++                        "    if (br != null) { try { br.close(); } catch (Throwable ignored2) {} }" +
++                        "  }" +
++                        "  return -1L;" +
++                        "}",
++                clazz
++        ));
++
++        clazz.addMethod(CtNewMethod.make(
++                "private static void rpRecordPresent(Object backendObj, long acqNs, long blitNs, long presNs, long endNs) {" +
++                        "  long prev = rpBenchLastEndNs;" +
++                        "  rpBenchLastEndNs = endNs;" +
++                        "  if (prev == 0L) return;" +
++                        "  double dtMs = (double)(endNs - prev) / 1000000.0;" +
++                        "  if (dtMs <= 0.0 || dtMs > 5000.0) return;" +
++                        "  rpBenchMs[rpBenchCount] = dtMs;" +
++                        "  rpBenchSumAcqNs += acqNs;" +
++                        "  rpBenchSumBlitNs += blitNs;" +
++                        "  rpBenchSumPresNs += presNs;" +
++                        "  rpBenchCount++;" +
++                        "  if (rpBenchCount < rpBenchWin) return;" +
++                        "  double[] sorted = new double[rpBenchWin];" +
++                        "  double sum = 0.0;" +
++                        "  for (int i = 0; i < rpBenchWin; i++) {" +
++                        "    sorted[i] = rpBenchMs[i];" +
++                        "    sum += sorted[i];" +
++                        "  }" +
++                        "  java.util.Arrays.sort(sorted);" +
++                        "  double avgMs = sum / (double) rpBenchWin;" +
++                        "  double var = 0.0;" +
++                        "  for (int i = 0; i < rpBenchWin; i++) {" +
++                        "    double d = rpBenchMs[i] - avgMs;" +
++                        "    var += d * d;" +
++                        "  }" +
++                        "  double stddevMs = java.lang.Math.sqrt(var / (double) rpBenchWin);" +
++                        "  double p50Ms = sorted[rpBenchWin / 2];" +
++                        "  double p95Ms = sorted[(rpBenchWin * 95) / 100];" +
++                        "  double p99Ms = sorted[rpBenchWin - 1];" +
++                        "  int n1 = java.lang.Math.max(1, rpBenchWin / 100);" +
++                        "  double slowSum = 0.0;" +
++                        "  for (int i = rpBenchWin - n1; i < rpBenchWin; i++) { slowSum += sorted[i]; }" +
++                        "  double slow1Ms = slowSum / (double) n1;" +
++                        "  double avgFps = avgMs > 0.0 ? (1000.0 / avgMs) : 0.0;" +
++                        "  double low1Fps = slow1Ms > 0.0 ? (1000.0 / slow1Ms) : 0.0;" +
++                        "  double acqMs = (double) rpBenchSumAcqNs / (1000000.0 * (double) rpBenchWin);" +
++                        "  double blitMs = (double) rpBenchSumBlitNs / (1000000.0 * (double) rpBenchWin);" +
++                        "  double presMs = (double) rpBenchSumPresNs / (1000000.0 * (double) rpBenchWin);" +
++                        "  long rssMb = rpReadVmRssKb() / 1024L;" +
++                        "  Runtime rt = Runtime.getRuntime();" +
++                        "  long heapMb = (rt.totalMemory() - rt.freeMemory()) / (1024L * 1024L);" +
++                        "  String bName = backendObj != null ? backendObj.getClass().getSimpleName() : \"unknown\";" +
++                        "  String renderer = System.getProperty(\"renderer\", System.getenv(\"RENDERER\") != null ? System.getenv(\"RENDERER\") : \"unknown\");" +
++                        "  System.out.println(String.format(java.util.Locale.US, " +
++                        "    \"[RENDERPEARL_BENCH] backend=%s env=%s frames=%d avgFps=%.2f low1Fps=%.2f avgMs=%.3f stddevMs=%.3f p50Ms=%.3f p95Ms=%.3f p99Ms=%.3f acqMs=%.3f blitMs=%.3f presMs=%.3f rssMB=%d heapMB=%d\", " +
++                        "    new Object[] { bName, renderer, Integer.valueOf(rpBenchWin), Double.valueOf(avgFps), Double.valueOf(low1Fps), Double.valueOf(avgMs), Double.valueOf(stddevMs), Double.valueOf(p50Ms), Double.valueOf(p95Ms), Double.valueOf(p99Ms), Double.valueOf(acqMs), Double.valueOf(blitMs), Double.valueOf(presMs), Long.valueOf(rssMb), Long.valueOf(heapMb) }));" +
++                        "  rpBenchCount = 0;" +
++                        "  rpBenchSumAcqNs = 0L;" +
++                        "  rpBenchSumBlitNs = 0L;" +
++                        "  rpBenchSumPresNs = 0L;" +
++                        "}",
++                clazz
++        ));
++
++        acquireMethod.addLocalVariable("_rpAcqT0", CtClass.longType);
++        acquireMethod.insertBefore("{ _rpAcqT0 = System.nanoTime(); }");
++        acquireMethod.insertAfter("{ rpBenchLastAcqNs = System.nanoTime() - _rpAcqT0; }");
++
++        blitMethod.addLocalVariable("_rpBlitT0", CtClass.longType);
++        blitMethod.insertBefore("{ _rpBlitT0 = System.nanoTime(); }");
++        blitMethod.insertAfter("{ rpBenchLastBlitNs = System.nanoTime() - _rpBlitT0; }");
++
++        presentMethod.addLocalVariable("_rpPresT0", CtClass.longType);
++        presentMethod.insertBefore("{ _rpPresT0 = System.nanoTime(); }");
++        presentMethod.insertAfter("{ long _rpEnd = System.nanoTime(); rpRecordPresent(this.backend, rpBenchLastAcqNs, rpBenchLastBlitNs, _rpEnd - _rpPresT0, _rpEnd); }");
++
++        LogUtil.info("Patched FrontendGpuSurface with passive [RENDERPEARL_BENCH] probe");
++    }
++}
 diff --git a/src/main/java/com/mio/libpatcher/transformer/GLTransformer.java b/src/main/java/com/mio/libpatcher/transformer/GLTransformer.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..88e7e4eb43a79909167dc0ebfecd564999bfe9de
+index 0000000..88e7e4e
 --- /dev/null
 +++ b/src/main/java/com/mio/libpatcher/transformer/GLTransformer.java
 @@ -0,0 +1,36 @@
@@ -77,7 +225,7 @@ index 0000000000000000000000000000000000000000..88e7e4eb43a79909167dc0ebfecd5649
 +}
 diff --git a/src/main/java/com/mio/libpatcher/transformer/GlShaderUniformNameTransformer.java b/src/main/java/com/mio/libpatcher/transformer/GlShaderUniformNameTransformer.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..e9225c07e002b2f4505dc970c27cccbc1a8fbe42
+index 0000000..e9225c0
 --- /dev/null
 +++ b/src/main/java/com/mio/libpatcher/transformer/GlShaderUniformNameTransformer.java
 @@ -0,0 +1,54 @@
@@ -137,7 +285,7 @@ index 0000000000000000000000000000000000000000..e9225c07e002b2f4505dc970c27cccbc
 +}
 diff --git a/src/main/java/com/mio/libpatcher/transformer/GlSingleWindowTransformer.java b/src/main/java/com/mio/libpatcher/transformer/GlSingleWindowTransformer.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..92ac5e42ec62a5e3538ba6095a4940424c38fcc3
+index 0000000..dd19325
 --- /dev/null
 +++ b/src/main/java/com/mio/libpatcher/transformer/GlSingleWindowTransformer.java
 @@ -0,0 +1,156 @@
@@ -196,40 +344,40 @@ index 0000000000000000000000000000000000000000..92ac5e42ec62a5e3538ba6095a494042
 +
 +    private static void patchGlBackend(CtClass clazz) throws NotFoundException, CannotCompileException {
 +        CtMethod createWindow = clazz.getDeclaredMethod("createWindow");
-+        createWindow.instrument(new ExprEditor() {
-+            @Override
-+            public void edit(MethodCall m) throws CannotCompileException {
-+                if ("org.lwjgl.sdl.SDLVideo".equals(m.getClassName())
-+                        && "SDL_CreateWindow".equals(m.getMethodName())) {
-+                    m.replace(
-+                            "{ " +
-+                                    "  if (\"Android\".equals(org.lwjgl.sdl.SDLPlatform.SDL_GetPlatform())) {" +
-+                                    "    String mioTitle = $1 != null ? $1.toString() : \"\";" +
-+                                    "    String mioSaved = java.lang.System.getProperty(\"" + PROP_WINDOW + "\");" +
-+                                    "    boolean mioClaimed = \"true\".equals(java.lang.System.getProperty(\"" + PROP_CLAIMED + "\"));" +
-+                                    "    if (mioSaved != null && !mioClaimed) {" +
-+                                    "      long mioHandle = java.lang.Long.parseLong(mioSaved);" +
-+                                    "      java.lang.System.setProperty(\"" + PROP_CLAIMED + "\", \"true\");" +
-+                                    "      org.lwjgl.sdl.SDLVideo.SDL_SetWindowTitle(mioHandle, $1);" +
-+                                    "      org.lwjgl.sdl.SDLVideo.SDL_SetWindowSize(mioHandle, $2, $3);" +
-+                                    "      $_ = mioHandle;" +
-+                                    "    } else {" +
-+                                    "      long mioFlags = \"" + UTILITY_TITLE + "\".equals(mioTitle) ? " + ANDROID_WINDOW_FLAGS + "L : $4;" +
-+                                    "      long mioWin = org.lwjgl.sdl.SDLVideo.SDL_CreateWindow($1, $2, $3, mioFlags);" +
-+                                    "      if (mioWin != 0L && mioSaved == null) {" +
-+                                    "        java.lang.System.setProperty(\"" + PROP_WINDOW + "\", java.lang.Long.toString(mioWin));" +
-+                                    "        java.lang.System.setProperty(\"" + PROP_CLAIMED + "\", \"" + UTILITY_TITLE + "\".equals(mioTitle) ? \"false\" : \"true\");" +
-+                                    "      }" +
-+                                    "      $_ = mioWin;" +
-+                                    "    }" +
-+                                    "  } else {" +
-+                                    "    $_ = $proceed($$);" +
-+                                    "  }" +
-+                                    "}"
-+                    );
-+                }
-+            }
-+        });
++        // Use insertBefore + insertAfter on GlBackend.createWindow itself rather than
++        // matching SDLVideo.SDL_CreateWindow via ExprEditor, because mods like Sodium
++        // @Redirect SDLVideo.SDL_CreateWindow at Mixin time before the Java agent runs.
++        createWindow.insertAfter(
++                "{ " +
++                        "  if (\"Android\".equals(org.lwjgl.sdl.SDLPlatform.SDL_GetPlatform()) && $_ != 0L) {" +
++                        "    if (java.lang.System.getProperty(\"" + PROP_WINDOW + "\") == null) {" +
++                        "      java.lang.System.setProperty(\"" + PROP_WINDOW + "\", java.lang.Long.toString($_));" +
++                        "      String mioTitle = $1 != null ? $1.toString() : \"\";" +
++                        "      java.lang.System.setProperty(\"" + PROP_CLAIMED + "\", \"" + UTILITY_TITLE + "\".equals(mioTitle) ? \"false\" : \"true\");" +
++                        "    }" +
++                        "  }" +
++                        "}"
++        );
++        createWindow.insertBefore(
++                "{ " +
++                        "  if (\"Android\".equals(org.lwjgl.sdl.SDLPlatform.SDL_GetPlatform())) {" +
++                        "    String mioTitle = $1 != null ? $1.toString() : \"\";" +
++                        "    String mioSaved = java.lang.System.getProperty(\"" + PROP_WINDOW + "\");" +
++                        "    if (mioSaved != null) {" +
++                        "      long mioHandle = java.lang.Long.parseLong(mioSaved);" +
++                        "      if (!\"" + UTILITY_TITLE + "\".equals(mioTitle)) {" +
++                        "        java.lang.System.setProperty(\"" + PROP_CLAIMED + "\", \"true\");" +
++                        "        org.lwjgl.sdl.SDLVideo.SDL_SetWindowTitle(mioHandle, $1);" +
++                        "        org.lwjgl.sdl.SDLVideo.SDL_SetWindowSize(mioHandle, $2, $3);" +
++                        "      }" +
++                        "      return mioHandle;" +
++                        "    }" +
++                        "    if (\"" + UTILITY_TITLE + "\".equals(mioTitle)) {" +
++                        "      $4 = " + ANDROID_WINDOW_FLAGS + "L;" +
++                        "    }" +
++                        "  }" +
++                        "}"
++        );
 +        LogUtil.info("Patched GlBackend for Android single-window reuse");
 +    }
 +
@@ -299,7 +447,7 @@ index 0000000000000000000000000000000000000000..92ac5e42ec62a5e3538ba6095a494042
 +}
 diff --git a/src/main/java/com/mio/libpatcher/transformer/MinecraftSurfaceResumeTransformer.java b/src/main/java/com/mio/libpatcher/transformer/MinecraftSurfaceResumeTransformer.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..700d799098e586c54722161f17a2564587c2ca07
+index 0000000..700d799
 --- /dev/null
 +++ b/src/main/java/com/mio/libpatcher/transformer/MinecraftSurfaceResumeTransformer.java
 @@ -0,0 +1,54 @@
@@ -357,9 +505,85 @@ index 0000000000000000000000000000000000000000..700d799098e586c54722161f17a25645
 +        LogUtil.info("Patched Minecraft.renderFrame for Android surface resume recovery");
 +    }
 +}
+diff --git a/src/main/java/com/mio/libpatcher/transformer/StarGfxBackendTransformer.java b/src/main/java/com/mio/libpatcher/transformer/StarGfxBackendTransformer.java
+new file mode 100644
+index 0000000..da5b461
+--- /dev/null
++++ b/src/main/java/com/mio/libpatcher/transformer/StarGfxBackendTransformer.java
+@@ -0,0 +1,70 @@
++package com.mio.libpatcher.transformer;
++
++import com.mio.libpatcher.util.LogUtil;
++import javassist.CtClass;
++import javassist.CtMethod;
++import javassist.CtNewMethod;
++import javassist.NotFoundException;
++
++/**
++ * Injects com.star.renderpearl.StarGfxGpuBackend into net.minecraft.client.PreferredGraphicsApi.getBackendsToTry()
++ * when -Dstar.gfx.renderpearl.enable=true is active on RenderPearl 26.4+ clients.
++ */
++public class StarGfxBackendTransformer implements BaseTransformer {
++
++    @Override
++    public String getTargetClassName() {
++        return "net.minecraft.client.PreferredGraphicsApi";
++    }
++
++    @Override
++    public void transform(CtClass clazz) throws Throwable {
++        if (!Boolean.getBoolean("star.gfx.renderpearl.enable")) {
++            return;
++        }
++        CtMethod method;
++        try {
++            method = clazz.getDeclaredMethod("getBackendsToTry");
++        } catch (NotFoundException ignored) {
++            return;
++        }
++
++        if (clazz.isFrozen()) {
++            clazz.defrost();
++        }
++
++        clazz.addMethod(CtNewMethod.make(
++                "private static com.mojang.renderpearl.api.device.GpuBackend[] starGfxHookBackends(" +
++                        "  com.mojang.renderpearl.api.device.GpuBackend[] orig," +
++                        "  net.minecraft.client.PreferredGraphicsApi self) {" +
++                        "  if (!java.lang.Boolean.getBoolean(\"star.gfx.renderpearl.enable\")) { return orig; }" +
++                        "  if (self != null && \"OPENGL\".equals(self.name())) { return orig; }" +
++                        "  try {" +
++                        "    java.lang.ClassLoader cl = self != null ? self.getClass().getClassLoader() : null;" +
++                        "    java.lang.Class.forName(\"com.mojang.renderpearl.api.commands.RenderPassDescriptor$Attachment$ClearValue\", false, cl);" +
++                        "    java.lang.Class cls = java.lang.Class.forName(\"com.star.renderpearl.StarGfxGpuBackend\");" +
++                        "    com.mojang.renderpearl.api.device.GpuBackend star = (com.mojang.renderpearl.api.device.GpuBackend)" +
++                        "      cls.getConstructor(new java.lang.Class[0]).newInstance(new java.lang.Object[0]);" +
++                        "    if (java.lang.Boolean.getBoolean(\"star.gfx.renderpearl.strict\")) {" +
++                        "      return new com.mojang.renderpearl.api.device.GpuBackend[] { star };" +
++                        "    }" +
++                        "    if (orig == null || orig.length == 0) {" +
++                        "      return new com.mojang.renderpearl.api.device.GpuBackend[] { star };" +
++                        "    }" +
++                        "    com.mojang.renderpearl.api.device.GpuBackend[] out = new com.mojang.renderpearl.api.device.GpuBackend[orig.length + 1];" +
++                        "    out[0] = star;" +
++                        "    for (int i = 0; i < orig.length; i++) { out[i + 1] = orig[i]; }" +
++                        "    return out;" +
++                        "  } catch (Throwable t) {" +
++                        "    java.lang.System.err.println(\"[STAR_GFX_HAL] Failed to inject StarGfxGpuBackend: \" + t);" +
++                        "    t.printStackTrace();" +
++                        "    return orig;" +
++                        "  }" +
++                        "}",
++                clazz
++        ));
++
++        method.insertAfter("{ $_ = starGfxHookBackends($_, $0); }");
++        LogUtil.info("Patched PreferredGraphicsApi.getBackendsToTry for STAR GFX RenderPearl");
++    }
++}
 diff --git a/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java b/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a8b7402376798aec53819827e5e5c370b8bdd1e
+index 0000000..1a8b740
 --- /dev/null
 +++ b/src/main/java/com/mio/libpatcher/transformer/VulkanSurfaceTransformer.java
 @@ -0,0 +1,259 @@
@@ -623,10 +847,10 @@ index 0000000000000000000000000000000000000000..1a8b7402376798aec53819827e5e5c37
 +    }
 +}
 diff --git a/src/test/java/com/mio/libpatcher/transformer/BaseTransformerSmokeTest.java b/src/test/java/com/mio/libpatcher/transformer/BaseTransformerSmokeTest.java
-index 35f980310b99d05ad47c309ece626217213e7c19..9257ae23cc3cbda0ed3a233fb620c01f90eba520 100644
+index 35f9803..c679ecb 100644
 --- a/src/test/java/com/mio/libpatcher/transformer/BaseTransformerSmokeTest.java
 +++ b/src/test/java/com/mio/libpatcher/transformer/BaseTransformerSmokeTest.java
-@@ -195,4 +195,513 @@ class BaseTransformerSmokeTest {
+@@ -195,4 +195,581 @@ class BaseTransformerSmokeTest {
              System.clearProperty("miolibpatcher.asmBackport");
          }
      }
@@ -1068,8 +1292,76 @@ index 35f980310b99d05ad47c309ece626217213e7c19..9257ae23cc3cbda0ed3a233fb620c01f
 +
 +        assertEquals(777L, gameWin);
 +        assertEquals(1, videoClass.getField("createCount").getInt(null));
++        assertEquals(8226L, videoClass.getField("lastFlags").getLong(null));
 +        assertEquals("Minecraft 26.3", videoClass.getField("lastTitle").get(null));
 +        // GlDevice.close() must not double-destroy the window handed off to Window
++        devClass.getMethod("close").invoke(device);
++        assertEquals(0, videoClass.getField("destroyCount").getInt(null));
++    }
++
++    @Test
++    void glSingleWindowOnAndroidWithSodiumRedirect() throws Exception {
++        ClassPool pool = new ClassPool(true);
++        CtClass sdlPlatform = pool.makeClass("org.lwjgl.sdl.SDLPlatform");
++        sdlPlatform.addMethod(CtMethod.make("public static String SDL_GetPlatform() { return \"Android\"; }", sdlPlatform));
++
++        CtClass sdlVideo = pool.makeClass("org.lwjgl.sdl.SDLVideo");
++        sdlVideo.addField(CtField.make("public static int createCount;", sdlVideo));
++        sdlVideo.addField(CtField.make("public static int destroyCount;", sdlVideo));
++        sdlVideo.addField(CtField.make("public static long lastFlags;", sdlVideo));
++        sdlVideo.addField(CtField.make("public static String lastTitle;", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static long SDL_CreateWindow(CharSequence t, int w, int h, long f) { createCount++; lastFlags = f; if (createCount > 1) return 0L; return 777L; }", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static boolean SDL_SetWindowTitle(long w, CharSequence t) { lastTitle = t.toString(); return true; }", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static boolean SDL_SetWindowSize(long w, int wi, int h) { return true; }", sdlVideo));
++        sdlVideo.addMethod(CtMethod.make("public static void SDL_DestroyWindow(long w) { destroyCount++; }", sdlVideo));
++
++        CtClass debugOpts = pool.makeClass("com.mojang.renderpearl.api.device.GpuDebugOptions");
++        CtClass glBackend = pool.makeClass("com.mojang.renderpearl.backend.opengl.GlBackend");
++        // Model Sodium's WindowMixin @Redirect replacing SDLVideo.SDL_CreateWindow inside GlBackend.createWindow
++        glBackend.addMethod(CtMethod.make("private static long redirect$sodium$wrapGlfwCreateWindow(CharSequence t, int w, int h, long f) { return org.lwjgl.sdl.SDLVideo.SDL_CreateWindow(t, w, h, f); }", glBackend));
++        glBackend.addMethod(CtMethod.make("public long createWindow(String t, int w, int h, long f) { return redirect$sodium$wrapGlfwCreateWindow(t, w, h, 2L | f); }", glBackend));
++
++        CtClass glDevice = pool.makeClass("com.mojang.renderpearl.backend.opengl.GlDevice");
++        glDevice.addField(CtField.make("private final long initialWindowHandle;", glDevice));
++        glDevice.addConstructor(CtNewConstructor.make(
++                "public GlDevice(com.mojang.renderpearl.backend.opengl.GlBackend b, com.mojang.renderpearl.api.device.GpuDebugOptions o) {" +
++                        "  this.initialWindowHandle = b.createWindow(\"Minecraft - RenderPearl OpenGL Hidden Utility Window\", 320, 480, 2147614728L);" +
++                        "  long test = b.createWindow(\"Minecraft - RenderPearl OpenGL Hidden Test Window\", 320, 480, 2147614728L);" +
++                        "  if (test == 0L) throw new RuntimeException(\"second window failed\");" +
++                        "  org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow(test);" +
++                        "}",
++                glDevice
++        ));
++        glDevice.addMethod(CtMethod.make("public void close() { org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow(this.initialWindowHandle); }", glDevice));
++
++        GlSingleWindowTransformer transformer = new GlSingleWindowTransformer();
++        try {
++            transformer.transform(glBackend);
++            glBackend.toBytecode();
++            transformer.transform(glDevice);
++            glDevice.toBytecode();
++        } catch (Throwable e) {
++            throw new AssertionError("GlSingleWindowTransformer transform failed", e);
++        }
++
++        System.clearProperty("mio.rp.gl.singleWindow");
++        System.clearProperty("mio.rp.gl.windowClaimed");
++        ClassLoader cl = new ClassLoader(BaseTransformerSmokeTest.class.getClassLoader()) {};
++        sdlPlatform.toClass(cl, null);
++        Class<?> videoClass = sdlVideo.toClass(cl, null);
++        Class<?> optsClass = debugOpts.toClass(cl, null);
++        Class<?> backendClass = glBackend.toClass(cl, null);
++        Class<?> devClass = glDevice.toClass(cl, null);
++
++        Object backend = backendClass.getDeclaredConstructor().newInstance();
++        Object device = devClass.getConstructor(backendClass, optsClass).newInstance(backend, null);
++        long gameWin = (long) backendClass.getMethod("createWindow", String.class, int.class, int.class, long.class)
++                .invoke(backend, "Minecraft 26.3", 1280, 720, 8224L);
++
++        assertEquals(777L, gameWin);
++        assertEquals(1, videoClass.getField("createCount").getInt(null));
++        assertEquals(8226L, videoClass.getField("lastFlags").getLong(null));
++        assertEquals("Minecraft 26.3", videoClass.getField("lastTitle").get(null));
 +        devClass.getMethod("close").invoke(device);
 +        assertEquals(0, videoClass.getField("destroyCount").getInt(null));
 +    }

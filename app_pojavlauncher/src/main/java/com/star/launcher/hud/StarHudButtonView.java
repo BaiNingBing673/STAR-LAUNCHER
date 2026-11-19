@@ -21,7 +21,9 @@ import net.kdt.pojavlaunch.MainActivity;
  * lease is reference-counted per pointer ID and guaranteed to release on UP, CANCEL,
  * missing pointer index, visibility loss, detach, or lifecycle transitions.
  */
-public class StarHudButtonView extends View implements StarHudInputManager.ResetParticipant {
+public class StarHudButtonView extends View implements
+        StarHudInputManager.ResetParticipant,
+        StarHudInputManager.PointerReconciliationParticipant {
     public static final int ACTION_ELEMENT = 0;
     public static final int ACTION_KEYBOARD = 1;
     public static final int ACTION_VIRTUAL_MOUSE = 2;
@@ -283,8 +285,14 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        ensureRegisteredWithManager();
+    }
+
+    private void ensureRegisteredWithManager() {
         if (!mAttachedToManager) {
-            StarHudInputManager.getInstance().registerResetParticipant(this);
+            StarHudInputManager manager = StarHudInputManager.getInstance();
+            manager.registerResetParticipant(this);
+            manager.registerPointerParticipant(this);
             mAttachedToManager = true;
         }
     }
@@ -317,7 +325,9 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
     protected void onDetachedFromWindow() {
         forceReleaseWithReason("detached");
         if (mAttachedToManager) {
-            StarHudInputManager.getInstance().unregisterResetParticipant(this);
+            StarHudInputManager manager = StarHudInputManager.getInstance();
+            manager.unregisterResetParticipant(this);
+            manager.unregisterPointerParticipant(this);
             mAttachedToManager = false;
         }
         super.onDetachedFromWindow();
@@ -331,6 +341,18 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         mIsToggled = false;
         mToggledOnDuringCurrentTouch = false;
         invalidate();
+    }
+
+    @Override
+    public void onReconcileActivePointers(int activePointerIdBitmask, @NonNull String reason) {
+        if (mActivePointerId != MotionEvent.INVALID_POINTER_ID) {
+            boolean present = mActivePointerId >= 0
+                    && mActivePointerId < 32
+                    && (activePointerIdBitmask & (1 << mActivePointerId)) != 0;
+            if (!present) {
+                onPointerReleased(true, "reconcile_pointer:" + reason);
+            }
+        }
     }
 
     @Override
@@ -468,11 +490,36 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
     @Override
     public boolean onTouchEvent(@NonNull MotionEvent event) {
         if (mCustomizeHighlight || !isEnabled() || getVisibility() != VISIBLE) {
+            if (mActivePointerId != MotionEvent.INVALID_POINTER_ID
+                    || (mActiveLeaseId != null && mButtonConfig.getInteractionMode() == StarHudInteractionMode.HOLD)) {
+                onPointerReleased(true, "touch_while_inactive");
+            }
             return false;
         }
+        ensureRegisteredWithManager();
         int action = event.getActionMasked();
         switch (action) {
-            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_DOWN: {
+                int idx = event.getActionIndex();
+                if (idx < 0 || idx >= event.getPointerCount()) {
+                    return false;
+                }
+                int pointerId = event.getPointerId(idx);
+                if (pointerId == MotionEvent.INVALID_POINTER_ID) {
+                    return false;
+                }
+                if (mActivePointerId != MotionEvent.INVALID_POINTER_ID
+                        || (mActiveLeaseId != null && mButtonConfig.getInteractionMode() == StarHudInteractionMode.HOLD)) {
+                    // ACTION_DOWN always begins a new touch sequence on this view; any previous active pointer is stale.
+                    onPointerReleased(true, "stale_pointer_on_action_down");
+                }
+                if (!isPointInHitbox(event.getX(idx), event.getY(idx))) {
+                    return false;
+                }
+                mActivePointerId = pointerId;
+                onPointerPressed(pointerId);
+                return true;
+            }
             case MotionEvent.ACTION_POINTER_DOWN: {
                 int idx = event.getActionIndex();
                 if (idx < 0 || idx >= event.getPointerCount()) {
@@ -631,10 +678,13 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
             int pointerId
     ) {
         String leaseId = "btn:" + mButtonConfig.getId();
+        boolean persistentToggle = (mButtonConfig.getInteractionMode() == StarHudInteractionMode.TOGGLE);
         int mouseButton = StarHudActionRegistry.mouseButtonForJava(action);
         if (mouseButton >= 0) {
             mActiveLeaseId = leaseId;
-            boolean ok = manager.acquireMouseLease(leaseId, mButtonConfig.getId(), pointerId, action.name(), mouseButton);
+            boolean ok = manager.acquireMouseLease(
+                    leaseId, mButtonConfig.getId(), pointerId, action.name(), mouseButton, persistentToggle
+            );
             if (!ok) {
                 mActiveLeaseId = null;
                 mIsPressed = false;
@@ -646,7 +696,9 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         if (keycode > 0) {
             boolean applyMods = StarHudActionRegistry.applyModifiersForJava(action, customKeycode);
             mActiveLeaseId = leaseId;
-            boolean ok = manager.acquireKeyLease(leaseId, mButtonConfig.getId(), pointerId, action.name(), keycode, applyMods);
+            boolean ok = manager.acquireKeyLease(
+                    leaseId, mButtonConfig.getId(), pointerId, action.name(), keycode, applyMods, persistentToggle
+            );
             if (!ok) {
                 mActiveLeaseId = null;
                 mIsPressed = false;
@@ -683,6 +735,8 @@ public class StarHudButtonView extends View implements StarHudInputManager.Reset
         mActiveLeaseId = null;
         if (leaseId != null) {
             StarHudInputManager.getInstance().releaseLease(leaseId, reason);
+        } else if (mSpecialAction == ACTION_ELEMENT) {
+            StarHudInputManager.getInstance().releaseButton(mButtonConfig.getId(), reason);
         }
     }
 

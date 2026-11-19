@@ -10,6 +10,7 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -35,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,6 +50,8 @@ import com.star.launcher.engine.adapter.EnginePreferencesAdapter
 import com.star.launcher.engine.adapter.ModImportAdapter
 import com.star.launcher.engine.adapter.PojavLaunchBridge
 import com.star.launcher.instance.InstanceManager
+import com.star.launcher.mods.modpack.ModpackImportProgress
+import com.star.launcher.mods.modpack.ModpackImportStage
 import com.star.launcher.mods.ui.ModsController
 import com.star.launcher.mods.ui.ModsUiState
 import com.star.launcher.ui.components.AetherIcons
@@ -60,6 +64,7 @@ import com.star.launcher.ui.navigation.AetherDashboardStateViewModel
 import com.star.launcher.ui.navigation.AetherRoute
 import com.star.launcher.ui.navigation.PreferenceCategory
 import com.star.launcher.ui.screens.CommunityScreen
+import com.star.launcher.ui.screens.BedrockBridgeScreen
 import com.star.launcher.ui.screens.EnginePreferencesScreen
 import com.star.launcher.ui.screens.HudCustomizationScreen
 import com.star.launcher.ui.screens.LiveLyricsSettingsScreen
@@ -143,6 +148,16 @@ class AetherDashboardActivity : ComponentActivity() {
         }
     }
 
+    private val shaderPackImportLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            stateViewModel.modsController.importShaderPacksFromUris(this, uris)
+        } else {
+            stateViewModel.controller.reportStatus("Shader pack import cancelled")
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
@@ -201,6 +216,7 @@ class AetherDashboardActivity : ComponentActivity() {
             }
 
             val state by controller.uiState.collectAsStateWithLifecycle()
+            val modpackImportProgress by container.modpackImportManager.progress.collectAsStateWithLifecycle()
             val modsController = stateViewModel.modsController
             val modsState by modsController.uiState.collectAsStateWithLifecycle()
             LaunchedEffect(modsController) {
@@ -229,18 +245,30 @@ class AetherDashboardActivity : ComponentActivity() {
             val backStack by navigation.backStack.collectAsStateWithLifecycle()
             val currentRoute = backStack.lastOrNull() ?: AetherRoute.Tab(DashboardTab.HOME)
 
-            LaunchedEffect(state.featuredInstance, state.instances) {
+            LaunchedEffect(state.featuredInstance, state.instances, state.rendererProfiles, state.versionRendererProfiles) {
+                val featured = state.featuredInstance
+                val profileId = featured?.rendererProfileId
+                    ?: featured?.versionId?.let { state.versionRendererProfiles[it] }
+                val profile = profileId?.let { pid ->
+                    state.rendererProfiles.firstOrNull { it.profileId == pid }
+                } ?: state.rendererProfiles.firstOrNull { it.isDefault }
                 modsController.syncSelectedInstance(
-                    selectedInstance = state.featuredInstance,
-                    allInstances = state.instances
+                    selectedInstance = featured,
+                    allInstances = state.instances,
+                    rendererId = profile?.rendererId,
+                    rendererLabel = profile?.displayName
                 )
             }
 
             AetherTheme {
                 AetherDashboardScreen(
                     state = state,
+                    modpackImportProgress = modpackImportProgress,
+                    onCancelModpackImport = { container.modpackImportManager.cancelActiveImport() },
+                    onDismissModpackImportProgress = { container.modpackImportManager.dismissProgress() },
                     modsState = modsState,
                     modsController = modsController,
+                    bridgeController = container.bridgeController,
                     currentRoute = currentRoute,
                     accountRepository = container.accountRepository,
                     onSelectTab = { tab ->
@@ -309,6 +337,7 @@ class AetherDashboardActivity : ComponentActivity() {
                     },
                     onVerifyVersion = controller::verifyVersionInstallation,
                     onDeleteVersion = controller::deleteInstalledVersion,
+                    onSaveVersionRenderer = controller::saveVersionRenderer,
                     onVersionSearchChange = controller::setVersionSearchQuery,
                     onVersionFilterChange = controller::setVersionFilter,
                     onVersionSortChange = controller::setVersionSort,
@@ -361,6 +390,7 @@ class AetherDashboardActivity : ComponentActivity() {
                     },
                     onOpenModInstaller = { launchModInstallerPicker() },
                     onOpenModpackImport = { launchModpackImportPicker() },
+                    onOpenShaderPackImport = { launchShaderPackImportPicker() },
                     onOpenGameDirectory = {
                         val targetPath = Tools.DIR_GAME_NEW ?: Tools.DIR_GAME_HOME
                         if (targetPath != null) {
@@ -454,6 +484,17 @@ class AetherDashboardActivity : ComponentActivity() {
 
     fun launchModpackImportPicker() {
         modpackImportLauncher.launch(null)
+    }
+
+    fun launchShaderPackImportPicker() {
+        shaderPackImportLauncher.launch(
+            arrayOf(
+                "application/zip",
+                "application/x-zip-compressed",
+                "application/octet-stream",
+                "*/*"
+            )
+        )
     }
 
     private fun launchGameWithPayload(payload: AetherLaunchPayload) {
@@ -610,8 +651,12 @@ class AetherDashboardActivity : ComponentActivity() {
 @Composable
 fun AetherDashboardScreen(
     state: AetherDashboardUiState,
+    modpackImportProgress: ModpackImportProgress = ModpackImportProgress(),
+    onCancelModpackImport: () -> Unit = {},
+    onDismissModpackImportProgress: () -> Unit = {},
     modsState: ModsUiState = ModsUiState(),
     modsController: ModsController? = null,
+    bridgeController: com.star.launcher.bridge.BridgeController? = null,
     currentRoute: AetherRoute = AetherRoute.Tab(state.selectedTab),
     accountRepository: AccountRepository? = null,
     onSelectTab: (DashboardTab) -> Unit,
@@ -643,6 +688,7 @@ fun AetherDashboardScreen(
     onPlayVersion: (String) -> Unit = {},
     onVerifyVersion: (String) -> Unit = {},
     onDeleteVersion: (String) -> Unit = {},
+    onSaveVersionRenderer: (String, String?) -> Unit = { _, _ -> },
     onVersionSearchChange: (String) -> Unit = {},
     onVersionFilterChange: (VersionFilter) -> Unit = {},
     onVersionSortChange: (VersionSort) -> Unit = {},
@@ -668,6 +714,7 @@ fun AetherDashboardScreen(
     onOpenGamepadMapper: () -> Unit,
     onOpenModInstaller: () -> Unit,
     onOpenModpackImport: () -> Unit,
+    onOpenShaderPackImport: () -> Unit = {},
     onOpenGameDirectory: () -> Unit,
     onShareLogs: () -> Unit,
     onSaveDiscordInviteUrl: (String) -> Unit,
@@ -675,6 +722,8 @@ fun AetherDashboardScreen(
     onOpenEnginePreferences: () -> Unit = { onNavigateRoute(AetherRoute.EnginePreferences()) },
     onOpenHudCustomization: () -> Unit = { onNavigateRoute(AetherRoute.HudCustomization) },
     onOpenLiveLyrics: () -> Unit = { onNavigateRoute(AetherRoute.LiveLyricsSettings) },
+    onOpenBedrockBridge: () -> Unit = { onNavigateRoute(AetherRoute.BedrockBridge) },
+    onOpenStarGfxDiagnostics: () -> Unit = { onNavigateRoute(AetherRoute.StarGfxDiagnostics) },
     onStatusMessage: (String) -> Unit,
     onDismissBanner: () -> Unit
 ) {
@@ -775,6 +824,81 @@ fun AetherDashboardScreen(
                             trackColor = AetherColors.SurfaceVariantDark
                         )
                     }
+                    if (modpackImportProgress.stage != ModpackImportStage.IDLE) {
+                        val isError = modpackImportProgress.stage == ModpackImportStage.FAILED
+                        StarLiquidGlassSurface(
+                            componentTarget = StarComponentTarget.DOWNLOAD_PROGRESS_PANELS,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = AetherSpacing.Md, vertical = AetherSpacing.Xs),
+                            shape = MaterialTheme.shapes.medium,
+                            borderColorOverride = if (isError) {
+                                AetherColors.ErrorDark.copy(alpha = 0.55f)
+                            } else {
+                                starTheme.secondaryAccent.copy(alpha = 0.5f)
+                            }
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = modpackImportProgress.archiveName?.let {
+                                                "${modpackImportProgress.stage.label} · $it"
+                                            } ?: modpackImportProgress.stage.label,
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                            color = if (isError) AetherColors.ErrorDark else starTheme.textPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (modpackImportProgress.detailMessage.isNotBlank()) {
+                                            Text(
+                                                text = modpackImportProgress.detailMessage,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = starTheme.textSecondary,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                    if (modpackImportProgress.isActive && modpackImportProgress.canCancel) {
+                                        TextButton(onClick = onCancelModpackImport) {
+                                            Text("Cancel", color = AetherColors.ErrorDark)
+                                        }
+                                    } else if (!modpackImportProgress.isActive) {
+                                        TextButton(onClick = onDismissModpackImportProgress) {
+                                            Text("Dismiss", color = starTheme.secondaryAccent)
+                                        }
+                                    }
+                                }
+                                if (modpackImportProgress.isActive) {
+                                    val pct = modpackImportProgress.progressPercent
+                                    if (pct != null) {
+                                        LinearProgressIndicator(
+                                            progress = { (pct / 100f).coerceIn(0f, 1f) },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            color = AetherColors.AccentCyan,
+                                            trackColor = AetherColors.SurfaceVariantDark
+                                        )
+                                    } else {
+                                        LinearProgressIndicator(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            color = AetherColors.AccentCyan,
+                                            trackColor = AetherColors.SurfaceVariantDark
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                     state.statusBanner?.let { banner ->
                         StarLiquidGlassSurface(
                             componentTarget = StarComponentTarget.PANELS,
@@ -868,7 +992,8 @@ fun AetherDashboardScreen(
                                     onCreateInstanceFromVersion = onCreateInstanceFromVersion,
                                     onRetryDownload = onRetryDownload,
                                     onCancelDownload = onCancelDownload,
-                                    onOpenInstallProgress = onOpenVersionInstallProgress
+                                    onOpenInstallProgress = onOpenVersionInstallProgress,
+                                    onSaveVersionRenderer = onSaveVersionRenderer
                                 )
                                 DashboardTab.MODS -> ModsScreen(
                                     state = modsState,
@@ -921,7 +1046,19 @@ fun AetherDashboardScreen(
                                         modsController?.startModLoaderInstall()
                                         onRefresh()
                                     },
-                                    onCancelModLoaderInstall = { modsController?.cancelModLoaderInstall() }
+                                    onCancelModLoaderInstall = { modsController?.cancelModLoaderInstall() },
+                                    onImportShaderPacks = onOpenShaderPackImport,
+                                    onRefreshShaders = { modsController?.refreshShaderInventory() },
+                                    onUpdateShaderSearch = { modsController?.updateShaderSearchQuery(it) },
+                                    onToggleShaderEnabled = { modsController?.toggleShaderEnabled(it) },
+                                    onToggleShaderSelection = { modsController?.toggleShaderSelection(it) },
+                                    onSelectAllShaders = { modsController?.selectAllShaders() },
+                                    onClearShaderSelection = { modsController?.clearShaderSelection() },
+                                    onBulkSetShadersEnabled = { modsController?.bulkSetSelectedShadersEnabled(it) },
+                                    onRequestDeleteShader = { modsController?.requestDeleteShader(it) },
+                                    onRequestDeleteSelectedShaders = { modsController?.requestDeleteSelectedShaders() },
+                                    onConfirmDeleteShaders = { modsController?.confirmDeleteShaders() },
+                                    onDismissDeleteShaders = { modsController?.dismissDeleteShaders() }
                                 )
                                 DashboardTab.COMMUNITY -> CommunityScreen(
                                     state = state,
@@ -953,6 +1090,8 @@ fun AetherDashboardScreen(
                                     onOpenEnginePreferences = onOpenEnginePreferences,
                                     onOpenHudCustomization = onOpenHudCustomization,
                                     onOpenLiveLyrics = onOpenLiveLyrics,
+                                    onOpenBedrockBridge = onOpenBedrockBridge,
+                                    onOpenStarGfxDiagnostics = onOpenStarGfxDiagnostics,
                                     isExpandedWidth = useRail,
                                     reducedMotion = reducedMotion,
                                     onStatusMessage = onStatusMessage
@@ -1036,6 +1175,23 @@ fun AetherDashboardScreen(
                             )
 
                             AetherRoute.LiveLyricsSettings -> LiveLyricsSettingsScreen(
+                                onBack = onNavigateBack,
+                                onStatusMessage = onStatusMessage
+                            )
+
+                            AetherRoute.BedrockBridge -> {
+                                val resolvedBridge = bridgeController
+                                    ?: AetherContainer.get(LocalContext.current).bridgeController
+                                BedrockBridgeScreen(
+                                    bridgeController = resolvedBridge,
+                                    availableRuntimes = state.runtimeInspections,
+                                    onBack = onNavigateBack,
+                                    onOpenRuntimeManagement = onOpenRuntimeManagement,
+                                    onStatusMessage = onStatusMessage
+                                )
+                            }
+
+                            AetherRoute.StarGfxDiagnostics -> com.star.launcher.stargfx.StarGfxDiagnosticsScreen(
                                 onBack = onNavigateBack,
                                 onStatusMessage = onStatusMessage
                             )

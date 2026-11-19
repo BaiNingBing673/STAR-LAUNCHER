@@ -71,6 +71,8 @@
     <string name="mcl_setting_renderer_vulkan_zink">Zink (Vulkan) - (all versions, slow)</string>
     <string name="mcl_setting_renderer_mobileglues">SFPEW/MobileGlues (OpenGL ES) - (all versions, fast)</string>
     <string name="mcl_setting_renderer_ltw">LTW (OpenGL ES 3) - 1.17+ only</string>
+    <string name="mcl_setting_renderer_stargfx_vulkan">STAR GFX (Vulkan Native - RenderPearl 26.4+)</string>
+    <string name="mcl_setting_renderer_stargfx_gles">STAR GFX (OpenGL ES Native - Diagnostics/Test Only)</string>
     <string name="mcl_setting_veroption_release">Release</string>
     <string name="mcl_setting_veroption_snapshot">Snapshot</string>
     <string name="mcl_setting_veroption_oldalpha">Old-alpha</string>

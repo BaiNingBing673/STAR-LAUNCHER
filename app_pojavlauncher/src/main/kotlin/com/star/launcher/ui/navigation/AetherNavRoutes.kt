@@ -42,6 +42,8 @@ sealed interface AetherRoute {
     data object HudCustomization : AetherRoute
     data object LiveLyricsSettings : AetherRoute
     data object StarUiStudio : AetherRoute
+    data object BedrockBridge : AetherRoute
+    data object StarGfxDiagnostics : AetherRoute
     data class ModDetail(val modId: Long) : AetherRoute
 
     fun encode(): String = when (this) {
@@ -56,6 +58,8 @@ sealed interface AetherRoute {
         HudCustomization -> "hud_customization"
         LiveLyricsSettings -> "live_lyrics_settings"
         StarUiStudio -> "star_ui_studio"
+        BedrockBridge -> "bedrock_bridge"
+        StarGfxDiagnostics -> "star_gfx_diagnostics"
         is ModDetail -> "mod_detail:$modId"
     }
 
@@ -65,7 +69,7 @@ sealed interface AetherRoute {
             is InstanceDetail -> DashboardTab.LIBRARY
             is VersionInstallProgress -> DashboardTab.VERSIONS
             is ModDetail -> DashboardTab.MODS
-            RuntimeManagement, is RuntimeDetail, MicrosoftAuth, is EnginePreferences, GamepadMapper, HudCustomization, LiveLyricsSettings, StarUiStudio ->
+            RuntimeManagement, is RuntimeDetail, MicrosoftAuth, is EnginePreferences, GamepadMapper, HudCustomization, LiveLyricsSettings, StarUiStudio, BedrockBridge, StarGfxDiagnostics ->
                 DashboardTab.SETTINGS
         }
 
@@ -105,6 +109,8 @@ sealed interface AetherRoute {
                 encoded == "hud_customization" -> HudCustomization
                 encoded == "live_lyrics_settings" -> LiveLyricsSettings
                 encoded == "star_ui_studio" -> StarUiStudio
+                encoded == "bedrock_bridge" -> BedrockBridge
+                encoded == "star_gfx_diagnostics" -> StarGfxDiagnostics
                 encoded.startsWith("mod_detail:") -> {
                     val modId = encoded.removePrefix("mod_detail:").toLongOrNull()
                     if (modId != null && modId > 0L) ModDetail(modId) else null
@@ -121,6 +127,8 @@ sealed interface AetherRoute {
                 encoded.equals("HUD", ignoreCase = true) || encoded.equals("HUD_CUSTOMIZE", ignoreCase = true) -> HudCustomization
                 encoded.equals("LIVE_LYRICS", ignoreCase = true) -> LiveLyricsSettings
                 encoded.equals("STAR_UI_STUDIO", ignoreCase = true) -> StarUiStudio
+                encoded.equals("BEDROCK_BRIDGE", ignoreCase = true) -> BedrockBridge
+                encoded.equals("STAR_GFX", ignoreCase = true) || encoded.equals("STARGFX_DIAGNOSTICS", ignoreCase = true) -> StarGfxDiagnostics
                 encoded.equals("RUNTIME_MANAGEMENT", ignoreCase = true) -> RuntimeManagement
                 encoded.equals("ENGINE_PREFS", ignoreCase = true) -> EnginePreferences(PreferenceCategory.ALL)
                 else -> null
@@ -266,7 +274,8 @@ class AetherDashboardStateViewModel(
             downloadInstaller = container.modDownloadInstaller,
             installedModManager = container.installedModManager,
             scope = viewModelScope,
-            modLoaderInstaller = container.modLoaderInstaller
+            modLoaderInstaller = container.modLoaderInstaller,
+            shaderPackManager = container.shaderPackManager
         )
     }
 

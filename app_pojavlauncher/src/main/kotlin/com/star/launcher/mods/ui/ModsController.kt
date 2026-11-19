@@ -1,5 +1,7 @@
 package com.star.launcher.mods.ui
 
+import android.content.Context
+import android.net.Uri
 import com.star.launcher.data.db.entity.GameInstanceEntity
 import com.star.launcher.data.db.model.ModLoaderType
 import com.star.launcher.mods.api.CurseForgeApiException
@@ -32,6 +34,9 @@ import com.star.launcher.mods.loader.ModLoaderCandidate
 import com.star.launcher.mods.loader.ModLoaderInstallOutcome
 import com.star.launcher.mods.loader.ModLoaderInstallProgress
 import com.star.launcher.mods.loader.ModLoaderInstaller
+import com.star.launcher.mods.shaders.ShaderPackEntry
+import com.star.launcher.mods.shaders.ShaderPackInventoryReport
+import com.star.launcher.mods.shaders.ShaderPackManager
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,7 +53,8 @@ import kotlinx.coroutines.launch
 
 enum class ModsSubTab(val label: String) {
     DISCOVER("Discover"),
-    MY_MODS("My Mods")
+    MY_MODS("My Mods"),
+    SHADERS("Shaders")
 }
 
 enum class ModsErrorKind {
@@ -146,6 +152,14 @@ data class ModsUiState(
     val pendingDeleteMod: InstalledModInventoryItem? = null,
     val pendingUpdateMod: InstalledModInventoryItem? = null,
 
+    // Shaders (strictly isolated to <gameDir>/shaderpacks/)
+    val shaderReport: ShaderPackInventoryReport? = null,
+    val shaderSearchQuery: String = "",
+    val isLoadingShaders: Boolean = false,
+    val isImportingShaders: Boolean = false,
+    val selectedShaderFiles: Set<String> = emptySet(),
+    val pendingDeleteShaders: List<ShaderPackEntry> = emptyList(),
+
     // Credential config sheet
     val showCredentialConfigDialog: Boolean = false,
     val credentialConfigError: String? = null,
@@ -176,6 +190,21 @@ data class ModsUiState(
             }
         }
     }
+
+    @delegate:Transient
+    val filteredShaders: List<ShaderPackEntry> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        val all = shaderReport?.packs.orEmpty()
+        val query = shaderSearchQuery.trim()
+        if (query.isEmpty()) {
+            all
+        } else {
+            all.filter {
+                it.displayName.contains(query, ignoreCase = true) ||
+                    it.fileName.contains(query, ignoreCase = true) ||
+                    it.formatLabel.contains(query, ignoreCase = true)
+            }
+        }
+    }
 }
 
 class ModsController(
@@ -188,7 +217,8 @@ class ModsController(
     private val installedModManager: InstalledModManager,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
-    private val modLoaderInstaller: ModLoaderInstaller? = null
+    private val modLoaderInstaller: ModLoaderInstaller? = null,
+    private val shaderPackManager: ShaderPackManager = ShaderPackManager()
 ) {
     private val _uiState = MutableStateFlow(ModsUiState())
     val uiState: StateFlow<ModsUiState> = _uiState.asStateFlow()
@@ -204,6 +234,8 @@ class ModsController(
     private var lastSyncedInstanceId: String? = null
     private var lastSyncedInstanceVersionId: String? = null
     private var lastSyncedInstanceGameDir: String? = null
+    private var activeRendererId: String? = null
+    private var activeRendererLabel: String? = null
     private var lastSubmittedPlan: Triple<ModInstallPlan, Boolean, String?>? = null
     private var filtersMatchedToInstance = true
 
@@ -220,21 +252,29 @@ class ModsController(
 
     fun selectSubTab(tab: ModsSubTab) {
         _uiState.update { it.copy(activeSubTab = tab) }
-        if (tab == ModsSubTab.MY_MODS) {
-            refreshInstalledInventory()
+        when (tab) {
+            ModsSubTab.MY_MODS -> refreshInstalledInventory()
+            ModsSubTab.SHADERS -> refreshShaderInventory()
+            ModsSubTab.DISCOVER -> Unit
         }
     }
 
     fun syncSelectedInstance(
         selectedInstance: GameInstanceEntity?,
-        allInstances: List<GameInstanceEntity>
+        allInstances: List<GameInstanceEntity>,
+        rendererId: String? = null,
+        rendererLabel: String? = null
     ) {
+        val rendererChanged = rendererId != activeRendererId || rendererLabel != activeRendererLabel
+        activeRendererId = rendererId
+        activeRendererLabel = rendererLabel
+
         val instanceChanged = selectedInstance?.instanceId != lastSyncedInstanceId
         val envInputsChanged = instanceChanged ||
             selectedInstance?.versionId != lastSyncedInstanceVersionId ||
             selectedInstance?.gameDirPath != lastSyncedInstanceGameDir ||
             _uiState.value.instanceEnvironment == null
-        if (!envInputsChanged && _uiState.value.availableInstances === allInstances) {
+        if (!envInputsChanged && !rendererChanged && _uiState.value.availableInstances === allInstances) {
             return
         }
         lastSyncedInstanceId = selectedInstance?.instanceId
@@ -242,6 +282,9 @@ class ModsController(
         lastSyncedInstanceGameDir = selectedInstance?.gameDirPath
         if (!envInputsChanged) {
             _uiState.update { it.copy(selectedInstance = selectedInstance, availableInstances = allInstances) }
+            if (rendererChanged) {
+                refreshShaderInventory()
+            }
             return
         }
         scope.launch {
@@ -262,13 +305,15 @@ class ModsController(
                     availableInstances = allInstances,
                     instanceEnvironment = env,
                     filterMcVersion = newMc,
-                    filterLoader = newLoader
+                    filterLoader = newLoader,
+                    selectedShaderFiles = if (instanceChanged) emptySet() else state.selectedShaderFiles
                 )
             }
-            if (instanceChanged) {
+            if (instanceChanged || rendererChanged) {
                 reEvaluateLoadedCompatibility()
                 refreshInstalledInventory()
-                if (_uiState.value.credentialStatus != CurseForgeCredentialStatus.UNCONFIGURED || repository.enablePublicFallback) {
+                refreshShaderInventory()
+                if (instanceChanged && (_uiState.value.credentialStatus != CurseForgeCredentialStatus.UNCONFIGURED || repository.enablePublicFallback)) {
                     loadSearchAndFeatured(resetPage = true)
                 }
             }
@@ -1284,6 +1329,203 @@ class ModsController(
                 modLoaderInstallProgress = null,
                 modLoaderInstallError = "Mod loader installation was cancelled."
             )
+        }
+    }
+
+    // =========================================================================
+    // Dedicated Shader Packs Management (<gameDir>/shaderpacks/)
+    // =========================================================================
+
+    fun refreshShaderInventory() {
+        val env = _uiState.value.instanceEnvironment ?: run {
+            _uiState.update { it.copy(shaderReport = null, isLoadingShaders = false, selectedShaderFiles = emptySet()) }
+            return
+        }
+        scope.launch {
+            _uiState.update { it.copy(isLoadingShaders = true) }
+            val report = runCatching {
+                shaderPackManager.inspectShaderPacks(
+                    environment = env,
+                    activeRendererId = activeRendererId,
+                    activeRendererLabel = activeRendererLabel
+                )
+            }.getOrNull()
+            val presentNames = report?.packs?.map { it.fileName }?.toSet().orEmpty()
+            _uiState.update { state ->
+                state.copy(
+                    shaderReport = report,
+                    isLoadingShaders = false,
+                    selectedShaderFiles = state.selectedShaderFiles.intersect(presentNames)
+                )
+            }
+        }
+    }
+
+    fun updateShaderSearchQuery(query: String) {
+        _uiState.update { it.copy(shaderSearchQuery = query) }
+    }
+
+    fun importShaderPacksFromUris(context: Context, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val env = _uiState.value.instanceEnvironment
+        if (env == null) {
+            _uiState.update {
+                it.copy(installErrorBanner = "Select or create a Minecraft instance before importing shader packs.")
+            }
+            return
+        }
+        scope.launch {
+            _uiState.update {
+                it.copy(
+                    isImportingShaders = true,
+                    installErrorBanner = null,
+                    installStatusBanner = null
+                )
+            }
+            val result = shaderPackManager.importShaderPacksFromUris(
+                context = context.applicationContext,
+                gameDirPath = env.gameDirPath,
+                uris = uris
+            )
+            val statusParts = mutableListOf<String>()
+            if (result.imported.isNotEmpty()) {
+                statusParts += if (result.imported.size == 1) {
+                    "Imported shader pack '${result.imported.first()}' into shaderpacks/."
+                } else {
+                    "Imported ${result.imported.size} shader packs into shaderpacks/."
+                }
+            }
+            if (result.skippedDuplicates.isNotEmpty()) {
+                statusParts += "Skipped duplicate(s): ${result.skippedDuplicates.joinToString(", ")}."
+            }
+            val errorText = if (result.failures.isNotEmpty()) {
+                result.failures.joinToString("\n") { "${it.fileName}: ${it.reason}" }
+            } else {
+                null
+            }
+            _uiState.update {
+                it.copy(
+                    isImportingShaders = false,
+                    installStatusBanner = statusParts.takeIf { parts -> parts.isNotEmpty() }?.joinToString(" "),
+                    installErrorBanner = errorText
+                )
+            }
+            refreshShaderInventory()
+        }
+    }
+
+    fun toggleShaderEnabled(pack: ShaderPackEntry) {
+        val env = _uiState.value.instanceEnvironment ?: return
+        scope.launch {
+            val res = shaderPackManager.toggleShaderEnabled(env.gameDirPath, pack.fileName)
+            res.onSuccess { enabledNow ->
+                _uiState.update {
+                    it.copy(
+                        installStatusBanner = if (enabledNow) {
+                            "Enabled shader pack '${pack.displayName}'."
+                        } else {
+                            "Disabled shader pack '${pack.displayName}'."
+                        },
+                        installErrorBanner = null
+                    )
+                }
+                refreshShaderInventory()
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(installErrorBanner = err.message ?: "Unable to toggle '${pack.displayName}'.")
+                }
+            }
+        }
+    }
+
+    fun toggleShaderSelection(fileName: String) {
+        _uiState.update { state ->
+            val next = state.selectedShaderFiles.toMutableSet()
+            if (!next.add(fileName)) next.remove(fileName)
+            state.copy(selectedShaderFiles = next)
+        }
+    }
+
+    fun selectAllShaders() {
+        val all = _uiState.value.filteredShaders.map { it.fileName }.toSet()
+        _uiState.update { it.copy(selectedShaderFiles = all) }
+    }
+
+    fun clearShaderSelection() {
+        _uiState.update { it.copy(selectedShaderFiles = emptySet()) }
+    }
+
+    fun bulkSetSelectedShadersEnabled(enable: Boolean) {
+        val env = _uiState.value.instanceEnvironment ?: return
+        val selected = _uiState.value.selectedShaderFiles
+        if (selected.isEmpty()) return
+        scope.launch {
+            val res = shaderPackManager.setShadersEnabled(env.gameDirPath, selected, enable)
+            res.onSuccess { count ->
+                _uiState.update {
+                    it.copy(
+                        selectedShaderFiles = emptySet(),
+                        installStatusBanner = if (enable) {
+                            "Enabled $count shader pack(s)."
+                        } else {
+                            "Disabled $count shader pack(s)."
+                        },
+                        installErrorBanner = null
+                    )
+                }
+                refreshShaderInventory()
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(installErrorBanner = err.message ?: "Bulk shader action failed.")
+                }
+            }
+        }
+    }
+
+    fun requestDeleteShader(pack: ShaderPackEntry) {
+        _uiState.update { it.copy(pendingDeleteShaders = listOf(pack)) }
+    }
+
+    fun requestDeleteSelectedShaders() {
+        val selected = _uiState.value.selectedShaderFiles
+        val targets = _uiState.value.shaderReport?.packs?.filter { it.fileName in selected }.orEmpty()
+        if (targets.isNotEmpty()) {
+            _uiState.update { it.copy(pendingDeleteShaders = targets) }
+        }
+    }
+
+    fun dismissDeleteShaders() {
+        _uiState.update { it.copy(pendingDeleteShaders = emptyList()) }
+    }
+
+    fun confirmDeleteShaders() {
+        val env = _uiState.value.instanceEnvironment ?: return
+        val targets = _uiState.value.pendingDeleteShaders
+        if (targets.isEmpty()) return
+        scope.launch {
+            val res = shaderPackManager.removeShaders(env.gameDirPath, targets.map { it.fileName })
+            res.onSuccess { removed ->
+                _uiState.update {
+                    it.copy(
+                        pendingDeleteShaders = emptyList(),
+                        selectedShaderFiles = it.selectedShaderFiles - targets.map { t -> t.fileName }.toSet(),
+                        installStatusBanner = if (removed == 1) {
+                            "Removed shader pack '${targets.first().displayName}'."
+                        } else {
+                            "Removed $removed shader packs from shaderpacks/."
+                        },
+                        installErrorBanner = null
+                    )
+                }
+                refreshShaderInventory()
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        pendingDeleteShaders = emptyList(),
+                        installErrorBanner = err.message ?: "Failed to remove shader pack(s)."
+                    )
+                }
+            }
         }
     }
 

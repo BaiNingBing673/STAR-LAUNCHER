@@ -255,3 +255,21 @@ interface InstalledModDao {
     @Query("DELETE FROM installed_mods WHERE recordId = :recordId")
     suspend fun deleteByRecordId(recordId: String)
 }
+
+@Dao
+interface ServerProfileDao {
+    @Upsert
+    suspend fun upsert(profile: com.star.launcher.data.db.entity.ServerProfileEntity)
+
+    @Query("SELECT * FROM bridge_server_profiles ORDER BY isFavorite DESC, COALESCE(lastConnectedAtMs, createdAtMs) DESC")
+    fun observeAll(): Flow<List<com.star.launcher.data.db.entity.ServerProfileEntity>>
+
+    @Query("SELECT * FROM bridge_server_profiles ORDER BY isFavorite DESC, COALESCE(lastConnectedAtMs, createdAtMs) DESC")
+    suspend fun getAll(): List<com.star.launcher.data.db.entity.ServerProfileEntity>
+
+    @Query("SELECT * FROM bridge_server_profiles WHERE profileId = :profileId LIMIT 1")
+    suspend fun getById(profileId: String): com.star.launcher.data.db.entity.ServerProfileEntity?
+
+    @Query("DELETE FROM bridge_server_profiles WHERE profileId = :profileId")
+    suspend fun deleteById(profileId: String)
+}

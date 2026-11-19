@@ -16,6 +16,7 @@ import com.star.launcher.data.db.dao.GameVersionDao
 import com.star.launcher.data.db.dao.InstalledModDao
 import com.star.launcher.data.db.dao.RendererProfileDao
 import com.star.launcher.data.db.dao.RuntimeRegistryDao
+import com.star.launcher.data.db.dao.ServerProfileDao
 import com.star.launcher.data.db.dao.SettingsDao
 import com.star.launcher.data.db.entity.AppSettingEntity
 import com.star.launcher.data.db.entity.CompatibilityResultEntity
@@ -28,6 +29,7 @@ import com.star.launcher.data.db.entity.GameVersionEntity
 import com.star.launcher.data.db.entity.InstalledModEntity
 import com.star.launcher.data.db.entity.RendererProfileEntity
 import com.star.launcher.data.db.entity.RuntimeRegistryEntity
+import com.star.launcher.data.db.entity.ServerProfileEntity
 
 /**
  * Primary STAR Launcher persistence database (WAL mode, schema exported, zero destructive migrations).
@@ -45,9 +47,10 @@ import com.star.launcher.data.db.entity.RuntimeRegistryEntity
         CompatibilityResultEntity::class,
         GameSessionEntity::class,
         DiagnosticLogEntity::class,
-        InstalledModEntity::class
+        InstalledModEntity::class,
+        ServerProfileEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 @TypeConverters(AetherConverters::class)
@@ -62,6 +65,7 @@ abstract class AetherDatabase : RoomDatabase() {
     abstract fun compatibilityResultDao(): CompatibilityResultDao
     abstract fun diagnosticSessionDao(): DiagnosticSessionDao
     abstract fun installedModDao(): InstalledModDao
+    abstract fun serverProfileDao(): ServerProfileDao
 
     companion object {
         const val DATABASE_NAME = "aether_launcher.db"
@@ -103,11 +107,46 @@ abstract class AetherDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `bridge_server_profiles` (
+                        `profileId` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `description` TEXT NOT NULL,
+                        `iconBase64` TEXT,
+                        `javaAddress` TEXT NOT NULL,
+                        `javaPort` INTEGER NOT NULL,
+                        `bedrockAddress` TEXT NOT NULL,
+                        `bedrockPort` INTEGER NOT NULL,
+                        `serverSoftware` TEXT NOT NULL,
+                        `geyserAvailability` TEXT NOT NULL,
+                        `authMode` TEXT NOT NULL,
+                        `versionCompatibilitySummary` TEXT NOT NULL,
+                        `connectionStatus` TEXT NOT NULL,
+                        `isFavorite` INTEGER NOT NULL,
+                        `lastConnectedAtMs` INTEGER,
+                        `lastCheckedAtMs` INTEGER,
+                        `createdAtMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`profileId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_bridge_server_profiles_isFavorite_lastConnectedAtMs` ON `bridge_server_profiles` (`isFavorite`, `lastConnectedAtMs`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_bridge_server_profiles_javaAddress_javaPort` ON `bridge_server_profiles` (`javaAddress`, `javaPort`)"
+                )
+            }
+        }
+
         /**
          * Ordered schema migrations for production upgrades.
          * fallbackToDestructiveMigration() is strictly forbidden.
          */
-        val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2)
+        val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
 
         @Volatile
         private var instance: AetherDatabase? = null

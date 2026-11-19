@@ -375,7 +375,7 @@ class StarMusicPlayerService : Service() {
                 Notification.Builder(this)
             }
             val placeholder = builder
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.notif_icon)
                 .setContentTitle("STAR Music Player")
                 .setContentText("Preparing playback")
                 .build()
@@ -415,7 +415,7 @@ class StarMusicPlayerService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
-        builder.setSmallIcon(R.mipmap.ic_launcher)
+        builder.setSmallIcon(R.drawable.notif_icon)
             .setContentTitle(track.title)
             .setContentText(track.artist)
             .setContentIntent(contentPending)

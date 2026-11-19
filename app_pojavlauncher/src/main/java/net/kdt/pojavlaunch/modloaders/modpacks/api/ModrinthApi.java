@@ -185,17 +185,37 @@ public class ModrinthApi implements ModpackApi{
         return null;
     }
 
-    private ModLoader installMrpack(File mrpackFile, File instanceDestination) throws IOException {
-        try (ZipFile modpackZipFile = new ZipFile(mrpackFile)){
-            ModrinthIndex modrinthIndex = Tools.GLOBAL_GSON.fromJson(
-                    Tools.read(ZipUtils.getEntryStream(modpackZipFile, "modrinth.index.json")),
-                    ModrinthIndex.class);
-            
-            ModDownloader modDownloader = new ModDownloader(instanceDestination);
-            for(ModrinthIndex.ModrinthIndexFile indexFile : modrinthIndex.files) {
-                modDownloader.submitDownload(indexFile.fileSize, indexFile.path, indexFile.hashes.sha1, indexFile.downloads);
+    public ModLoader installMrpack(File mrpackFile, File instanceDestination) throws IOException {
+        try (ZipFile modpackZipFile = new ZipFile(mrpackFile)) {
+            ModrinthIndex modrinthIndex;
+            try (java.io.InputStream indexStream = ZipUtils.getEntryStream(modpackZipFile, "modrinth.index.json")) {
+                modrinthIndex = Tools.GLOBAL_GSON.fromJson(
+                        Tools.read(indexStream),
+                        ModrinthIndex.class
+                );
             }
-            modDownloader.awaitFinish(new DownloaderProgressWrapper(R.string.modpack_download_downloading_mods, ProgressLayout.INSTALL_MODPACK));
+            if (modrinthIndex == null) {
+                throw new IOException("Corrupt modrinth.index.json in .mrpack archive.");
+            }
+
+            if (modrinthIndex.files != null && modrinthIndex.files.length > 0) {
+                ModDownloader modDownloader = new ModDownloader(instanceDestination);
+                int submitted = 0;
+                for (ModrinthIndex.ModrinthIndexFile indexFile : modrinthIndex.files) {
+                    if (indexFile == null || indexFile.path == null || indexFile.downloads == null || indexFile.downloads.length == 0) {
+                        continue;
+                    }
+                    if (!ZipUtils.isSafeEntryName(indexFile.path)) {
+                        throw new IOException("Blocked unsafe path in modrinth.index.json: " + indexFile.path);
+                    }
+                    String sha1 = indexFile.hashes != null ? indexFile.hashes.sha1 : null;
+                    modDownloader.submitDownload(Math.max(indexFile.fileSize, 0), indexFile.path, sha1, indexFile.downloads);
+                    submitted++;
+                }
+                if (submitted > 0) {
+                    modDownloader.awaitFinish(new DownloaderProgressWrapper(R.string.modpack_download_downloading_mods, ProgressLayout.INSTALL_MODPACK));
+                }
+            }
             ProgressLayout.setProgress(ProgressLayout.INSTALL_MODPACK, 0, R.string.modpack_download_applying_overrides, 1, 2);
             ZipUtils.zipExtract(modpackZipFile, "overrides/", instanceDestination);
             ProgressLayout.setProgress(ProgressLayout.INSTALL_MODPACK, 50, R.string.modpack_download_applying_overrides, 2, 2);

@@ -220,14 +220,31 @@ public class JREUtils {
         }
 
         if (LOCAL_RENDERER != null && (LOCAL_RENDERER.contains("vulkan") || LOCAL_RENDERER.contains("zink"))) {
-            boolean vulkanSupported = activity != null && Tools.checkVulkanSupport(activity.getPackageManager());
-            if (!vulkanSupported) {
-                boolean hasMg = new File(NATIVE_LIB_DIR, "libmobileglues.so").exists();
-                String fallbackRenderer = (GLInfoUtils.getGlInfo().glesMajorVersion >= 3 && hasMg)
-                        ? "opengles_mobileglues"
-                        : "opengles2";
-                Log.w("JREUtils", "Vulkan is not supported on this device; falling back from " + LOCAL_RENDERER + " to " + fallbackRenderer);
-                Logger.appendToLog("Vulkan fallback triggered: " + LOCAL_RENDERER + " -> " + fallbackRenderer);
+            boolean vulkan11Supported = activity != null && Tools.checkVulkan11Support(activity.getPackageManager());
+            if (!vulkan11Supported) {
+                boolean hasMg = NATIVE_LIB_DIR != null && new File(NATIVE_LIB_DIR, "libmobileglues.so").isFile();
+                boolean hasGl4es = NATIVE_LIB_DIR != null && new File(NATIVE_LIB_DIR, "libng_gl4es.so").isFile();
+                String fallbackRenderer;
+                if (GLInfoUtils.getGlInfo().glesMajorVersion >= 3 && hasMg) {
+                    fallbackRenderer = "opengles_mobileglues";
+                } else if (hasGl4es) {
+                    fallbackRenderer = "opengles2";
+                } else {
+                    fallbackRenderer = "opengles_system_gles";
+                }
+                Log.w("JREUtils", "Vulkan 1.1+ is not supported on this device; falling back from " + LOCAL_RENDERER + " to " + fallbackRenderer);
+                Logger.appendToLog("Vulkan 1.1 fallback triggered: " + LOCAL_RENDERER + " -> " + fallbackRenderer);
+                LOCAL_RENDERER = fallbackRenderer;
+            }
+        }
+        if ("opengles_mobileglues".equals(LOCAL_RENDERER)) {
+            boolean hasMg = NATIVE_LIB_DIR != null && new File(NATIVE_LIB_DIR, "libmobileglues.so").isFile();
+            if (GLInfoUtils.getGlInfo().glesMajorVersion < 3 || !hasMg) {
+                boolean hasGl4es = NATIVE_LIB_DIR != null && new File(NATIVE_LIB_DIR, "libng_gl4es.so").isFile();
+                String fallbackRenderer = hasGl4es ? "opengles2" : "opengles_system_gles";
+                Log.w("JREUtils", "MobileGlues requires GLES 3+ and libmobileglues.so; falling back to " + fallbackRenderer);
+                Logger.appendToLog("MobileGlues fallback triggered (GLES=" + GLInfoUtils.getGlInfo().glesMajorVersion
+                        + ", libPresent=" + hasMg + "): opengles_mobileglues -> " + fallbackRenderer);
                 LOCAL_RENDERER = fallbackRenderer;
             }
         }
@@ -303,7 +320,8 @@ public class JREUtils {
             }
         }
 
-        if(info.isAdreno() && !PREF_ZINK_PREFER_SYSTEM_DRIVER) {
+        boolean hasTurnipBinary = NATIVE_LIB_DIR != null && new File(NATIVE_LIB_DIR, "libvulkan_freedreno.so").isFile();
+        if (info.isAdreno() && hasTurnipBinary && !PREF_ZINK_PREFER_SYSTEM_DRIVER && !"stargfx_vulkan".equals(LOCAL_RENDERER)) {
             envMap.put("POJAV_LOAD_TURNIP", "1");
         }
 
@@ -404,6 +422,11 @@ public class JREUtils {
         // Adds/changes methods for compatibility
         // FIXME: May fail if not the first agent
         userArgs.add("-javaagent:"+new File(Tools.DIR_DATA,"MioLibPatcher/MioLibPatcher.jar").getAbsolutePath());
+        if ("stargfx_vulkan".equals(LOCAL_RENDERER)) {
+            userArgs.add("-Dstar.gfx.renderpearl.enable=true");
+            userArgs.add("-Dstar.gfx.native.path=" + new File(Tools.NATIVE_LIB_DIR, "libstargfx_hal_jni.so").getAbsolutePath());
+            userArgs.add("-Dstar.gfx.bridge.jar=" + new File(Tools.DIR_DATA, "MioLibPatcher/star-renderpearl-bridge.jar").getAbsolutePath());
+        }
         // Only needed for lwjglx
         if (Tools.iLwjglVersion <= 299) userArgs.add("-Dmiolibpatcher.alc10=true");
 
@@ -574,6 +597,7 @@ public class JREUtils {
             case "opengles3":
                 renderLibrary = "libng_gl4es.so"; break;
             case "vulkan_zink": renderLibrary = "libOSMesa.so"; break;
+            case "stargfx_vulkan": renderLibrary = "libmobileglues.so"; break;
             case "opengles_mobileglues": renderLibrary = "libmobileglues.so"; break;
             case "opengles3_desktopgl_zink_kopper": renderLibrary = "libglxshim.so"; break;
             case "opengles3_ltw" : renderLibrary = "libltw.so"; break;
@@ -594,10 +618,44 @@ public class JREUtils {
         }
 
         if (!dlopen(renderLibrary) && !dlopen(findInLdLibPath(renderLibrary))) {
-            Log.e("RENDER_LIBRARY","Failed to load renderer " + renderLibrary + ". Falling back to SFPEW/MobileGlues");
-            LOCAL_RENDERER = "opengles_mobileglues";
-            renderLibrary = "libmobileglues.so";
-            dlopen(NATIVE_LIB_DIR + "/libmobileglues.so");
+            String failedLib = renderLibrary;
+            Log.e("RENDER_LIBRARY", "Failed to load renderer library " + failedLib + " for " + LOCAL_RENDERER + ". Attempting safe fallback.");
+            Logger.appendToLog("Renderer load failed: " + failedLib + " (" + LOCAL_RENDERER + "). Trying safe fallback...");
+
+            boolean loadedFallback = false;
+            if (!"libmobileglues.so".equals(failedLib) && GLInfoUtils.getGlInfo().glesMajorVersion >= 3
+                    && NATIVE_LIB_DIR != null && new File(NATIVE_LIB_DIR, "libmobileglues.so").isFile()) {
+                try {
+                    Os.setenv("MG_DIR_PATH", Tools.DIR_DATA + "/MobileGlues", true);
+                    Os.setenv("POJAVEXEC_EGL", "libmobileglues.so", true);
+                    Os.setenv("LIBGL_ES", "3", true);
+                } catch (ErrnoException ignored) {}
+                if (dlopen(NATIVE_LIB_DIR + "/libmobileglues.so")) {
+                    LOCAL_RENDERER = "opengles_mobileglues";
+                    renderLibrary = "libmobileglues.so";
+                    loadedFallback = true;
+                    Logger.appendToLog("Renderer fallback succeeded: opengles_mobileglues (libmobileglues.so)");
+                }
+            }
+            if (!loadedFallback && !"libng_gl4es.so".equals(failedLib)
+                    && NATIVE_LIB_DIR != null && new File(NATIVE_LIB_DIR, "libng_gl4es.so").isFile()) {
+                try {
+                    Os.setenv("LIBGL_ES", "2", true);
+                } catch (ErrnoException ignored) {}
+                if (dlopen(NATIVE_LIB_DIR + "/libng_gl4es.so")) {
+                    LOCAL_RENDERER = "opengles2";
+                    renderLibrary = "libng_gl4es.so";
+                    Tools.useSFPEW = false;
+                    loadedFallback = true;
+                    Logger.appendToLog("Renderer fallback succeeded: opengles2 (libng_gl4es.so)");
+                }
+            }
+            if (!loadedFallback) {
+                LOCAL_RENDERER = "opengles_system_gles";
+                Tools.useSFPEW = false;
+                Logger.appendToLog("Renderer fallback: using system OpenGL ES driver (no wrapped renderer library loaded)");
+                return null;
+            }
         }
 
         // The final switch for using SFPEW.

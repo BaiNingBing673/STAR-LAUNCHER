@@ -143,10 +143,18 @@ void pojavPumpEvents(void* window) {
             case EVENT_TYPE_CHAR_MODS:
                 if(pojav_environ->GLFW_invoke_CharMods) pojav_environ->GLFW_invoke_CharMods(window, event.i1, event.i2);
                 break;
-            case EVENT_TYPE_KEY:
+            case EVENT_TYPE_KEY: {
+                int keyIdx = event.i1 - 31;
+                if (keyIdx >= 0 && keyIdx < 318) {
+                    pojav_environ->keyDownBuffer[keyIdx] = (jbyte) event.i3;
+                }
                 if(pojav_environ->GLFW_invoke_Key) pojav_environ->GLFW_invoke_Key(window, event.i1, event.i2, event.i3, event.i4);
                 break;
+            }
             case EVENT_TYPE_MOUSE_BUTTON:
+                if (event.i1 >= 0 && event.i1 < 8) {
+                    pojav_environ->mouseDownBuffer[event.i1] = (jbyte) event.i2;
+                }
                 if(pojav_environ->GLFW_invoke_MouseButton) pojav_environ->GLFW_invoke_MouseButton(window, event.i1, event.i2, event.i3);
                 break;
             case EVENT_TYPE_CURSOR_ENTER:
@@ -244,10 +252,15 @@ Java_org_lwjgl_glfw_GLFW_glfwSetCursorPos(__attribute__((unused)) JNIEnv *env, _
 
 
 static pthread_mutex_t s_input_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int s_last_direct_cursor_x = -2147483647;
+static int s_last_direct_cursor_y = -2147483647;
 
 void sendData(int type, int i1, int i2, int i3, int i4) {
     pthread_mutex_lock(&s_input_queue_mutex);
-    if (atomic_load_explicit(&pojav_environ->eventCounter, memory_order_relaxed) >= EVENT_WINDOW_SIZE - 1) {
+    bool isReleaseEvent = (type == EVENT_TYPE_MOUSE_BUTTON && i2 == 0)
+            || (type == EVENT_TYPE_KEY && i3 == 0);
+    size_t maxQueueCount = isReleaseEvent ? (EVENT_WINDOW_SIZE - 1) : (EVENT_WINDOW_SIZE - 65);
+    if (atomic_load_explicit(&pojav_environ->eventCounter, memory_order_relaxed) >= maxQueueCount) {
         pthread_mutex_unlock(&s_input_queue_mutex);
         return;
     }
@@ -401,8 +414,17 @@ void critical_send_cursor_pos(jfloat x, jfloat y) {
         }
 
         if (!pojav_environ->isUseStackQueueCall) {
-            // Truncated by int cast in LWJGLX
-            pojav_environ->GLFW_invoke_CursorPos((void*) pojav_environ->showingWindow, (double) (x), (double) (y));
+            // Truncated by int cast in LWJGLX; skip duplicate integer coordinates to prevent
+            // flooding LWJGL2's 200-slot EventQueue on high-refresh-rate touch displays.
+            int truncX = (int) x;
+            int truncY = (int) y;
+            pthread_mutex_lock(&s_input_queue_mutex);
+            if (truncX != s_last_direct_cursor_x || truncY != s_last_direct_cursor_y) {
+                s_last_direct_cursor_x = truncX;
+                s_last_direct_cursor_y = truncY;
+                pojav_environ->GLFW_invoke_CursorPos((void*) pojav_environ->showingWindow, (double) (x), (double) (y));
+            }
+            pthread_mutex_unlock(&s_input_queue_mutex);
         } else {
             // Floored in pojavPumpEvents
             pojav_environ->cursorX = x;
@@ -419,12 +441,20 @@ void noncritical_send_cursor_pos(__attribute__((unused)) JNIEnv* env, __attribut
        __typeof__ (b) _b = (b); \
      _a > _b ? _a : _b; })
 void critical_send_key(jint key, jint scancode, jint action, jint mods) {
+    int keyIdx = key - 31;
+    if (action == 0 && keyIdx >= 0 && keyIdx < 318) {
+        pojav_environ->keyDownBuffer[keyIdx] = (jbyte) 0;
+    }
     if (pojav_environ->GLFW_invoke_Key && pojav_environ->isInputReady) {
-        pojav_environ->keyDownBuffer[max(0, key-31)] = (jbyte) action;
+        if (keyIdx >= 0 && keyIdx < 318) {
+            pojav_environ->keyDownBuffer[keyIdx] = (jbyte) action;
+        }
         if (pojav_environ->isUseStackQueueCall) {
             sendData(EVENT_TYPE_KEY, key, scancode, action, mods);
         } else {
+            pthread_mutex_lock(&s_input_queue_mutex);
             pojav_environ->GLFW_invoke_Key((void*) pojav_environ->showingWindow, key, scancode, action, mods);
+            pthread_mutex_unlock(&s_input_queue_mutex);
         }
     }
 }
@@ -433,12 +463,19 @@ void noncritical_send_key(__attribute__((unused)) JNIEnv* env, __attribute__((un
 }
 
 void critical_send_mouse_button(jint button, jint action, jint mods) {
+    if (action == 0 && button >= 0 && button < 8) {
+        pojav_environ->mouseDownBuffer[button] = (jbyte) 0;
+    }
     if (pojav_environ->GLFW_invoke_MouseButton && pojav_environ->isInputReady) {
-        pojav_environ->mouseDownBuffer[max(0, button)] = (jbyte) action;
+        if (button >= 0 && button < 8) {
+            pojav_environ->mouseDownBuffer[button] = (jbyte) action;
+        }
         if (pojav_environ->isUseStackQueueCall) {
             sendData(EVENT_TYPE_MOUSE_BUTTON, button, action, mods, 0);
         } else {
+            pthread_mutex_lock(&s_input_queue_mutex);
             pojav_environ->GLFW_invoke_MouseButton((void*) pojav_environ->showingWindow, button, action, mods);
+            pthread_mutex_unlock(&s_input_queue_mutex);
         }
     }
 }

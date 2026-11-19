@@ -1,7 +1,7 @@
 package com.star.launcher.ui.components
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,12 +33,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,6 +46,7 @@ import com.star.launcher.ui.theme.AetherSpacing
 import com.star.launcher.ui.theme.liquid.LocalStarTheme
 import com.star.launcher.ui.theme.liquid.StarLiquidGlassSurface
 import com.star.launcher.ui.theme.studio.StarComponentTarget
+import net.kdt.pojavlaunch.R
 
 data class AetherNavDestination<T>(
     val id: T,
@@ -55,45 +54,18 @@ data class AetherNavDestination<T>(
     val icon: ImageVector
 )
 
+/**
+ * Official STAR Launcher app brand mark rendered directly from the launcher's unified
+ * icon asset ([R.drawable.ic_pojav_full], matching `@mipmap/ic_launcher` and `@mipmap/ic_launcher_round`).
+ */
 @Composable
-fun AetherBrandMark(modifier: Modifier = Modifier) {
-    val theme = LocalStarTheme.current
-    Canvas(modifier = modifier.size(30.dp)) {
-        val w = size.width
-        val h = size.height
-        val coreComet = Path().apply {
-            moveTo(w * 0.14f, h * 0.86f)
-            lineTo(w * 0.88f, h * 0.12f)
-            lineTo(w * 0.42f, h * 0.72f)
-            lineTo(w * 0.62f, h * 0.72f)
-            close()
-        }
-        drawPath(
-            path = coreComet,
-            brush = Brush.linearGradient(
-                listOf(theme.textPrimary, theme.secondaryAccent, theme.primaryAccent)
-            )
-        )
-        drawLine(
-            color = theme.secondaryAccent.copy(alpha = 0.9f),
-            start = Offset(w * 0.22f, h * 0.56f),
-            end = Offset(w * 0.68f, h * 0.18f),
-            strokeWidth = w * 0.065f,
-            cap = StrokeCap.Round
-        )
-        drawLine(
-            color = theme.primaryAccent.copy(alpha = 0.85f),
-            start = Offset(w * 0.44f, h * 0.78f),
-            end = Offset(w * 0.84f, h * 0.36f),
-            strokeWidth = w * 0.06f,
-            cap = StrokeCap.Round
-        )
-        drawCircle(
-            color = theme.secondaryAccent,
-            radius = w * 0.045f,
-            center = Offset(w * 0.74f, h * 0.58f)
-        )
-    }
+fun AetherBrandMark(modifier: Modifier = Modifier.size(32.dp)) {
+    Image(
+        painter = painterResource(id = R.drawable.ic_pojav_full),
+        contentDescription = "STAR Launcher",
+        contentScale = ContentScale.Fit,
+        modifier = modifier.clip(RoundedCornerShape(8.dp))
+    )
 }
 
 @Composable

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -15,6 +16,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import com.star.launcher.ui.theme.AetherColors
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -178,10 +180,84 @@ fun InstanceSettingsDialog(
     }
     var customJvmArgs by remember(instance.instanceId) { mutableStateOf(instance.customJvmArgs.orEmpty()) }
     var controlMapPath by remember(instance.instanceId) { mutableStateOf(instance.controlMapPath.orEmpty()) }
+    var showUnsavedDialog by remember(instance.instanceId) { mutableStateOf(false) }
+
     val hasValidVersion = InstanceManager.isValidVersionId(versionId)
+    val hasUnavailableRenderer = rendererProfileId != null &&
+        rendererProfiles.isNotEmpty() &&
+        rendererProfiles.none { it.profileId == rendererProfileId }
+    val hasUnsavedChanges = name != instance.name ||
+        versionId != instance.versionId.orEmpty() ||
+        runtimeId != instance.runtimeId ||
+        rendererProfileId != instance.rendererProfileId ||
+        ramMb.roundToInt() != instance.allocatedRamMb.coerceIn(256, 8192) ||
+        customJvmArgs != instance.customJvmArgs.orEmpty() ||
+        controlMapPath != instance.controlMapPath.orEmpty()
+
+    fun commitSave() {
+        onSave(
+            instance.instanceId,
+            name,
+            versionId.trim().takeIf { InstanceManager.isValidVersionId(it) },
+            runtimeId,
+            rendererProfileId,
+            ramMb.roundToInt(),
+            customJvmArgs.trim().takeIf { it.isNotBlank() },
+            controlMapPath.trim().takeIf { it.isNotBlank() }
+        )
+    }
+
+    fun requestClose() {
+        if (hasUnsavedChanges) {
+            showUnsavedDialog = true
+        } else {
+            onDismiss()
+        }
+    }
+
+    if (showUnsavedDialog) {
+        AlertDialog(
+            onDismissRequest = { showUnsavedDialog = false },
+            containerColor = AetherColors.SurfaceElevatedDark,
+            title = { Text("Unsaved Instance Changes", color = AetherColors.OnSurfaceDark) },
+            text = {
+                Text(
+                    "You have unsaved changes for '${instance.name}'. Save before closing?",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherColors.OnSurfaceVariantDark
+                )
+            },
+            confirmButton = {
+                Button(
+                    enabled = name.isNotBlank() && hasValidVersion && !hasUnavailableRenderer,
+                    onClick = {
+                        showUnsavedDialog = false
+                        commitSave()
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)) {
+                    TextButton(onClick = { showUnsavedDialog = false }) {
+                        Text("Stay")
+                    }
+                    TextButton(
+                        onClick = {
+                            showUnsavedDialog = false
+                            onDismiss()
+                        }
+                    ) {
+                        Text("Discard", color = AetherColors.ErrorDark)
+                    }
+                }
+            }
+        )
+    }
 
     StarGlassDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = ::requestClose,
         title = { Text("Instance Settings") },
         text = {
             Column(
@@ -233,6 +309,13 @@ fun InstanceSettingsDialog(
                         selectedId = rendererProfileId,
                         onSelect = { rendererProfileId = it }
                     )
+                    if (hasUnavailableRenderer) {
+                        Text(
+                            text = "Saved renderer '$rendererProfileId' is unavailable on this device. Select Auto or a supported renderer above.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AetherColors.ErrorDark
+                        )
+                    }
                 }
                 Text("Allocated RAM: ${ramMb.roundToInt()} MB", style = AetherMonoStyle)
                 Slider(
@@ -291,25 +374,14 @@ fun InstanceSettingsDialog(
         },
         confirmButton = {
             Button(
-                enabled = name.isNotBlank() && hasValidVersion,
-                onClick = {
-                    onSave(
-                        instance.instanceId,
-                        name,
-                        versionId.trim().takeIf { InstanceManager.isValidVersionId(it) },
-                        runtimeId,
-                        rendererProfileId,
-                        ramMb.roundToInt(),
-                        customJvmArgs.trim().takeIf { it.isNotBlank() },
-                        controlMapPath.trim().takeIf { it.isNotBlank() }
-                    )
-                }
+                enabled = name.isNotBlank() && hasValidVersion && !hasUnavailableRenderer,
+                onClick = ::commitSave
             ) {
-                Text("Save")
+                Text(if (hasUnsavedChanges) "Save Changes" else "Save")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = ::requestClose) { Text("Cancel") }
         }
     )
 }

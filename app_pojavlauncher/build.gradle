@@ -8,8 +8,8 @@ plugins {
 static def getDate() { return new Date().format('yyyyMMdd') }
 
 ext {
-    starVersionCode = 10000002
-    starVersionName = "3.0.1"
+    starVersionCode = 10000003
+    starVersionName = "3.0.2"
 }
 
 def getVersionName = {
@@ -170,6 +170,11 @@ android {
         versionCode starVersionCode
         versionName starVersionName
         multiDexEnabled true //important
+        ndk {
+            // Restrict packaged native libraries strictly to the 4 supported ABIs built in Application.mk
+            // so transitive AARs (e.g. JNA) do not inject partial armeabi/mips/mips64 directories.
+            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
+        }
         resValue 'string', 'curseforge_api_key', getCFApiKey()
         resValue 'string', 'curseforge_default_proxy_url', getCFProxyUrl()
         externalNativeBuild {

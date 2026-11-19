@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -25,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import com.star.launcher.data.db.entity.RendererProfileEntity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -514,6 +517,12 @@ fun VersionListRow(
 @Composable
 fun VersionDetailPanel(
     item: VersionCatalogItem,
+    rendererProfiles: List<RendererProfileEntity> = emptyList(),
+    savedRendererProfileId: String? = null,
+    draftRendererProfileId: String? = savedRendererProfileId,
+    onSelectDraftRenderer: (String?) -> Unit = {},
+    onSaveRenderer: (String?) -> Unit = {},
+    onDiscardRendererChanges: () -> Unit = {},
     onPlay: () -> Unit,
     onInstall: () -> Unit,
     onCancelInstall: () -> Unit,
@@ -657,6 +666,152 @@ fun VersionDetailPanel(
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherColors.OnErrorContainerDark
                 )
+            }
+        }
+
+        HorizontalDivider(color = AetherColors.OutlineVariantDark)
+
+        // Per-version Renderer Configuration with explicit Save button
+        val savedUnavailable = savedRendererProfileId != null &&
+            rendererProfiles.isNotEmpty() &&
+            rendererProfiles.none { it.profileId == savedRendererProfileId }
+        val draftUnavailable = draftRendererProfileId != null &&
+            rendererProfiles.isNotEmpty() &&
+            rendererProfiles.none { it.profileId == draftRendererProfileId }
+        val hasUnsavedRendererChange = draftRendererProfileId != savedRendererProfileId
+        val savedRendererLabel = savedRendererProfileId?.let { id ->
+            rendererProfiles.firstOrNull { it.profileId == id }?.displayName ?: "Unavailable ($id)"
+        } ?: "Auto (Recommended)"
+        val canSaveRenderer = hasUnsavedRendererChange && !draftUnavailable
+
+        AetherSurfaceCard(
+            modifier = Modifier.fillMaxWidth(),
+            containerColor = AetherColors.SurfaceDark,
+            borderColor = when {
+                draftUnavailable || savedUnavailable -> AetherColors.ErrorDark.copy(alpha = 0.55f)
+                hasUnsavedRendererChange -> AetherColors.AccentCyan.copy(alpha = 0.65f)
+                else -> AetherColors.OutlineVariantDark
+            }
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Renderer Settings",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = AetherColors.OnSurfaceDark
+                    )
+                    Text(
+                        text = "Saved for ${item.versionId}: $savedRendererLabel",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AetherColors.OnSurfaceVariantDark,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                VersionStatusPill(
+                    text = when {
+                        draftUnavailable || savedUnavailable -> "Check Renderer"
+                        hasUnsavedRendererChange -> "Unsaved"
+                        else -> "Saved"
+                    },
+                    backgroundColor = when {
+                        draftUnavailable || savedUnavailable -> AetherColors.ErrorContainerDark
+                        hasUnsavedRendererChange -> AetherColors.PrimaryContainerDark
+                        else -> AetherColors.TierVerifiedBg
+                    },
+                    contentColor = when {
+                        draftUnavailable || savedUnavailable -> AetherColors.ErrorDark
+                        hasUnsavedRendererChange -> AetherColors.AccentCyan
+                        else -> AetherColors.TierVerifiedFg
+                    }
+                )
+            }
+
+            if (savedUnavailable || draftUnavailable) {
+                Text(
+                    text = "The previously saved renderer is unavailable on this device. Select Auto or a compatible renderer below and tap Save Renderer.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherColors.ErrorDark
+                )
+            }
+
+            if (rendererProfiles.isEmpty()) {
+                Text(
+                    text = "Using automatic device renderer detection. Refresh Settings -> Hardware if renderers have not loaded yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherColors.OnSurfaceVariantDark
+                )
+            } else {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Xs),
+                    verticalArrangement = Arrangement.spacedBy(AetherSpacing.Xs)
+                ) {
+                    val autoSelected = draftRendererProfileId == null
+                    FilterChip(
+                        selected = autoSelected,
+                        onClick = { onSelectDraftRenderer(null) },
+                        label = { Text("Auto (Default)", style = MaterialTheme.typography.labelMedium) },
+                        border = BorderStroke(
+                            1.dp,
+                            if (autoSelected) AetherColors.AccentCyan else AetherColors.OutlineVariantDark
+                        ),
+                        colors = FilterChipDefaults.filterChipColors(
+                            containerColor = AetherColors.SurfaceElevatedDark,
+                            labelColor = AetherColors.OnSurfaceVariantDark,
+                            selectedContainerColor = AetherColors.PrimaryContainerDark,
+                            selectedLabelColor = AetherColors.AccentCyan
+                        )
+                    )
+                    rendererProfiles.forEach { profile ->
+                        val isSelected = draftRendererProfileId == profile.profileId
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { onSelectDraftRenderer(profile.profileId) },
+                            label = {
+                                Text(
+                                    text = profile.displayName,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSelected) AetherColors.AccentCyan else AetherColors.OutlineVariantDark
+                            ),
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = AetherColors.SurfaceElevatedDark,
+                                labelColor = AetherColors.OnSurfaceVariantDark,
+                                selectedContainerColor = AetherColors.PrimaryContainerDark,
+                                selectedLabelColor = AetherColors.AccentCyan
+                            )
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(AetherSpacing.Sm),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AetherPrimaryButton(
+                    text = if (hasUnsavedRendererChange) "Save Renderer" else "Renderer Saved",
+                    onClick = { onSaveRenderer(draftRendererProfileId) },
+                    enabled = canSaveRenderer || (savedUnavailable && !draftUnavailable),
+                    modifier = Modifier.weight(1f)
+                )
+                if (hasUnsavedRendererChange) {
+                    AetherOutlinedButton(
+                        text = "Discard",
+                        onClick = onDiscardRendererChanges
+                    )
+                }
             }
         }
 

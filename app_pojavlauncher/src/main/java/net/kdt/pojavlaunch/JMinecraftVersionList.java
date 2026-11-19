@@ -25,6 +25,7 @@ public class JMinecraftVersionList {
         public String assets;
         public Map<String, MinecraftClientInfo> downloads;
         public String inheritsFrom;
+        public String jar;
         public JavaVersionInfo javaVersion;
         public DependentLibrary[] libraries;
         public LoggingConfig logging;

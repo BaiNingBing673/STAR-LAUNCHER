@@ -116,7 +116,13 @@ class CompatibilityEvaluator(
 
             (renderer.contains("vulkan") || renderer.contains("zink")) && !capabilities.hasVulkan ->
                 CompatibilityStatus.UNSUPPORTED to
-                    "Renderer ${target.rendererId} requires Vulkan, but device reports no Vulkan hardware support"
+                    "Renderer ${target.rendererId} requires Vulkan 1.1+, but device reports no Vulkan hardware support"
+
+            (renderer.contains("vulkan") || renderer.contains("zink")) &&
+                capabilities.vulkanVersion != null &&
+                !isVulkanVersionAtLeast(capabilities.vulkanVersion, 1, 1) ->
+                CompatibilityStatus.UNSUPPORTED to
+                    "Renderer ${target.rendererId} requires Vulkan 1.1+, detected Vulkan ${capabilities.vulkanVersion}"
 
             (renderer.contains("vulkan") || renderer.contains("zink")) &&
                 capabilities.gpuFamily == GpuFamily.ADRENO &&
@@ -127,7 +133,7 @@ class CompatibilityEvaluator(
             (renderer.contains("vulkan") || renderer.contains("zink")) &&
                 capabilities.gpuFamily != GpuFamily.ADRENO ->
                 CompatibilityStatus.EXPERIMENTAL to
-                    "${capabilities.gpuFamily} Vulkan/Zink support depends on system driver extensions (Turnip unavailable)"
+                    "${capabilities.gpuFamily} (${capabilities.gpuRenderer}) Vulkan/Zink relies on OEM system Vulkan ${capabilities.vulkanVersion ?: "1.1+"} driver (Turnip unavailable); MobileGlues is recommended for stability"
 
             (renderer.contains("ltw") || renderer.contains("mobileglues") || renderer.contains("opengles3")) &&
                 capabilities.glesMajorVersion < 3 ->
@@ -160,5 +166,15 @@ class CompatibilityEvaluator(
             detailsJson = "{\"modLoader\":\"${target.modLoaderType.name}\",\"requiredJava\":${target.requiredJavaMajor}}",
             evaluatedAt = evaluatedAt
         )
+    }
+
+    companion object {
+        fun isVulkanVersionAtLeast(vulkanVersion: String?, minMajor: Int, minMinor: Int): Boolean {
+            if (vulkanVersion.isNullOrBlank()) return false
+            val parts = vulkanVersion.trim().split('.')
+            val major = parts.getOrNull(0)?.toIntOrNull() ?: return false
+            val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+            return major > minMajor || (major == minMajor && minor >= minMinor)
+        }
     }
 }

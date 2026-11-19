@@ -267,6 +267,51 @@ class InstanceManager(
     }
 
     /**
+     * Registers an externally imported modpack directory as an isolated Room instance
+     * without modifying existing instances or moving files.
+     */
+    suspend fun registerExternalInstance(
+        name: String,
+        gameDirPath: String,
+        versionId: String?,
+        allocatedRamMb: Int = DEFAULT_RAM_MB
+    ): GameInstanceEntity = instanceMutationMutex.withLock {
+        val cleanName = name.trim().ifBlank { "Imported Modpack" }
+        val instanceId = idGenerator()
+        val now = clockMillis()
+        val capabilities = probeAndPersistDevice()
+        val version = resolveOrRegisterVersion(versionId)
+        val compatReport = compatibilityEvaluator.evaluate(
+            capabilities = capabilities,
+            target = CompatibilityTarget(
+                instanceId = instanceId,
+                versionId = version?.versionId ?: "",
+                requiredJavaMajor = version?.requiredJavaMajor ?: 8,
+                rendererId = "opengles_mobileglues",
+                modLoaderType = version?.modLoaderType ?: ModLoaderType.VANILLA,
+                selectedRuntimeId = null,
+                selectedRuntimeJavaMajor = null,
+                persistedVersionId = version?.versionId
+            )
+        )
+        val instance = GameInstanceEntity(
+            instanceId = instanceId,
+            name = cleanName,
+            gameDirPath = gameDirPath,
+            versionId = version?.versionId,
+            runtimeId = null,
+            rendererProfileId = null,
+            allocatedRamMb = allocatedRamMb.coerceAtLeast(MIN_RAM_MB),
+            customJvmArgs = null,
+            controlMapPath = null,
+            lastPlayedAt = null,
+            createdAt = now
+        )
+        gameInstanceDao.upsertInstanceWithCompatibility(instance, compatReport.theoretical)
+        instance
+    }
+
+    /**
      * Read-only registration of legacy `launcher_profiles.json` entries into Room.
      * Never modifies or deletes `launcher_profiles.json` or existing directories.
      */
